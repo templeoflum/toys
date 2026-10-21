@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>self-similar</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 8.5rem; text-align: right; }
+  .row span.val { width: 8rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(720px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 37rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>self-similar</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">detail</span><input type="range" id="depth" min="0" max="7" value="5"><span class="val" id="depthV"></span></div>
+    <div class="row"><span class="name">descend</span><input type="range" id="zoom" min="0" max="600" value="0"><span class="val" id="zoomV"></span></div>
+  </div>
+  <canvas id="cv" width="1360" height="1240"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">three copies of itself, each half the size &mdash; and each copy is three copies again, all the way down. drag <b>descend</b> to fall into the top corner: however deep you go, the same triangle is waiting. that is self-similarity: no scale is the true one, the form repeats at every zoom.</div>
+
+<script>
+'use strict';
+const MAXD = 10;
+
+let depth = 5;   // construction detail (levels drawn)
+let zoom = 0;    // continuous descent, in "levels" (each +1 = 2× into the apex)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const depthEl = document.getElementById('depth'), depthV = document.getElementById('depthV');
+const zoomEl = document.getElementById('zoom'), zoomV = document.getElementById('zoomV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// recursive Sierpinski fill. a = apex (top), b = bottom-left, c = bottom-right.
+function tri(a, b, c, level) {
+  if (level <= 0) {
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]);
+    ctx.closePath(); ctx.fill();
+    return;
+  }
+  const ab = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const ac = [(a[0] + c[0]) / 2, (a[1] + c[1]) / 2];
+  const bc = [(b[0] + c[0]) / 2, (b[1] + c[1]) / 2];
+  tri(a, ab, ac, level - 1);   // top    (holds the apex)
+  tri(ab, b, bc, level - 1);   // left
+  tri(ac, bc, c, level - 1);   // right
+}
+
+function geom(W, H, pad) {
+  const w = W - 2 * pad;
+  const h = w * Math.sqrt(3) / 2;
+  const top = (H - h) / 2;
+  const a = [W / 2, top];
+  const b = [W / 2 - w / 2, top + h];
+  const c = [W / 2 + w / 2, top + h];
+  return { a, b, c };
+}
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'), paper = css('--paper');
+  ctx.clearRect(0, 0, W, H);
+
+  const g = geom(W, H, 60);
+  const s = Math.pow(2, zoom);            // magnification about the apex
+  const renderDepth = Math.min(depth + Math.ceil(zoom), MAXD);
+
+  // main view: descend into the apex sub-triangle
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, W, H); ctx.clip();
+  ctx.translate(g.a[0], g.a[1]);
+  ctx.scale(s, s);
+  ctx.translate(-g.a[0], -g.a[1]);
+  ctx.fillStyle = ink;
+  tri(g.a, g.b, g.c, renderDepth);
+  ctx.restore();
+
+  // overview inset (top-right): the whole, with the descended region marked
+  const iW = W * 0.26, iPad = 18;
+  const ix = W - iW - iPad, iy = iPad, iH = iW * Math.sqrt(3) / 2 + 24;
+  ctx.fillStyle = paper; ctx.globalAlpha = 0.92;
+  ctx.fillRect(ix - 8, iy - 8, iW + 16, iH + 16);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(ix - 8, iy - 8, iW + 16, iH + 16);
+  // whole fractal, small
+  const gi = geom(iW, iW * Math.sqrt(3) / 2 + 20, 6);
+  const off = (p) => [p[0] + ix, p[1] + iy];
+  ctx.save();
+  ctx.translate(ix, iy);
+  ctx.fillStyle = ink;
+  tri(gi.a, gi.b, gi.c, Math.min(5, depth));
+  ctx.restore();
+  // marked region: the top sub-triangle you are inside (size 1/2^zoom)
+  const f = 1 / s;
+  const ma = gi.a;
+  const mb = [gi.a[0] + (gi.b[0] - gi.a[0]) * f, gi.a[1] + (gi.b[1] - gi.a[1]) * f];
+  const mc = [gi.a[0] + (gi.c[0] - gi.a[0]) * f, gi.a[1] + (gi.c[1] - gi.a[1]) * f];
+  ctx.save(); ctx.translate(ix, iy);
+  ctx.strokeStyle = mark; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(ma[0], ma[1]); ctx.lineTo(mb[0], mb[1]); ctx.lineTo(mc[0], mc[1]); ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('you are here', ix + iW / 2, iy + iH + 4);
+  ctx.textAlign = 'left';
+
+  const copies = Math.pow(3, depth);
+  const shrink = s >= 2 ? ('1/' + Math.round(s)) : '1';
+  readout.innerHTML = zoom > 0
+    ? 'descended <b>' + zoom.toFixed(1) + '</b> levels &mdash; you are inside a piece <b>' + shrink
+      + '</b> the width, and it is the same triangle'
+    : '<b>' + copies + '</b> triangles at detail ' + depth + ' &mdash; three copies, each half-size, at every level';
+}
+
+function refresh() {
+  depthV.textContent = 'level ' + depth;
+  zoomV.textContent = zoom > 0 ? ('×' + Math.round(Math.pow(2, zoom)) + ' in') : 'the whole';
+  draw();
+}
+
+depthEl.oninput = () => { depth = +depthEl.value; refresh(); };
+zoomEl.oninput = () => { zoom = zoomEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

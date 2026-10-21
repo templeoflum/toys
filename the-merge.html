@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the merge</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #fair.unfair { color: var(--mark); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the merge</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">input</span><input type="range" id="input" min="0" max="100" value="72" step="1"><span class="val" id="inputV"></span></div>
+    <div class="row"><span class="name">discipline</span>
+      <span class="modes">
+        <button id="bGreedy">greedy</button>
+        <button id="bZipper">zipper</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">three lanes fold into <b>one</b> at a merge point &mdash; a shared resource that serves only <b>one at a time</b>. its service rate is a fixed ceiling; feed in more than it can pass and the surplus <b>backs up</b> in the lanes. the <b>discipline</b> decides who pays: <b>greedy</b> always serves one priority lane first, so under overload a starved lane's backlog runs away &mdash; unfair; <b>zipper</b> strictly alternates, one from each lane in turn, so every lane gets an equal share and the piles stay balanced &mdash; fair. same ceiling, same equal arrivals, different <b>fairness</b>. the shared point made visible.<span class="cite">the zipper merge &middot; mutual exclusion on a shared resource &middot; throughput vs. fairness</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the merge: N lanes fold into one -----------------------------------
+// N parallel lanes feed toward one merge POINT — a shared resource that
+// serves exactly one item at a time. the point has a fixed SERVICE RATE
+// `serviceRate` (items/s): it opens a service slot every 1/serviceRate
+// seconds and admits ONE waiting item. items arrive across the lanes at
+// total rate `input`; each arrival lands in some lane's queue.
+//   throughput = items passed through the point per second  (≤ serviceRate)
+//   backlog[i] = items still waiting in lane i               (≥ 0)
+// when input > serviceRate the point can't keep up and the surplus piles
+// in the lanes. the DISCIPLINE picks which lane the next slot serves:
+//   GREEDY  — a fixed PRIORITY order: always serve the lowest-index non-empty
+//             lane first (lane 0 wins, then 1, then 2). the priority lane sails
+//             through; under overload the lowest-priority lane never gets a
+//             slot and STARVES — its backlog runs away. fair? no.
+//   ZIPPER  — serve lanes in strict rotation 0,1,2,0,1,2,… (skipping any
+//             empty lane but never breaking the turn order). every lane gets an
+//             equal 1/N share, so with equal arrivals the backlogs stay
+//             balanced. fair.
+// NOTE: arrivals are EQUAL across lanes — every lane is equally busy — so the
+// DISCIPLINE alone decides who pays. (with UNEQUAL arrivals the comparison
+// inverts: equal-share zipper can't match a hot lane, so isolate the policy by
+// keeping arrivals symmetric.)
+// FAIRNESS is read as the SPREAD of the lane backlogs: max−min. near 0 for
+// zipper under load (piles rise together), large for greedy (one lane runs
+// away while another stays served).
+//
+// VERIFY: conservation + mutual exclusion. at most ONE item passes the
+// point per service slot, so throughput never exceeds serviceRate. items
+// are conserved: totalOut = totalIn − Σ backlog[i] at every instant (an
+// item is either passed, still queued, or in transit — nothing created or
+// lost). and under ZIPPER the served-lane sequence cycles strictly through
+// the lanes in order (skipping only empties) — the turn pointer advances by
+// one lane per served slot and wraps. those three are the load-bearing
+// checks and the sim is built to satisfy them exactly.
+const N_LANES = 3;
+const SERVICE_RATE = 6.0;   // items the merge point can pass per second (the ceiling)
+
+// slider is 0..100; scaled to an abstract total arrival rate below.
+let inputF = 0.72;          // total incoming rate, as a fraction of the full range
+const IN_MAX = 12.0;        // input at full slider (items/s) — can exceed SERVICE_RATE
+
+let mode = 'greedy';        // 'greedy' (fixed priority, lowest lane first) | 'zipper' (strict rotation)
+
+// per-lane state. queue = count still waiting (fractional — a continuous
+// backlog model, like restriction's pile). arrivals are EQUAL across lanes —
+// every lane equally busy — so the DISCIPLINE alone (not the arrivals) decides
+// who starves. that isolates the fairness difference to the policy.
+const LANE_BIAS = [1/3, 1/3, 1/3];     // each lane receives an equal share of the input
+let queue = [0, 0, 0];      // backlog per lane, in items (never < 0)
+let turn = 0;               // zipper's rotation pointer — whose turn is next
+
+// service accounting: the point admits items in discrete slots at
+// SERVICE_RATE. `slotAccum` fills at serviceRate/s; each whole unit is one
+// admitted item. we track throughput as a smoothed rate for the readout.
+let slotAccum = 0;
+let totalIn = 0, totalOut = 0;   // conservation counters (items)
+let thru = 0;                    // smoothed throughput estimate (items/s)
+
+// items in transit through the point, for the drawn stream (pure decoration —
+// the counts come from the queues). each carries its source lane + a 0..1
+// progress along the outgoing lane.
+let transit = [];
+
+// the INCOMING streams — one crawling dot line per lane, arriving toward the
+// merge point. pure decoration: the number of dots shown on a lane is read
+// READ-ONLY from queue[i] (more backlog → more cars backed up the lane), never
+// written back. each dot carries a 0..1 position along its lane (0 = lane
+// start, 1 = merge point) and crawls toward 1, bunching up at the point when
+// the backlog is large. filled/reconciled against queue[i] inside drawScene.
+const INCOMING_CAP = 12;               // max dots drawn per lane — kept readable
+let incoming = [[], [], []];           // per-lane arrays of { p } crawling toward the point
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const inputEl = document.getElementById('input'), inputV = document.getElementById('inputV');
+const readout = document.getElementById('readout').firstElementChild;
+const bGreedy = document.getElementById('bGreedy');
+const bZipper = document.getElementById('bZipper');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// derived merge state for the live input.
+function mergeState() {
+  const input = inputF * IN_MAX;                 // total arrival rate
+  const totalQ = queue[0] + queue[1] + queue[2]; // total waiting across lanes
+  const qMax = Math.max(queue[0], queue[1], queue[2]);
+  const qMin = Math.min(queue[0], queue[1], queue[2]);
+  const spread = qMax - qMin;                    // the fairness measure (imbalance)
+  const capped = input > SERVICE_RATE + 1e-9;    // is the point the ceiling?
+  return { input, totalQ, spread, capped };
+}
+
+// --- the scrolling fairness trace ---------------------------------------
+// a rolling record of the backlog SPREAD (max−min lane) over the last WINDOW
+// seconds. newest at the right, like feedback's timeline. under zipper it
+// hugs the floor (piles rise together, spread ≈ 0); under greedy it climbs as
+// one lane runs away — fairness drawn as a rising gap.
+let simT = 0;
+const WINDOW = 12;          // visible trace span (seconds)
+let trace = [];             // {t, spread, unfair} samples
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+// choose which lane the next service slot admits, per the discipline.
+// returns a lane index with queue > 0, or -1 if all lanes are empty.
+function pickLane() {
+  if (mode === 'zipper') {
+    // strict rotation: from `turn`, take the first non-empty lane in order,
+    // then advance the pointer past it. the served sequence cycles 0,1,2,0…
+    // skipping only empties — the turn order is never broken.
+    for (let step = 0; step < N_LANES; step++) {
+      const i = (turn + step) % N_LANES;
+      if (queue[i] > 1e-9) {
+        turn = (i + 1) % N_LANES;   // next turn is the lane AFTER the one served
+        return i;
+      }
+    }
+    return -1;
+  }
+  // greedy: a fixed PRIORITY order — serve the lowest-index non-empty lane.
+  // lane 0 always wins the point when it has anything waiting, then lane 1,
+  // then lane 2. no rotation, no turn-taking: under overload the low-priority
+  // lane never gets a slot and starves — that is the unfairness.
+  for (let i = 0; i < N_LANES; i++) {
+    if (queue[i] > 1e-9) return i;
+  }
+  return -1;
+}
+
+function stepSim(dt) {
+  simT += dt;
+  const input = inputF * IN_MAX;
+
+  // arrivals: the input feeds the lanes at their equal share. each lane's
+  // queue integrates its share — nothing is created outside this.
+  for (let i = 0; i < N_LANES; i++) {
+    const add = input * LANE_BIAS[i] * dt;
+    queue[i] += add;
+    totalIn += add;
+  }
+
+  // service: the point admits items in whole slots at SERVICE_RATE. fill the
+  // accumulator; each whole unit is one admitted item. mutual exclusion is
+  // structural — one slot admits one item from one chosen lane, never more.
+  slotAccum += SERVICE_RATE * dt;
+  let served = 0;
+  while (slotAccum >= 1) {
+    const lane = pickLane();
+    if (lane < 0) { slotAccum = 0; break; }   // nothing waiting → no slot spent
+    // admit exactly one item from the chosen lane. conservation: it leaves
+    // the queue and joins totalOut, one-for-one.
+    const take = Math.min(1, queue[lane]);
+    queue[lane] -= take;
+    if (queue[lane] < 0) queue[lane] = 0;
+    totalOut += take;
+    served += take;
+    slotAccum -= 1;
+    // spawn a transit item for the drawn stream (decoration)
+    transit.push({ lane, p: 0 });
+  }
+
+  // smoothed throughput estimate (items/s) for the readout meter.
+  const instRate = dt > 0 ? served / dt : 0;
+  thru += (instRate - thru) * Math.min(1, dt * 4);
+
+  const st = mergeState();
+  trace.push({ t: simT, spread: st.spread, unfair: st.spread > 1.0 });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the lanes, the merge point and the outgoing lane. bottom band:
+// the spread(t) trace.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.42);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 110;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// spread plot vertical span — headroom above a comfortably large imbalance so
+// a runaway greedy lane sits inside the band.
+const SPREAD_MAX = 30.0;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a spread in [0..SPREAD_MAX] to a y in the plot band (up = more unfair)
+function yOfSpread(s) {
+  const frac = Math.max(0, Math.min(1, s / SPREAD_MAX));
+  return PLOT_TOP + PLOT_H - frac * PLOT_H;
+}
+
+// --- top band: the lanes, the merge point, the outgoing lane ------------
+// three lanes on the left converge to a single merge POINT a bit right of
+// centre, then one outgoing lane exits right. each lane shows a STREAM of
+// crawling dots arriving toward the point — the cars coming IN — as many as
+// its queue is backed up (--mark when it's the runaway); the frontmost sits
+// just before the point; transit items then stream out along the exit as one
+// lane. the incoming counts are read-only from queue[i].
+const laneY = [];            // filled at first draw from the geometry
+function drawScene(dt) {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  const st = mergeState();
+  const bandTop = SCENE_TOP + 20, bandBot = SCENE_TOP + SCENE_H - 90;
+  const mergeX = Math.round(W * 0.56);           // the shared point
+  const laneLeft = PAD + 60;                     // where lanes begin
+  const exitX = W - PAD - 40;                    // the outgoing lane's exit
+  const mergeY = (bandTop + bandBot) / 2;        // the point sits mid-band
+
+  // lane vertical positions — evenly spread across the band.
+  laneY.length = 0;
+  for (let i = 0; i < N_LANES; i++) {
+    laneY.push(bandTop + (bandBot - bandTop) * (i + 0.5) / N_LANES);
+  }
+
+  // the converging lane lines (each lane → the merge point) and the single
+  // outgoing lane. --ink, the pipe walls of the merge.
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  for (let i = 0; i < N_LANES; i++) {
+    ctx.beginPath(); ctx.moveTo(laneLeft, laneY[i]); ctx.lineTo(mergeX, mergeY); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(mergeX, mergeY); ctx.lineTo(exitX, mergeY); ctx.stroke();
+
+  // the merge POINT — a filled ink node, the shared resource. it pulses to
+  // --mark on the frames it admits an item (one at a time).
+  const recent = transit.length && transit[transit.length - 1].p < 0.06;
+  ctx.fillStyle = recent ? mark : ink;
+  ctx.beginPath(); ctx.arc(mergeX, mergeY, 16, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('merge point', mergeX, mergeY + 40);
+  ctx.fillText('serves 1 at a time', mergeX, mergeY + 62);
+
+  // per-lane INCOMING streams — a line of crawling dots on each converging
+  // lane, arriving toward the merge point. the number of dots shown is read
+  // READ-ONLY from queue[i]: more backlog → more cars queued up the lane
+  // (capped at INCOMING_CAP so it stays readable). the runaway lane (the
+  // current max under load) warms to --mark so the eye reads the unfairness.
+  const qMaxLane = (queue[0] >= queue[1] && queue[0] >= queue[2]) ? 0
+                 : (queue[1] >= queue[2] ? 1 : 2);
+  // the crawl speed of an arriving dot as a fraction of the lane per second —
+  // a slow inflow so the eye reads cars streaming IN toward the point.
+  const inSpeed = 0.28 + inputF * 0.22;
+  // dots stop this far short of the point so the frontmost sits just before it,
+  // and stack behind it (the queue backing up the lane).
+  const frontStop = 0.94;              // frontmost dot's position along the lane
+  const dotGap = 0.062;                // spacing between queued dots, in lane fraction
+  for (let i = 0; i < N_LANES; i++) {
+    const y = laneY[i];
+    const hot = st.capped && i === qMaxLane && st.spread > 1.0;
+    const lane = incoming[i];
+
+    // reconcile the drawn dot count to queue[i] (read-only). round up so any
+    // non-trivial backlog shows at least one arriving car; cap for readability.
+    const want = Math.max(0, Math.min(INCOMING_CAP, Math.ceil(queue[i] - 1e-6)));
+    while (lane.length < want) lane.push({ p: 0 });   // a fresh car enters at the lane start
+    while (lane.length > want) lane.pop();             // fewer waiting → drop the rearmost
+
+    // crawl every dot toward the point, then settle it into its queue slot: the
+    // k-th dot from the front cannot pass frontStop − k·dotGap, so the line
+    // bunches up (queues) behind the point when the backlog is large.
+    for (let k = 0; k < lane.length; k++) {
+      const cap = frontStop - k * dotGap;              // this dot's stack position
+      lane[k].p = Math.min(cap, lane[k].p + inSpeed * dt);
+      if (lane[k].p < 0) lane[k].p = 0;
+      const x = laneLeft + lane[k].p * (mergeX - laneLeft);
+      const yy = laneY[i] + lane[k].p * (mergeY - laneY[i]);
+      ctx.fillStyle = hot ? mark : ink;
+      ctx.globalAlpha = hot ? 0.9 : 0.75;
+      ctx.beginPath(); ctx.arc(x, yy, 7, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // lane label + its live backlog count
+    ctx.fillStyle = hot ? mark : faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+    ctx.fillText('lane ' + i + '  ' + queue[i].toFixed(1), laneLeft - 6, y + 6);
+  }
+
+  // the transit stream on the outgoing lane. each item runs 0→1 from the
+  // point to the exit; its colour keeps its source lane's shade so the eye
+  // can read which lane the merge is favouring downstream.
+  const outSpeed = 0.5 + thru * 0.06;
+  for (const it of transit) {
+    it.p += outSpeed * dt;
+    const x = mergeX + it.p * (exitX - mergeX);
+    ctx.fillStyle = ink;
+    ctx.beginPath(); ctx.arc(x, mergeY, 7, 0, TAU); ctx.fill();
+  }
+  transit = transit.filter(it => it.p <= 1);
+
+  // labels: input arriving across the lanes, throughput leaving the exit.
+  ctx.fillStyle = ink; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('input ' + st.input.toFixed(1), laneLeft, bandTop - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText('throughput ' + thru.toFixed(1), exitX, bandTop - 6);
+
+  // a throughput meter under the scene: the full bar is the input rate, the
+  // filled --ink portion is what actually passes, a --faint tick marks the
+  // service-rate ceiling the fill cannot cross.
+  const mY = bandBot + 46, mL = PAD + 40, mR = W - PAD - 40, mW = mR - mL;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(mL, mY, mW, 30);
+  const gFrac = r => Math.max(0, Math.min(1, r / IN_MAX));
+  // throughput fill (--ink) — never past the service rate
+  ctx.fillStyle = ink;
+  ctx.fillRect(mL + 1, mY + 1, (mW - 2) * gFrac(thru), 28);
+  // the excess portion (--mark) — the part of the input the point can't pass
+  if (st.capped) {
+    const xL = mL + 1 + (mW - 2) * gFrac(thru);
+    const xW = (mW - 2) * (gFrac(st.input) - gFrac(thru));
+    if (xW > 0) {
+      ctx.fillStyle = mark; ctx.globalAlpha = 0.5;
+      ctx.fillRect(xL, mY + 1, xW, 28);
+      ctx.globalAlpha = 1;
+    }
+  }
+  // the service-rate tick (--faint) — the ceiling the fill cannot cross
+  const capX = mL + gFrac(SERVICE_RATE) * mW;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(capX, mY - 8); ctx.lineTo(capX, mY + 38); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('service rate', capX, mY - 14);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = ink;
+  ctx.fillText('throughput meter', mL, mY + 52);
+}
+
+// --- bottom band: the backlog spread over time --------------------------
+// spread(t) scrolling right-to-left, newest at the right. it hugs the floor
+// (0) while the piles stay balanced — zipper keeps every lane even — and
+// climbs the moment one lane runs away under greedy. the trace is the running
+// UNFAIRNESS: flat and fair while the turn rotates, a rise once the priority
+// lane starves the others.
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('backlog spread (max−min lane) over the last ' + WINDOW + 's — flat while fair, climbing once one lane runs away', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the zero floor — the balanced line the spread pins to while every lane is
+  // served in turn.
+  const zeroY = yOfSpread(0);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, zeroY); ctx.lineTo(PLOT_RIGHT, zeroY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('balanced floor  spread = 0  (lanes even)', PLOT_LEFT + 6, zeroY - 8);
+
+  // the spread trace — flat on the floor while balanced, rising once one lane
+  // runs away. drawn --faint while fair, --mark while the spread is wide, so
+  // the two regimes read distinctly.
+  ctx.lineWidth = 2;
+  let prev = null;
+  for (const p of trace) {
+    const px = xOfTime(p.t), py = yOfSpread(p.spread);
+    if (prev) {
+      ctx.strokeStyle = p.unfair ? mark : faint;
+      ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(px, py); ctx.stroke();
+    }
+    prev = { x: px, y: py };
+  }
+
+  // the live head dot at the right edge
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = p.unfair ? mark : faint;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfSpread(p.spread), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw(dt) {
+  ctx.clearRect(0, 0, W, H);
+  drawScene(dt);
+  drawTrace();
+}
+
+// --- regime read: is the point the ceiling, and is it fair? -------------
+function regimeOf() {
+  const st = mergeState();
+  if (st.capped && st.spread > 1.0) return 'starving — the point is the ceiling and one lane runs away';
+  if (st.capped) return 'capped — input outruns the point, but the piles stay balanced';
+  if (st.totalQ > 0.1) return 'draining — the point keeps up, the lanes work down';
+  return 'clear — the point carries the whole input, nothing backs up';
+}
+
+function updateReadout() {
+  const st = mergeState();
+  const unfair = st.spread > 1.0;
+
+  readout.innerHTML =
+    'input <b>' + st.input.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'service rate <b>' + SERVICE_RATE.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'throughput <b>' + thru.toFixed(1) + '</b>'
+    + '<br>backlog  lane0 <b>' + queue[0].toFixed(1) + '</b> &nbsp; lane1 <b>' + queue[1].toFixed(1) + '</b> &nbsp; lane2 <b>' + queue[2].toFixed(1) + '</b>'
+    + '<br>fairness (spread max−min) <span id="fair"' + (unfair ? ' class="unfair"' : '') + '>' + st.spread.toFixed(1) + (unfair ? '  UNFAIR' : '  fair') + '</span>'
+    + '<br>discipline <b>' + (mode === 'zipper' ? 'zipper (alternate)' : 'greedy (priority lane)') + '</b> &nbsp;·&nbsp; throughput ≤ service rate'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  const st = mergeState();
+  inputV.textContent = st.input.toFixed(1);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset the queues. pushing the
+// input past the service rate starts the piles growing; easing it back lets
+// them drain from wherever they currently sit.
+inputEl.oninput = () => { inputF = inputEl.value / 100; refresh(); };
+
+// the discipline toggle does NOT reset the queues either — flip it under load
+// and watch a running-away greedy lane pull back into balance under zipper,
+// or a balanced zipper start to skew once greedy takes over.
+function setMode(m) {
+  mode = m;
+  bGreedy.classList.toggle('on', m === 'greedy');
+  bZipper.classList.toggle('on', m === 'zipper');
+  refresh();
+}
+bGreedy.onclick = () => setMode('greedy');
+bZipper.onclick = () => setMode('zipper');
+
+// --- the live loop: small fixed sub-steps for a stable integration -------
+// SLICE small so the arrival integral and the discrete service slots resolve
+// evenly — one slot admits one item, and dt small keeps the accumulator from
+// swallowing several slots in a single frame, so the turn order (zipper) and
+// the priority pick (greedy) fire per-slot as intended.
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const dtFrame = elapsed;   // for the transit/scene animation
+  const SLICE = 0.01;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw(dtFrame);
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+setMode('greedy');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

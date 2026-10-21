@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rotameter</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>rotameter</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">flow Q</span><input type="range" id="flow" min="0" max="100" value="45" step="1"><span class="val" id="flowV"></span></div>
+    <div class="row"><span class="name">float weight</span>
+      <span class="modes">
+        <button id="bLight">light</button>
+        <button id="bMid">mid</button>
+        <button id="bHeavy">heavy</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">fluid</span>
+      <span class="modes">
+        <button id="bGas">gas</button>
+        <button id="bWater">water</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">fluid flows <b>up</b> a tube that <b>widens</b> toward the top, past a <b>float</b> that would otherwise sink. the flow squeezes through the ring-shaped gap around the float and drags it upward; the float rises until that gap is wide enough to drop the flow speed to where the <b>drag</b> exactly balances the float's net (submerged) <b>weight</b>. net weight is constant, so the balance fixes the gap area &mdash; and in a linearly-tapered tube the gap area is proportional to height, so the float settles at a <b>height &prop; flow</b>. read Q off the scale at the float's <b>top edge</b>. a heavier float, or a lighter fluid, needs more flow to reach the same mark.<span class="cite">the rotameter (variable-area flow meter) &middot; Karl K&uuml;ppers 1908 &middot; drag balances net weight, height reads flow &middot; field: fluid mechanics / flow measurement</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- rotameter (variable-area flow meter) -------------------------------
+// a float sits in a vertical tube that tapers WIDER toward the top. fluid
+// flows up, squeezing through the annular (ring) gap between the float and
+// the tube wall. the flow drags the float up; the float rises until the gap
+// is wide enough that the upstream/downstream pressure drop across it — the
+// drag force on the float — exactly balances the float's net weight:
+//   drag  =  (ρ_float − ρ_fluid)·V_float·g   =  W_net   (CONSTANT)
+// net weight does not change with height, so at equilibrium the annular gap
+// must always pass the flow Q at the SAME balance pressure drop. that fixes
+// the gap AREA as a function of Q: at the fixed balance velocity through the
+// gap, Q = v_balance · A_gap, so  A_gap ∝ Q.
+//
+// TAPER → LINEAR SCALE. the tube widens linearly with height, so the annular
+// gap area grows linearly with the float height h. combine:
+//   A_gap ∝ Q   and   A_gap ∝ h   ⇒   h ∝ Q.
+// the float height is LINEAR in flow (the reason a rotameter scale is evenly
+// spaced). we code this mapping explicitly below as h = k·Q.
+//
+// VERIFY (load-bearing): with a fixed float+fluid the height is exactly a
+// linear function of Q through the origin, h = (Hspan/Qmax)·Q:
+//   · Q = 0        → h = 0     (float rests at the bottom stop)
+//   · Q doubles    → h doubles (h(2Q) = 2·h(Q))
+//   · Q = Qmax     → h = Hspan (float at the top of the graduated span)
+// changing the float weight or fluid density rescales W_net, hence the
+// balance velocity, hence the constant k — a HEAVIER float or LIGHTER fluid
+// needs MORE flow for the same height (the calibration shifts, honestly).
+// the drawn float position and the readout Q both come from h = k·Q — that
+// is the check. h is clamped to the tube for drawing; the readout Q is the
+// slider value un-clamped.
+const G = 9.81;   // m/s² (folds into the balance; shown for honesty)
+
+// float weights — net submerged weight W_net in arbitrary balanced units.
+// heavier float ⇒ larger W_net ⇒ larger balance velocity ⇒ needs more flow
+// to reach a given height (smaller k). the numbers are the relative weight;
+// the calibration constant k scales as 1/sqrt(W_net) (drag ∝ v², v ∝ Q).
+const FLOATS = {
+  light: { w: 0.6, label: 'light' },
+  mid:   { w: 1.0, label: 'mid' },
+  heavy: { w: 1.7, label: 'heavy' },
+};
+// fluids — by density. a DENSER fluid gives more buoyancy + more drag per
+// unit velocity, so it needs LESS flow to lift the same float (larger k).
+const FLUIDS = {
+  gas:   { rho: 0.25, label: 'gas' },
+  water: { rho: 1.00, label: 'water' },
+};
+
+let Qpct  = 45;        // flow Q, percent of full scale (0..100)
+let fkey  = 'mid';     // float weight key
+let flkey = 'water';   // fluid key
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const flowEl = document.getElementById('flow'), flowV = document.getElementById('flowV');
+const readout = document.getElementById('readout').firstElementChild;
+const bLight = document.getElementById('bLight');
+const bMid = document.getElementById('bMid');
+const bHeavy = document.getElementById('bHeavy');
+const bGas = document.getElementById('bGas');
+const bWater = document.getElementById('bWater');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// the flow as a fraction of full scale (0..1), and the live float + fluid.
+function qFrac() { return Qpct / 100; }
+function wNet()  { return FLOATS[fkey].w; }
+function rhoF()  { return FLUIDS[flkey].rho; }
+
+// --- the calibration constant k -----------------------------------------
+// at balance the gap velocity is fixed by W_net and ρ_fluid: v_bal ∝
+// sqrt(W_net / ρ_fluid) (drag ∝ ρ·v²·A balances W_net at the gap). height is
+// h = k·Q, and a faster balance velocity means a given Q needs a smaller gap
+// (lower float) → smaller k. so k ∝ 1 / v_bal ∝ sqrt(ρ_fluid / W_net).
+// kRef is the mid-float / water calibration, normalized so full flow lands
+// the float at the top of the graduated span at those defaults.
+const kRef = Math.sqrt(1.00 / 1.0);     // ρ_water / w_mid, the reference
+function kCal() { return Math.sqrt(rhoF() / wNet()) / kRef; }
+
+// the graduated span in "scale units" (0..100), and the float height as a
+// fraction of that span. hFrac is LINEAR in Q (the rotameter's even scale),
+// rescaled by the calibration k. clamped to [0,1] for the drawing; the
+// readout reports the un-clamped Q directly off the slider.
+function hFrac() { return qFrac() * kCal(); }   // h/Hspan = k·Q, may exceed 1
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// the tapered tube stands left-of-centre; the graduated scale runs beside it.
+const TUBE_CX   = Math.round(W * 0.42);   // tube centre x
+const TUBE_TOP  = 90;                       // top of the tube (widest)
+const TUBE_BOT  = H - 150;                  // bottom of the tube (narrowest)
+const BORE_BOT  = 70;                        // bore half-width at the bottom
+const BORE_TOP  = 220;                       // bore half-width at the top (wider)
+const FLOAT_HW  = 54;                        // float half-width (a fixed bob)
+// the graduated span sits inside the tube, a margin off each end so the float
+// body stays fully inside the glass at the extremes.
+const SPAN_TOP  = TUBE_TOP + 70;
+const SPAN_BOT  = TUBE_BOT - 70;
+
+// bore half-width at a given y (linear taper: narrow at bottom, wide at top).
+function boreAt(y) {
+  const t = (TUBE_BOT - y) / (TUBE_BOT - TUBE_TOP);   // 0 at bottom, 1 at top
+  return BORE_BOT + t * (BORE_TOP - BORE_BOT);
+}
+// map a height fraction (0 = span bottom, 1 = span top) to a screen y.
+function yOfHFrac(f) {
+  const ff = Math.max(0, Math.min(1, f));
+  return SPAN_BOT - ff * (SPAN_BOT - SPAN_TOP);
+}
+
+// --- the animated float: eases toward its balance height ----------------
+// yFloat tracks the balance height yOfHFrac(hFrac()) so a slider move shows
+// the float rising or settling to its new balance rather than snapping.
+let yFloat = yOfHFrac(hFrac());
+
+// --- the scene: tapered tube, flow, float, graduated scale --------------
+// the tube tapers wider toward the top. fluid flows up (arrows), squeezing
+// through the annular gap around the float. the float sits at its balance
+// height; its TOP EDGE is the reading edge against the graduated scale.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const cx = TUBE_CX;
+  const fy = yFloat;                       // float centre y (drawn/eased)
+  const fBore = boreAt(fy);                // bore half-width at the float
+
+  // the fluid column inside the tube — a soft fill from bottom to top
+  ctx.fillStyle = shade;
+  ctx.beginPath();
+  ctx.moveTo(cx - boreAt(TUBE_BOT), TUBE_BOT);
+  ctx.lineTo(cx - boreAt(TUBE_TOP), TUBE_TOP);
+  ctx.lineTo(cx + boreAt(TUBE_TOP), TUBE_TOP);
+  ctx.lineTo(cx + boreAt(TUBE_BOT), TUBE_BOT);
+  ctx.closePath(); ctx.fill();
+
+  // upward flow arrows below and around the float — the current lifting it.
+  // more flow → more/faster arrows (denser rank). they thread the annular gap.
+  ctx.strokeStyle = mark; ctx.fillStyle = mark; ctx.lineWidth = 3;
+  const rows = Math.round(3 + qFrac() * 7);
+  for (let r = 0; r < rows; r++) {
+    const ay = TUBE_BOT - 40 - r * ((TUBE_BOT - fy) / (rows + 1));
+    if (ay < fy + FLOAT_HW + 20) continue;    // stop just under the float
+    const bw = boreAt(ay);
+    for (const off of [-bw * 0.55, 0, bw * 0.55]) {
+      arrow(cx + off, ay, cx + off, ay - 34);
+    }
+  }
+  // the two jets squeezing through the annular gap beside the float
+  const gap = fBore - FLOAT_HW;               // the ring gap half-width (per side)
+  ctx.lineWidth = 3;
+  for (const s of [-1, 1]) {
+    const gx = cx + s * (FLOAT_HW + Math.max(6, gap / 2));
+    arrow(gx, fy + 8, gx, fy - FLOAT_HW - 24);
+  }
+
+  // the float — a plumb bob with a reading rim at its TOP EDGE.
+  const ftop = fy - FLOAT_HW, fbot = fy + FLOAT_HW;
+  ctx.fillStyle = pick; ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx, fbot + 14);                  // pointed bottom
+  ctx.lineTo(cx - FLOAT_HW, fy);
+  ctx.lineTo(cx - FLOAT_HW, ftop);
+  ctx.lineTo(cx + FLOAT_HW, ftop);
+  ctx.lineTo(cx + FLOAT_HW, fy);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  // the reading rim — the float's TOP EDGE, the line the scale is read at
+  ctx.strokeStyle = mark; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(cx - FLOAT_HW - 6, ftop); ctx.lineTo(cx + FLOAT_HW + 6, ftop); ctx.stroke();
+
+  // the tube outline — tapered walls, open at both ends
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx - boreAt(TUBE_BOT), TUBE_BOT);
+  ctx.lineTo(cx - boreAt(TUBE_TOP), TUBE_TOP);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + boreAt(TUBE_BOT), TUBE_BOT);
+  ctx.lineTo(cx + boreAt(TUBE_TOP), TUBE_TOP);
+  ctx.stroke();
+
+  // the inlet + outlet stubs, top narrow / bottom feed
+  ctx.strokeStyle = faint; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(cx - boreAt(TUBE_BOT), TUBE_BOT); ctx.lineTo(cx - boreAt(TUBE_BOT), TUBE_BOT + 40); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + boreAt(TUBE_BOT), TUBE_BOT); ctx.lineTo(cx + boreAt(TUBE_BOT), TUBE_BOT + 40); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('flow in', cx, TUBE_BOT + 66);
+  ctx.fillText('flow out', cx, TUBE_TOP - 20);
+
+  // the net-weight arrow on the float (down) + the drag arrow (up) — the two
+  // that balance at rest. drawn to the side so the float body stays clear.
+  const bx = cx - BORE_TOP - 80;
+  ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineWidth = 3;
+  arrow(bx, fy - 40, bx, fy + 40);            // net weight, down
+  ctx.fillStyle = ink; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('W_net', bx - 12, fy + 6);
+  ctx.strokeStyle = mark; ctx.fillStyle = mark;
+  arrow(bx + 30, fy + 40, bx + 30, fy - 40);  // drag, up
+  ctx.fillStyle = mark; ctx.textAlign = 'left';
+  ctx.fillText('drag', bx + 42, fy + 6);
+
+  // --- the graduated scale beside the tube (flow units 0..100) ----------
+  // ticks every 10 units up the right of the tube, labelled; a --mark tick at
+  // the float's TOP EDGE reads Q straight off the scale. the scale is even
+  // (linear) because h ∝ Q.
+  const scaleX = cx + BORE_TOP + 60;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(scaleX, yOfHFrac(0)); ctx.lineTo(scaleX, yOfHFrac(1)); ctx.stroke();
+  ctx.font = '18px "Courier New", monospace';
+  for (let u = 0; u <= 100; u += 10) {
+    const ty = yOfHFrac(u / 100);
+    const major = (u % 50 === 0);
+    ctx.strokeStyle = faint; ctx.lineWidth = major ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(scaleX, ty); ctx.lineTo(scaleX + (major ? 26 : 14), ty); ctx.stroke();
+    ctx.fillStyle = faint; ctx.textAlign = 'left';
+    if (major || u % 10 === 0) ctx.fillText(String(u), scaleX + 34, ty + 6);
+  }
+  // the live reading marker — at the float's TOP EDGE (its reading rim)
+  const my = ftop;
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(cx + FLOAT_HW + 6, my); ctx.lineTo(scaleX + 30, my); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  const offScale = hFrac() > 1;
+  ctx.fillText('Q = ' + Qpct.toFixed(0) + (offScale ? '  (off scale)' : ''), scaleX + 70, my + 7);
+
+  // a quiet label of the live float + fluid
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('float: ' + FLOATS[fkey].label + ' (W_net = ' + wNet().toFixed(2) + ')'
+             + '   ·   fluid: ' + FLUIDS[flkey].label + ' (ρ = ' + rhoF().toFixed(2) + ')', PAD + 6, 44);
+}
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  arrowHead(x1, y1, Math.cos(a), Math.sin(a));
+}
+function arrowHead(x, y, dx, dy) {
+  const s = 13, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+}
+
+// --- regime read: rising / settling / balanced --------------------------
+function regimeOf() {
+  const target = yOfHFrac(hFrac());
+  const d = yFloat - target;               // screen y: positive means below target
+  if (Qpct <= 0.01) return 'no flow — float rests on the bottom stop';
+  if (hFrac() > 1) return 'off scale — flow exceeds this float/fluid range';
+  if (Math.abs(d) < 1.5) return 'balanced — drag on the float equals its net weight';
+  return d > 0 ? 'rising — drag exceeds the float weight' : 'settling — float weight exceeds the drag';
+}
+
+function updateReadout() {
+  const k = kCal();
+  const hf = hFrac();
+  readout.innerHTML =
+    'flow Q <b>' + Qpct.toFixed(0) + '</b> &nbsp;·&nbsp; '
+    + 'float <b>' + FLOATS[fkey].label + '</b> (W_net <b>' + wNet().toFixed(2) + '</b>) &nbsp;·&nbsp; '
+    + 'fluid <b>' + FLUIDS[flkey].label + '</b> (ρ <b>' + rhoF().toFixed(2) + '</b>)'
+    + '<br>at balance: drag = W_net = (ρ_float − ρ_fluid)·V·g = <b>constant</b> → gap area sets to pass Q'
+    + '<br>linear taper → gap area ∝ height, so height ∝ flow: h = k·Q, k = √(ρ/W_net) = <b>' + k.toFixed(3) + '</b>'
+    + '<br>float height <b>' + (Math.min(1, hf) * 100).toFixed(0) + '% of span</b>'
+    + (hf > 1 ? ' (float pinned at top — off scale)' : '')
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  flowV.textContent = Qpct.toFixed(0);
+  updateReadout();
+}
+
+// slider changes take effect live — the balance height jumps and the drawn
+// float eases toward it. moving Q raises/lowers the float; the readout Q
+// always reads the exact slider value, and the height reads h = k·Q.
+flowEl.oninput = () => { Qpct = +flowEl.value; refresh(); };
+
+function setFloat(f) {
+  fkey = f;
+  bLight.classList.toggle('on', f === 'light');
+  bMid.classList.toggle('on', f === 'mid');
+  bHeavy.classList.toggle('on', f === 'heavy');
+  refresh();
+}
+function setFluid(f) {
+  flkey = f;
+  bGas.classList.toggle('on', f === 'gas');
+  bWater.classList.toggle('on', f === 'water');
+  refresh();
+}
+bLight.onclick = () => setFloat('light');
+bMid.onclick = () => setFloat('mid');
+bHeavy.onclick = () => setFloat('heavy');
+bGas.onclick = () => setFluid('gas');
+bWater.onclick = () => setFluid('water');
+
+// reset — flow back to mid, mid float, water, float snapped to its balance
+// height, watch the ease from there on the next move.
+bReset.onclick = () => {
+  Qpct = 45; flowEl.value = 45;
+  fkey = 'mid'; flkey = 'water';
+  yFloat = yOfHFrac(hFrac());
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  setFloat('mid'); setFluid('water');
+};
+
+// --- the live loop: ease the drawn float toward its balance height -------
+// yFloat approaches yOfHFrac(hFrac()) with a first-order relax, so a slider
+// move shows the float travelling to its new balance. the readout always
+// reports the exact invariant (Q from the slider, h = k·Q), not the eased y.
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;                 // guard against tab-switch jumps
+  const target = yOfHFrac(hFrac());
+  yFloat += (target - yFloat) * Math.min(1, dt * 6);
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+setFloat('mid');
+setFluid('water');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>beats</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --tone: #a9b0a0;   /* the two component tones, drawn faint */
+    --sum:  #2b2a26;   /* their sum, drawn bold */
+    --env:  #b8603a;   /* the slow envelope — the throb */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .8rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 3rem; text-align: right; }
+  .row span.val { width: 6rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  .controls { display: flex; gap: .5rem; margin-bottom: 1.2rem; justify-content: center; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  canvas { width: min(760px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .env { color: var(--env); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>beats</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">f1</span><input type="range" id="f1" min="80" max="280" value="120"><span class="val" id="f1V"></span></div>
+    <div class="row"><span class="name">f2</span><input type="range" id="f2" min="80" max="280" value="128"><span class="val" id="f2V"></span></div>
+  </div>
+  <div class="controls"><button id="reset">reset</button></div>
+  <canvas id="cv" width="1400" height="640"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two tones of close frequency add to a slow throb. their <span class="env">sum swells and fades</span> at their difference &mdash; press the sliders together and the beats slow and vanish; pull them apart and the throb quickens. the fast wiggle inside is the carrier at the average frequency; the <span class="env">envelope</span> tracing over it is the beat.</div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+let f1 = 120;   // first tone, Hz
+let f2 = 128;   // second tone, Hz
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const f1El = document.getElementById('f1'), f1V = document.getElementById('f1V');
+const f2El = document.getElementById('f2'), f2V = document.getElementById('f2V');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const WIN = 1.0;   // seconds of signal shown across the canvas width
+
+// one tone: amplitude 1 sine at frequency f, at time t (seconds)
+function tone(f, t) { return Math.sin(TAU * f * t); }
+
+function plot(fn, color, width, alpha, cy, amp) {
+  ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width;
+  ctx.beginPath();
+  const W = cv.width;
+  for (let px = 0; px <= W; px++) {
+    const t = (px / W) * WIN;
+    const y = cy - fn(t) * amp;
+    if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, W, H);
+
+  const cy = H / 2;
+  const amp = H * 0.19;   // one tone reaches this; the sum reaches twice it
+
+  // the zero line
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(W, cy); ctx.stroke();
+
+  // the two component tones, faint
+  plot(t => tone(f1, t), css('--tone'), 1.5, 0.85, cy, amp);
+  plot(t => tone(f2, t), css('--tone'), 1.5, 0.85, cy, amp);
+
+  // their sum, bold — swells to 2 where the tones align, cancels to 0 where they oppose
+  plot(t => tone(f1, t) + tone(f2, t), css('--sum'), 2.5, 1, cy, amp);
+
+  // the slow envelope: |2 cos(2pi (f1-f2)/2 t)| traces the swell of the sum.
+  // sum = 2 cos(2pi (f1-f2)/2 t) cos(2pi (f1+f2)/2 t) — a carrier at the average
+  // frequency inside this envelope. the envelope's magnitude repeats twice per
+  // cos period, so the amplitude throbs at |f1-f2| even though the cos is at half.
+  const half = (f1 - f2) / 2;
+  const envFn = t => 2 * Math.abs(Math.cos(TAU * half * t));
+  plot(envFn, css('--env'), 2, 0.9, cy, amp);   // upper lobe
+  plot(t => -envFn(t), css('--env'), 2, 0.9, cy, amp);   // lower lobe
+
+  const beat = Math.abs(f1 - f2);
+  const carrier = (f1 + f2) / 2;
+
+  readout.innerHTML =
+    'f1 = <b>' + f1.toFixed(0) + ' Hz</b> &nbsp;·&nbsp; f2 = <b>' + f2.toFixed(0) + ' Hz</b> &nbsp;·&nbsp; '
+    + 'carrier = <b>' + carrier.toFixed(1) + ' Hz</b> (the average)'
+    + '<br><span class="env">beat = |f1 &minus; f2| = ' + beat.toFixed(0) + ' Hz</span> &nbsp;'
+    + (beat < 1
+        ? '<b>&mdash; the tones match; the envelope is flat, the throb is gone</b>'
+        : '<b>&mdash; the sum swells and fades ' + beat.toFixed(0) + ' times a second</b>');
+}
+
+function refresh() {
+  f1V.textContent = f1.toFixed(0) + ' Hz';
+  f2V.textContent = f2.toFixed(0) + ' Hz';
+  draw();
+}
+
+f1El.oninput = () => { f1 = +f1El.value; refresh(); };
+f2El.oninput = () => { f2 = +f2El.value; refresh(); };
+
+document.getElementById('reset').onclick = () => {
+  f1 = 120; f2 = 128;
+  f1El.value = f1; f2El.value = f2;
+  refresh();
+};
+
+refresh();
+</script>
+</body>
+</html>

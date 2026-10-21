@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>event stream</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>event stream</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">rate &lambda;</span><input type="range" id="lam" min="10" max="300" value="80" step="5"><span class="val" id="lamV"></span></div>
+    <div class="row"><span class="name">pattern</span>
+      <span class="modes">
+        <button id="mMemo" class="on">memoryless</button>
+        <button id="mClock">clockwork</button>
+        <button id="mBurst">bursty</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a memoryless stream has no memory &mdash; a long silence is <b>rare</b> but never <b>due</b>; how long you&rsquo;ve waited tells you nothing about when the next event comes. the histogram of gaps falls off as an exponential, and that shape <b>is</b> the memorylessness. flip to <b>clockwork</b> to feel the difference: there, waiting really does make the next arrival overdue.<span class="cite">Poisson point process &middot; exponential inter-arrivals, memoryless &middot; Palm 1943, Khinchin 1955, Kingman 1993</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// rate is per second; slider is scaled by 100 (0.10 .. 3.00)
+let lam = 0.8;                 // arrival rate  λ
+
+// pattern: 'memo' (Poisson) · 'clock' (periodic) · 'burst' (clustered)
+let mode = 'memo';
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const lamEl = document.getElementById('lam'), lamV = document.getElementById('lamV');
+const readout = document.getElementById('readout').firstElementChild;
+const btnMemo = document.getElementById('mMemo');
+const btnClock = document.getElementById('mClock');
+const btnBurst = document.getElementById('mBurst');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- simulation state ---------------------------------------------------
+let simT = 0;                  // running sim clock (seconds)
+let lastArr = 0;              // sim-time of the most recent arrival
+let arrivals = [];           // sim-times of recent arrivals (for the scroll)
+const WINDOW = 12;            // visible timeline span (seconds)
+
+// clockwork bookkeeping: the target for the next periodic fire
+let clockTarget = 1 / lam;    // period·(1 + jitter), refreshed each fire
+
+// bursty bookkeeping: are we inside a burst right now
+let inBurst = false;
+
+// completed inter-arrival gaps, binned into a running histogram
+let hist = [];                // counts per bin
+let histN = 0;                // total completed gaps recorded
+let binW = 0.1;              // bin width (seconds) — recomputed from λ
+let histLam = lam;            // the λ the current histogram was built against
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+// bins span 0 .. ~5/λ; recompute (and clear) when λ changes enough
+function rebinFor(l) {
+  const span = 5 / l;                 // cover out to 5 mean-gaps
+  const BINS = 60;
+  binW = span / BINS;
+  hist = new Array(BINS).fill(0);
+  histN = 0;
+  histLam = l;
+}
+rebinFor(lam);
+
+function clearHist() { rebinFor(lam); }
+
+// record one completed gap into the histogram
+function recordGap(g) {
+  const i = Math.floor(g / binW);
+  if (i >= 0 && i < hist.length) { hist[i] += 1; histN += 1; }
+  else if (i >= hist.length) { hist[hist.length - 1] += 1; histN += 1; }   // pile overflow in the last bin
+}
+
+// an arrival lands at the current sim-time: log it, close the open gap
+function arrival() {
+  const gap = simT - lastArr;
+  if (lastArr > 0 || arrivals.length > 0) recordGap(gap);   // skip the very first (undefined) gap
+  lastArr = simT;
+  arrivals.push(simT);
+}
+
+function stepSim(dt) {
+  simT += dt;
+
+  if (mode === 'memo') {
+    // Poisson: probability λ·dt of one arrival this slice (dt kept small)
+    if (Math.random() < lam * dt) arrival();
+
+  } else if (mode === 'clock') {
+    // periodic: fire once the gap since last arrival crosses period·(1+jitter)
+    if (simT - lastArr >= clockTarget) {
+      arrival();
+      const period = 1 / lam;
+      clockTarget = period * (1 + (Math.random() * 2 - 1) * 0.03);   // ±3% jitter
+    }
+
+  } else {
+    // bursty: two-rate telegraph. in-burst fast (~4λ), between bursts slow (~λ/4).
+    // switch state with a small per-slice probability; the two dwell-times are
+    // tuned so the long-run average arrival rate stays ≈ λ.
+    // fast fraction of time f solves: f·4λ + (1−f)·λ/4 = λ  →  f = 0.2
+    // two-state stationary law: fraction in burst = enterRate/(enterRate+leaveRate),
+    // so f = 0.2 needs enter = f·s = 0.2s and leave = (1−f)·s = 0.8s (leave 4× enter).
+    const s = 1.8;                                  // switching briskness — cycles ~3.5s so bursts are watchable
+    if (inBurst) {
+      if (Math.random() < 0.8 * s * dt) inBurst = false;   // leave rate (1−f)·s
+      if (Math.random() < (4 * lam) * dt) arrival();
+    } else {
+      if (Math.random() < 0.2 * s * dt) inBurst = true;    // enter rate f·s
+      if (Math.random() < (lam / 4) * dt) arrival();
+    }
+  }
+
+  // drop arrivals that have scrolled off the left edge of the window
+  const cut = simT - WINDOW;
+  while (arrivals.length && arrivals[0] < cut) arrivals.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the live stream. bottom band: the inter-arrival histogram.
+const SCENE_TOP = 30, SCENE_H = Math.round(H * 0.40);
+const HIST_TOP = SCENE_H + 130, HIST_H = H - HIST_TOP - 40;
+
+const LINE_Y = SCENE_TOP + Math.round(SCENE_H * 0.55);
+const LINE_LEFT = PAD + 20;
+const LINE_RIGHT = W - PAD - 20;
+const LINE_W = LINE_RIGHT - LINE_LEFT;
+
+// map a sim-time to an x on the scrolling timeline (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;    // 0 at left edge, 1 at now
+  return LINE_LEFT + frac * LINE_W;
+}
+
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  // the baseline the ticks stand on
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(LINE_LEFT, LINE_Y); ctx.lineTo(LINE_RIGHT, LINE_Y); ctx.stroke();
+
+  // "now" marker at the right edge
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([5, 6]);
+  ctx.beginPath(); ctx.moveTo(LINE_RIGHT, SCENE_TOP + 20); ctx.lineTo(LINE_RIGHT, LINE_Y + 60); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', LINE_RIGHT, SCENE_TOP + 12);
+
+  // each arrival as a thin ink tick
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  for (const t of arrivals) {
+    const x = xOfTime(t);
+    ctx.beginPath(); ctx.moveTo(x, LINE_Y - 34); ctx.lineTo(x, LINE_Y + 34); ctx.stroke();
+  }
+
+  // the current gap: a --mark measure from the last arrival to now
+  const gap = simT - lastArr;
+  const gx0 = lastArr > 0 ? Math.max(xOfTime(lastArr), LINE_LEFT) : LINE_LEFT;
+  const gx1 = LINE_RIGHT;
+  const gy = LINE_Y + 56;
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(gx0, gy); ctx.lineTo(gx1, gy); ctx.stroke();
+  // end caps
+  ctx.beginPath(); ctx.moveTo(gx0, gy - 8); ctx.lineTo(gx0, gy + 8); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(gx1, gy - 8); ctx.lineTo(gx1, gy + 8); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('gap  t = ' + gap.toFixed(2) + ' s', (gx0 + gx1) / 2, gy + 30);
+
+  // a quiet label
+  ctx.fillStyle = faint; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('the live stream', LINE_LEFT, SCENE_TOP + 12);
+}
+
+// bottom band: inter-arrival histogram vs the exponential theory
+function drawHist() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'), shade = css('--shade');
+  const plotW = W - 2 * PAD;
+  const bins = hist.length;
+  const span = bins * binW;                 // total time-span the bins cover
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD, HIST_TOP, plotW, HIST_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('inter-arrival gaps vs theory:  memoryless: gaps ~ exp(λ),  f(t) = λe^(−λt)', PAD + 6, HIST_TOP - 12);
+  ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('t = 0', PAD + 4, HIST_TOP + HIST_H + 24);
+  ctx.textAlign = 'right';
+  ctx.fillText('t = ' + span.toFixed(1) + ' s', PAD + plotW - 4, HIST_TOP + HIST_H + 24);
+  ctx.textAlign = 'left';
+
+  // tallest bin sets the vertical scale (fall back to the theory peak so an
+  // empty histogram still frames the curve sensibly)
+  let maxCount = 0;
+  for (const c of hist) if (c > maxCount) maxCount = c;
+  // the exponential's peak height on the same (count) scale, for headroom:
+  // f(0)·binW·N = λ·binW·N is the expected count in bin 0
+  const theoryPeak = histLam * binW * Math.max(histN, 1);
+  const yScale = Math.max(maxCount, theoryPeak, 1) * 1.1;
+
+  const xOfBin = i => PAD + (i / bins) * plotW;
+  const barW = plotW / bins;
+
+  // the histogram bars
+  for (let i = 0; i < bins; i++) {
+    const c = hist[i];
+    if (c <= 0) continue;
+    const h = c / yScale * (HIST_H - 4);
+    ctx.fillStyle = shade;
+    ctx.fillRect(xOfBin(i) + 1, HIST_TOP + HIST_H - h, barW - 2, h);
+    ctx.strokeStyle = ink; ctx.lineWidth = 1;
+    ctx.strokeRect(xOfBin(i) + 1, HIST_TOP + HIST_H - h, barW - 2, h);
+  }
+
+  // theoretical exponential density f(t) = λe^(−λt), scaled to the same total
+  // area as the histogram: expected count in a bin of width binW at t is
+  //   N · [e^(−λ·t) − e^(−λ·(t+binW))]  ≈  N · λ·binW · e^(−λ·t)
+  // plot the smooth curve of that expected count so bars and curve share a scale.
+  ctx.strokeStyle = mark; ctx.lineWidth = 2; ctx.beginPath();
+  let startpen = true;
+  for (let px = 0; px <= plotW; px++) {
+    const t = (px / plotW) * span;
+    const expectedCount = histLam * binW * Math.max(histN, 1) * Math.exp(-histLam * t);
+    const h = expectedCount / yScale * (HIST_H - 4);
+    const x = PAD + px;
+    const y = HIST_TOP + HIST_H - h;
+    startpen ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    startpen = false;
+  }
+  ctx.stroke();
+
+  // a subtle "click to reset" affordance
+  ctx.fillStyle = faint; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('n = ' + histN + '   (click to reset)', PAD + plotW - 6, HIST_TOP + 22);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawHist();
+}
+
+function updateReadout() {
+  const meanGap = 1 / lam;
+  const gap = simT - lastArr;
+
+  // shared head: λ and the mean gap
+  let head =
+    'λ <b>' + lam.toFixed(2) + '</b>/s &nbsp;·&nbsp; '
+    + 'mean gap 1/λ <b>' + meanGap.toFixed(2) + '</b> s &nbsp;·&nbsp; '
+    + 'current gap t <b>' + gap.toFixed(2) + '</b> s';
+
+  let tail, regime;
+  if (mode === 'clock') {
+    // clockwork: a gap near 1/λ means the next event is imminent (not overdue);
+    // only a gap well past the period (>1.3×) is genuinely anomalous.
+    const overdue = gap > 1.3 * meanGap;
+    tail = 'next due ≈ 1/λ <b>' + meanGap.toFixed(2) + '</b> s';
+    regime = overdue
+      ? 'ANOMALOUS — gap past 1.3× the period, the clock has skipped'
+      : 'on schedule — the next arrival is due at 1/λ, not overdue';
+
+  } else {
+    // memoryless (and bursty): the surprise of a silence is exactly e^(−λt)
+    const P = Math.exp(-lam * gap);
+    tail = 'P(gap ≥ t) = e^(−λt) <b>' + (P * 100).toFixed(1) + '</b>%';
+    if (P >= 0.05) {
+      regime = '<span style="color:var(--ink)">just quiet</span>';
+    } else {
+      regime = 'statistically DEAD — a silence this long happens < 5% of the time by chance';
+    }
+    if (mode === 'burst') {
+      tail += ' &nbsp;<span style="color:var(--faint)">(under-predicts long between-burst gaps)</span>';
+    }
+  }
+
+  readout.innerHTML =
+    head
+    + '<br>' + tail
+    + '<br><span id="regime">' + regime + '</span>';
+}
+
+function setMode(m) {
+  mode = m;
+  btnMemo.classList.toggle('on', m === 'memo');
+  btnClock.classList.toggle('on', m === 'clock');
+  btnBurst.classList.toggle('on', m === 'burst');
+  // switching pattern makes the old gaps incomparable — start the proof fresh
+  clearHist();
+  // reset the open gap so a mode's first reading isn't a stale silence
+  lastArr = simT;
+  if (m === 'clock') clockTarget = 1 / lam;
+  inBurst = false;
+  updateReadout();
+}
+
+function refresh() {
+  lamV.textContent = lam.toFixed(2);
+  updateReadout();
+}
+
+lamEl.oninput = () => {
+  lam = lamEl.value / 100;
+  // bins are sized from λ — rebuild them (and the histogram) on a rate change
+  rebinFor(lam);
+  clockTarget = 1 / lam;
+  refresh();
+};
+
+btnMemo.onclick = () => setMode('memo');
+btnClock.onclick = () => setMode('clock');
+btnBurst.onclick = () => setMode('burst');
+
+// click on the histogram band clears the running proof
+cv.onclick = (e) => {
+  const r = cv.getBoundingClientRect();
+  const y = (e.clientY - r.top) / r.height * H;
+  if (y >= HIST_TOP && y <= HIST_TOP + HIST_H) clearHist();
+};
+
+// --- the live loop: small fixed sub-steps for stable Poisson slices ------
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  // integrate in small slices so λ·dt stays well below 1
+  const SLICE = 0.02;
+  while (elapsed > 0) {
+    const dt = Math.min(SLICE, elapsed);
+    stepSim(dt);
+    elapsed -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

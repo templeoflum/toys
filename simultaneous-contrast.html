@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>simultaneous-contrast</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 11rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>simultaneous contrast</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">surround</span><input type="range" id="surround" min="0" max="100" value="100"><span class="val" id="surroundV"></span></div>
+    <div class="row"><span class="name">bridge</span><input type="range" id="bridge" min="0" max="100" value="0"><span class="val" id="bridgeV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="480"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two inner squares are the exact same gray. the one on the dark field reads lighter, the one on the light field reads darker &mdash; lightness is judged against the surround, not on its own. fade the <b>surround</b> to nothing and the squares sit on bare paper, plainly equal; raise the <b>bridge</b> to run a band of that same gray from one to the other.</div>
+
+<script>
+'use strict';
+
+const GRAY = [138, 138, 134];           // the identical inner squares
+const LC = { x: 270, y: 240 }, RC = { x: 730, y: 240 };
+const SQ = 130;                          // inner square side
+const FW = 420, FH = 400;                // surround field size
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const sEl = document.getElementById('surround'), sV = document.getElementById('surroundV');
+const bEl = document.getElementById('bridge'), bV = document.getElementById('bridgeV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let surround = 1;   // 0 => fields become paper, squares plainly equal
+let bridge = 0;     // proof: a band of the same gray links the two
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function rgb(a) { return 'rgb(' + a[0] + ',' + a[1] + ',' + a[2] + ')'; }
+function lerp(a, b, t) { return [0, 1, 2].map(i => Math.round(a[i] + (b[i] - a[i]) * t)); }
+
+const PAPER = [246, 242, 232], BLACK = [26, 26, 24], WHITE = [255, 255, 255];
+
+function fillSquare(c, col) { ctx.fillStyle = rgb(col); ctx.fillRect(c.x - SQ / 2, c.y - SQ / 2, SQ, SQ); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // the two surround fields — dark on the left, light on the right
+  const leftF = lerp(PAPER, BLACK, surround);
+  const rightF = lerp(PAPER, WHITE, surround);
+  ctx.fillStyle = rgb(leftF); ctx.fillRect(LC.x - FW / 2, LC.y - FH / 2, FW, FH);
+  ctx.fillStyle = rgb(rightF); ctx.fillRect(RC.x - FW / 2, RC.y - FH / 2, FW, FH);
+
+  // proof: a band of the SAME gray joining the two squares — one continuous gray
+  if (bridge > 0) {
+    ctx.save();
+    ctx.globalAlpha = bridge;
+    ctx.fillStyle = rgb(GRAY);
+    ctx.fillRect(LC.x, LC.y - 26, RC.x - LC.x, 52);
+    ctx.restore();
+  }
+
+  // the two identical inner squares, on top
+  fillSquare(LC, GRAY);
+  fillSquare(RC, GRAY);
+
+  readout.innerHTML = surround < 0.02
+    ? 'no surround &mdash; two bare gray squares, both rgb(138,138,134), plainly equal.'
+    : bridge > 0.98
+      ? 'one band of gray joins them &mdash; both squares are rgb(138,138,134).'
+      : 'both squares are the same gray, rgb(138,138,134). only the field behind differs.';
+}
+
+function refresh() {
+  sV.textContent = surround < 0.02 ? 'none' : Math.round(surround * 100) + '%';
+  bV.textContent = bridge > 0.98 ? 'band joined' : bridge > 0 ? 'rising' : 'off';
+  draw();
+}
+
+sEl.oninput = () => { surround = +sEl.value / 100; refresh(); };
+bEl.oninput = () => { bridge = +bEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>feedback</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #err.big { color: var(--mark); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>feedback</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">setpoint S</span><input type="range" id="set" min="-80" max="80" value="30" step="1"><span class="val" id="setV"></span></div>
+    <div class="row"><span class="name">gain</span><input type="range" id="gain" min="10" max="400" value="60" step="1"><span class="val" id="gainV"></span></div>
+    <div class="row"><span class="name">load</span><input type="range" id="load" min="0" max="120" value="30" step="1"><span class="val" id="loadV"></span></div>
+    <div class="row"><span class="name">push</span>
+      <span class="modes">
+        <button id="bKick">kick</button>
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a feedback loop senses the gap between where it <b>is</b> and where it <b>should be</b>, and acts to close it &mdash; it holds a value against a push. but crank the gain too high and it overshoots and <b>rings</b>; too low and it <b>sags</b> and crawls. balance is the art. the thermostat, the governor, the self as its own steersman.<span class="cite">negative feedback &middot; Wiener, Cybernetics 1948 (the governor &mdash; Watt 1788, Maxwell 1868)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the negative-feedback governor -------------------------------------
+// second-order plant so the gain tradeoff is visible. state is position v
+// (the controlled value) and velocity vel. proportional control pushes v
+// toward the setpoint S; a fixed damping bleeds velocity; a steady load
+// pushes v away. per sub-step dt:
+//   error = S - v
+//   accel = gain*error - damping*vel - load
+//   vel  += accel*dt
+//   v    += vel*dt
+// this is a damped harmonic oscillator: ω₀ = √gain, ζ = damping/(2√gain).
+// DAMPING = 2.5 (chosen constant). with gain on [1..40]:
+//   ζ ≥ 0.9  (gain ≲ 1.9)  → over-damped: sluggish, sags toward S
+//   0.4 < ζ < 0.9          → tuned: quick, settles clean
+//   ζ ≤ 0.4  (gain ≳ 9.8)  → under-damped: overshoots, rings before settling
+// so the whole range shows across the slider; default gain 6 sits in tuned.
+const DAMPING = 2.5;
+
+// sliders are scaled by 10 (S, gain, load) so the steps read finely.
+let S = 3.0;        // setpoint — the goal line
+let gain = 6.0;     // correction strength — the star knob
+let load = 3.0;     // steady disturbance pushing v off the setpoint
+
+let v = S;          // the controlled value (starts on target)
+let vel = 0;        // its velocity
+
+// plotted range guard — v is clamped to this band so an extreme gain can't
+// blow the trace off the plot or into NaN/Infinity.
+const V_MIN = -12, V_MAX = 12;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const setEl = document.getElementById('set'), setV = document.getElementById('setV');
+const gainEl = document.getElementById('gain'), gainV = document.getElementById('gainV');
+const loadEl = document.getElementById('load'), loadV = document.getElementById('loadV');
+const readout = document.getElementById('readout').firstElementChild;
+const bKick = document.getElementById('bKick');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the scrolling trace buffer -----------------------------------------
+// a rolling record of (simT, v, S) samples over the last WINDOW seconds.
+// newest at the right, like event-stream's timeline. kick times get their
+// own faint-tick list.
+let simT = 0;
+const WINDOW = 10;            // visible trace span (seconds)
+let trace = [];              // {t, v, s} samples
+let kicks = [];             // sim-times of kicks (for the vertical ticks)
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function stepSim(dt) {
+  simT += dt;
+  // the negative-feedback loop: sense the gap, correct toward it.
+  const error = S - v;
+  const accel = gain * error - DAMPING * vel - load;
+  vel += accel * dt;
+  v += vel * dt;
+  // blow-up guard: clamp v to the plotted band and kill runaway velocity at
+  // the wall so an extreme gain rings against the edge instead of diverging.
+  if (v > V_MAX) { v = V_MAX; if (vel > 0) vel = 0; }
+  else if (v < V_MIN) { v = V_MIN; if (vel < 0) vel = 0; }
+  if (!isFinite(v)) { v = S; vel = 0; }
+
+  trace.push({ t: simT, v: v, s: S });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+  while (kicks.length && kicks[0] < cut) kicks.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the loop diagram + gauge. bottom band: the time trace.
+const DIAG_TOP = 40, DIAG_H = Math.round(H * 0.30);
+const PLOT_TOP = DIAG_TOP + DIAG_H + 100;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a value in [V_MIN..V_MAX] to a y in the plot band (up = larger)
+function yOfVal(val) {
+  const frac = (val - V_MIN) / (V_MAX - V_MIN);
+  return PLOT_TOP + PLOT_H - frac * PLOT_H;
+}
+
+// --- top band: the loop diagram -----------------------------------------
+// a minimal schematic: sense(v) → compare(S−v) → correct(gain) → plant,
+// with the load arrow entering the plant. just enough that the eye reads
+// "this is a loop." plus a subtle gauge bar with markers for S and v.
+function drawDiagram() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+  const error = S - v;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // four boxes across the top, wired left→right, then a return wire back.
+  const boxW = 300, boxH = 92;
+  const y = DIAG_TOP + 40;
+  const gapX = (W - 2 * PAD - 4 * boxW) / 3;
+  const xs = [];
+  for (let i = 0; i < 4; i++) xs.push(PAD + i * (boxW + gapX));
+  const labels = ['plant  (v)', 'sense', 'compare  S − v', 'correct  × gain'];
+
+  ctx.lineWidth = 2; ctx.font = '24px "Courier New", monospace';
+  for (let i = 0; i < 4; i++) {
+    // the compare box glows --mark when the error is large; else --faint.
+    const hot = i === 2 && Math.abs(error) > 0.5;
+    ctx.strokeStyle = hot ? mark : faint;
+    ctx.strokeRect(xs[i], y, boxW, boxH);
+    ctx.fillStyle = hot ? mark : ink;
+    ctx.fillText(labels[i], xs[i] + boxW / 2, y + boxH / 2);
+  }
+
+  // forward arrows between the boxes
+  ctx.strokeStyle = faint; ctx.fillStyle = faint; ctx.lineWidth = 2;
+  for (let i = 0; i < 3; i++) arrow(xs[i] + boxW, y + boxH / 2, xs[i + 1], y + boxH / 2);
+
+  // the return wire: correct → down, back across, up into the plant. this is
+  // the loop closing — the correction feeds the plant that it just sensed.
+  const cx = xs[3] + boxW / 2, px = xs[0] + boxW / 2;
+  const yLow = y + boxH + 70;
+  ctx.beginPath();
+  ctx.moveTo(cx, y + boxH);
+  ctx.lineTo(cx, yLow);
+  ctx.lineTo(px, yLow);
+  ctx.lineTo(px, y + boxH);
+  ctx.stroke();
+  arrowHead(px, y + boxH, 0, -1);
+
+  // the load disturbance arrow entering the plant from above
+  ctx.strokeStyle = mark; ctx.fillStyle = mark;
+  const lx = xs[0] + boxW / 2;
+  arrow(lx, y - 46, lx, y);
+  ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('load', lx + 16, y - 34);
+
+  // the live error sign, read off the comparator
+  ctx.fillStyle = Math.abs(error) > 0.5 ? mark : faint;
+  ctx.textAlign = 'center'; ctx.font = '22px "Courier New", monospace';
+  ctx.fillText('error = ' + error.toFixed(2), xs[2] + boxW / 2, y + boxH + 30);
+
+  // a subtle gauge bar under the loop: S marker (faint) + v marker (ink)
+  const gy = yLow + 60, gL = xs[1], gR = xs[2] + boxW, gW = gR - gL;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(gL, gy); ctx.lineTo(gR, gy); ctx.stroke();
+  const fracOf = val => (Math.max(V_MIN, Math.min(V_MAX, val)) - V_MIN) / (V_MAX - V_MIN);
+  const sX = gL + fracOf(S) * gW, vX = gL + fracOf(v) * gW;
+  // S as a faint upright tick, v as an ink dot chasing it
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(sX, gy - 16); ctx.lineTo(sX, gy + 16); ctx.stroke();
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(vX, gy, 9, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.fillText('S', sX, gy - 30);
+  ctx.fillStyle = ink; ctx.fillText('v', vX, gy + 32);
+
+  ctx.textBaseline = 'alphabetic';
+}
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  arrowHead(x1, y1, Math.cos(a), Math.sin(a));
+}
+function arrowHead(x, y, dx, dy) {
+  const s = 12, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+// --- bottom band: the time trace ----------------------------------------
+// v(t) scrolling right-to-left, newest at the right. S drawn as a faint
+// horizontal reference the ink trace chases; kicks as faint vertical ticks.
+// low gain sags below S and crawls; high gain overshoots and rings.
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('the value v over the last ' + WINDOW + 's — chasing the setpoint', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the setpoint reference line (moves with the slider). uses the newest S so
+  // it tracks live; the trace's own stored s is what the value chased.
+  const sY = yOfVal(S);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, sY); ctx.lineTo(PLOT_RIGHT, sY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('S = ' + S.toFixed(2), PLOT_LEFT + 6, sY - 8);
+
+  // the droop line load/gain below S — where proportional control settles.
+  const droop = load / gain;
+  const dY = yOfVal(S - droop);
+  if (droop > 0.02 && (S - droop) > V_MIN) {
+    ctx.strokeStyle = css('--pick'); ctx.lineWidth = 1; ctx.setLineDash([2, 6]);
+    ctx.beginPath(); ctx.moveTo(PLOT_LEFT, dY); ctx.lineTo(PLOT_RIGHT, dY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = css('--pick'); ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'right';
+    ctx.fillText('S − load/gain', PLOT_RIGHT - 6, dY - 8);
+  }
+
+  // kick ticks — faint verticals at each impulse still in the window
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  for (const kt of kicks) {
+    const x = xOfTime(kt);
+    ctx.beginPath(); ctx.moveTo(x, PLOT_TOP + 1); ctx.lineTo(x, PLOT_TOP + PLOT_H - 1); ctx.stroke();
+  }
+
+  // the value trace itself
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.beginPath();
+  let startpen = true;
+  for (const p of trace) {
+    const x = xOfTime(p.t), y = yOfVal(p.v);
+    startpen ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    startpen = false;
+  }
+  ctx.stroke();
+
+  // the live head dot at the right edge
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = ink;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfVal(p.v), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawDiagram();
+  drawTrace();
+}
+
+// --- regime read: which side of the damping tradeoff the gain sits on ----
+// ζ = DAMPING / (2√gain). ζ≥0.9 over-damped, ζ≤0.4 under-damped, else tuned.
+function regimeOf() {
+  const zeta = DAMPING / (2 * Math.sqrt(gain));
+  if (zeta >= 0.9) return 'over-damped — slow, sags';
+  if (zeta <= 0.4) return 'under-damped — overshoots, rings';
+  return 'tuned — quick, settles';
+}
+
+function updateReadout() {
+  const error = S - v;
+  const droop = load / gain;
+  const bigErr = Math.abs(error) > 0.5;
+
+  readout.innerHTML =
+    'setpoint S <b>' + S.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'value v <b>' + v.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'error S−v <span id="err"' + (bigErr ? ' class="big"' : '') + '>'
+      + (error >= 0 ? '+' : '') + error.toFixed(2) + '</span>'
+    + '<br>gain <b>' + gain.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'load <b>' + load.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'droop = load/gain <b>' + droop.toFixed(2) + '</b>'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  setV.textContent = S.toFixed(1);
+  gainV.textContent = gain.toFixed(1);
+  loadV.textContent = load.toFixed(1);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset the run.
+setEl.oninput = () => { S = setEl.value / 10; refresh(); };
+gainEl.oninput = () => { gain = gainEl.value / 10; refresh(); };
+loadEl.oninput = () => { load = loadEl.value / 10; refresh(); };
+
+// kick — a sudden velocity impulse (a step disturbance to watch it recover).
+bKick.onclick = () => {
+  vel += 60;                 // impulse into velocity; the loop pulls it back
+  kicks.push(simT);
+  bKick.classList.add('on');
+  setTimeout(() => bKick.classList.remove('on'), 120);
+};
+// reset — re-center v on the setpoint, still velocity, clear the trace.
+bReset.onclick = () => {
+  v = S; vel = 0;
+  trace.length = 0; kicks.length = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: small fixed sub-steps for a stable integration -------
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  // integrate in small slices so a high gain stays stable (ω₀·dt well < 1)
+  const SLICE = 0.02;
+  while (elapsed > 0) {
+    const dt = Math.min(SLICE, elapsed);
+    stepSim(dt);
+    elapsed -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

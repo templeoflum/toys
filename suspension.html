@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>suspension</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>suspension</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">damping c</span><input type="range" id="damp" min="0" max="60" value="6" step="1"><span class="val" id="dampV"></span></div>
+    <div class="row"><span class="name">bump</span><input type="range" id="bump" min="0" max="100" value="45" step="1"><span class="val" id="bumpV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bStep">step bump</button>
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a sprung <b>mass</b> rides a bumpy road on a spring and a <b>damper</b>. the spring alone would let it <b>ring</b> &mdash; bounce on after every bump &mdash; so the damper bleeds that ringing into heat. how much it bleeds is set by one number, the <b>damping ratio</b> &zeta;: below one the mass <b>overshoots and oscillates</b> (a bouncy car), at one it settles <b>fastest with no overshoot</b> (the ideal), above one it is <b>sluggish</b> &mdash; no bounce but slow to return. watch the smooth <b>mass</b> trace filter the jagged <b>road</b>: the shock absorbed.<span class="cite">damped driven oscillator &middot; suspension &middot; &zeta; = c / (2&radic;(k&middot;m))</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- damped spring suspension over a bumpy road -------------------------
+// a sprung mass m on a spring (stiffness k) and a damper (coefficient c),
+// riding a road whose surface height r(t) drives the base up and down. the
+// mass height x responds to the road THROUGH the spring + damper:
+//   m·x'' + c·(x' - r') + k·(x - r) = 0
+// i.e. the spring pulls the mass toward the road height and the damper
+// resists the relative velocity. per sub-step dt (semi-implicit, x' then x):
+//   accel = ( -c·(x' - r') - k·(x - r) ) / m
+//   x'   += accel·dt ;  x += x'·dt
+// the character of the response is set by the damping ratio
+//   ζ = c / (2·√(k·m))
+//   ζ < 1  UNDER-damped: the mass overshoots and rings before settling
+//   ζ = 1  CRITICALLY damped: fastest settle, no overshoot (the ideal)
+//   ζ > 1  OVER-damped: no overshoot but sluggish, slow to return
+// two knobs: damping (c) and bump (road amplitude/roughness). VERIFY: the
+// numeric response to a step bump must ring (overshoot the new rest height)
+// iff ζ < 1, and settle monotonically with NO overshoot iff ζ ≥ 1. that
+// threshold — ζ = c/(2·√(k·m)) — is the load-bearing check the integration
+// must exhibit; the drawn step-response overshoot appears only for ζ < 1.
+const MASS = 1.0;        // sprung mass m
+const K_SPRING = 40.0;   // spring stiffness k (fixed; damping is the star)
+
+let c = 6.0;             // damping coefficient (the star knob)
+let bump = 0.45;         // road amplitude / roughness, 0..1
+
+let x = 0;               // mass height (displacement from rest), + is up
+let xv = 0;              // mass vertical velocity
+let road = 0;            // current road surface height at the wheel
+let roadPrev = 0;        // previous road height, for r' (road velocity)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const dampEl = document.getElementById('damp'), dampV = document.getElementById('dampV');
+const bumpEl = document.getElementById('bump'), bumpV = document.getElementById('bumpV');
+const readout = document.getElementById('readout').firstElementChild;
+const bStep = document.getElementById('bStep');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// the damping ratio for the live c, k, m — the single number that names the
+// regime. ζ = c / (2·√(k·m)).
+function zeta() {
+  const denom = 2 * Math.sqrt(K_SPRING * MASS);
+  return denom > 0 ? c / denom : Infinity;
+}
+// the critical damping coefficient c_crit = 2·√(k·m) — where ζ crosses 1.
+function cCrit() { return 2 * Math.sqrt(K_SPRING * MASS); }
+
+// --- the rolling road ---------------------------------------------------
+// the road scrolls left under the wheel. its height is a sum of a few sines
+// (a bumpy but smooth surface) scaled by the bump knob, plus an optional
+// one-shot STEP bump — a sudden raised curb the suspension must absorb, which
+// is the clean case the VERIFY threshold reads (ring iff ζ < 1).
+let simT = 0;
+const ROAD_SPEED = 1.0;      // how fast the road scrolls under the wheel
+let stepUntil = -1;          // sim-time the step-bump curb ends (-1 = none)
+let stepT0 = 0;              // sim-time the step began (to gauge the response)
+const STEP_HOLD = 3.2;       // how long the raised curb is held
+
+// the road surface height at a given sim-time — smooth bumps scaled by the
+// bump knob, plus the held step curb when one is active.
+function roadAt(t) {
+  const a = bump * 0.55;   // amplitude of the rolling bumps
+  let h = a * (Math.sin(t * 2.3) * 0.6 + Math.sin(t * 5.1 + 1.0) * 0.3
+             + Math.sin(t * 8.7 + 2.0) * 0.15);
+  if (t < stepUntil) h += 0.5;   // the raised curb (a clean step input)
+  return h;
+}
+
+// --- the scrolling trace buffer -----------------------------------------
+// a rolling record of (simT, road, mass) over the last WINDOW seconds.
+// newest at the right, like drag's timeline. both heights stored per-sample
+// so the ROAD (jagged) and the MASS (filtered/smooth) can be drawn together —
+// the gap between them IS the shock the suspension absorbed.
+const WINDOW = 10;           // visible trace span (seconds)
+let trace = [];             // {t, r, x} samples
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function stepSim(dt) {
+  simT += dt;
+
+  // advance the road under the wheel and read the road velocity r'.
+  roadPrev = road;
+  road = roadAt(simT);
+  const roadVel = dt > 0 ? (road - roadPrev) / dt : 0;
+
+  // the damped driven oscillator: the mass responds to the road through the
+  // spring + damper. semi-implicit Euler (update velocity, then position) —
+  // small fixed sub-steps keep it stable even at low damping where it rings.
+  const accel = (-c * (xv - roadVel) - K_SPRING * (x - road)) / MASS;
+  xv += accel * dt;
+  x  += xv * dt;
+  if (!isFinite(x)) { x = 0; xv = 0; }
+
+  trace.push({ t: simT, r: road, x: x });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the car on its suspension over the bumpy road. bottom band: the
+// road-vs-mass height trace.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.40);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 110;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// the height range the trace plots (± this, road + mass both live in it).
+const H_PLOT = 1.1;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a height in [-H_PLOT..H_PLOT] to a y in the plot band (up = higher)
+function yOfHeight(h) {
+  const frac = Math.max(-1, Math.min(1, h / H_PLOT));   // -1..1
+  return PLOT_TOP + PLOT_H / 2 - frac * (PLOT_H / 2);
+}
+
+// --- top band: the car on its suspension over the road ------------------
+// a wheel rides the bumpy road (the base follows the road height); above it a
+// spring + damper column carries the sprung mass (the car body), which follows
+// the FILTERED height — smoother than the road. the spring coils and the
+// damper piston stretch/compress with the relative travel (x - road). the car
+// body warms toward --mark the more it is currently overshooting.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  // vertical: a road baseline the wheel rides on, the car body above it.
+  const roadY = SCENE_TOP + Math.round(SCENE_H * 0.72);
+  const HSCALE = 90;                       // px per unit height
+  const carX = Math.round(W * 0.46);
+
+  // --- the bumpy road scrolling under the wheel ---------------------------
+  // draw the road profile as a filled --shade band; the wheel sits on the
+  // height directly under it. the profile scrolls left as time advances.
+  ctx.fillStyle = shade;
+  ctx.beginPath();
+  ctx.moveTo(PAD, roadY + 200);
+  const rL = PAD, rR = W - PAD;
+  for (let px = rL; px <= rR; px += 6) {
+    // map screen-x to a sim-time: the wheel (carX) is 'now', left is past.
+    const tt = simT - (carX - px) / (PLOT_W) * WINDOW * (PLOT_W / (rR - rL));
+    const hy = roadY - roadAt(tt) * HSCALE;
+    ctx.lineTo(px, hy);
+  }
+  ctx.lineTo(rR, roadY + 200);
+  ctx.closePath();
+  ctx.fill();
+  // the road surface line on top of the band
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let px = rL; px <= rR; px += 6) {
+    const tt = simT - (carX - px) / (PLOT_W) * WINDOW * (PLOT_W / (rR - rL));
+    const hy = roadY - roadAt(tt) * HSCALE;
+    px === rL ? ctx.moveTo(px, hy) : ctx.lineTo(px, hy);
+  }
+  ctx.stroke();
+
+  // the wheel contact height (base follows the road) and the body height
+  // (follows the filtered mass position x).
+  const wheelY = roadY - road * HSCALE;
+  const bodyY = roadY - x * HSCALE - 150;   // the sprung mass sits 150px up
+
+  // --- the wheel riding the road -----------------------------------------
+  const wheelR = 34;
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(carX, wheelY - wheelR, wheelR, 0, TAU); ctx.stroke();
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(carX, wheelY - wheelR, 5, 0, TAU); ctx.fill();
+
+  const axleY = wheelY - wheelR;            // the spring's bottom anchor
+
+  // --- the spring + damper column between wheel and body -----------------
+  // the spring on the left of the column, the damper (a piston in a cylinder)
+  // on the right; both span from the axle up to the body underside. their
+  // length is the live suspension travel — it compresses over bumps.
+  const bodyBase = bodyY + 60;              // underside of the car body
+  const colTop = bodyBase;
+  const colBot = axleY;
+  const springX = carX - 26, damperX = carX + 26;
+
+  // the spring: a zig-zag of coils from axle to body
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  const coils = 8;
+  ctx.moveTo(springX, colBot);
+  for (let i = 0; i <= coils; i++) {
+    const t = i / coils;
+    const py = colBot + (colTop - colBot) * t;
+    const px = springX + (i % 2 === 0 ? -14 : 14) * (i === 0 || i === coils ? 0 : 1);
+    ctx.lineTo(px, py);
+  }
+  ctx.lineTo(springX, colTop);
+  ctx.stroke();
+
+  // the damper: a cylinder with a piston rod, warming to --mark as the
+  // relative velocity (the ringing) is high — the damper is bleeding energy.
+  const relVel = Math.abs(xv);
+  const damperColor = mixToMark(ink, mark, Math.min(1, relVel * 0.6));
+  ctx.strokeStyle = damperColor; ctx.lineWidth = 4;
+  const cylTop = colBot + (colTop - colBot) * 0.55;
+  ctx.beginPath(); ctx.moveTo(damperX, colBot); ctx.lineTo(damperX, cylTop); ctx.stroke();      // cylinder body
+  ctx.strokeRect(damperX - 12, colBot, 24, (cylTop - colBot));
+  ctx.beginPath(); ctx.moveTo(damperX, cylTop); ctx.lineTo(damperX, colTop); ctx.stroke();      // piston rod up to body
+  // the piston head inside the cylinder, riding on the relative travel
+  const rel = x - road;                     // suspension travel
+  const pistonY = colBot + (cylTop - colBot) * (0.5 - Math.max(-0.45, Math.min(0.45, rel)));
+  ctx.strokeStyle = damperColor; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(damperX - 12, pistonY); ctx.lineTo(damperX + 12, pistonY); ctx.stroke();
+
+  // --- the sprung mass: the car body -------------------------------------
+  // warms toward --mark the further it is currently overshooting its rest.
+  const overshoot = Math.min(1, Math.abs(x) * 1.4);
+  ctx.fillStyle = mixToMark(ink, mark, overshoot);
+  const bodyW = 260, bodyH = 90;
+  ctx.fillRect(carX - bodyW / 2, bodyBase - bodyH, bodyW, bodyH);
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('sprung mass', carX, bodyBase - bodyH - 14);
+
+  // a faint rest-height tick the body settles onto (x = road, i.e. no travel)
+  const restY = roadY - road * HSCALE - 150 - bodyH;
+  ctx.strokeStyle = shade; ctx.lineWidth = 2; ctx.setLineDash([4, 8]);
+  ctx.beginPath(); ctx.moveTo(carX - bodyW / 2 - 40, restY); ctx.lineTo(carX + bodyW / 2 + 40, restY); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // quiet labels
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('spring k  +  damper c   (suspension travel = x − road)', PAD + 6, SCENE_TOP + 4);
+  ctx.fillText('road', W - PAD - 90, roadY + 40);
+}
+
+// a colour blend from a→b by fraction t (both hex like #rrggbb)
+function mixToMark(a, b, t) {
+  const pa = hex(a), pb = hex(b);
+  const r = Math.round(pa[0] + (pb[0] - pa[0]) * t);
+  const g = Math.round(pa[1] + (pb[1] - pa[1]) * t);
+  const bl = Math.round(pa[2] + (pb[2] - pa[2]) * t);
+  return 'rgb(' + r + ',' + g + ',' + bl + ')';
+}
+function hex(h) {
+  h = h.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+// --- bottom band: road height vs mass height over time ------------------
+// both heights scroll right-to-left, newest at the right. the ROAD (--faint,
+// jagged) is what the wheel rode; the MASS (--ink, smooth) is what the body
+// felt after the spring + damper filtered it. the mass trace is smoother —
+// the gap between the two IS the shock absorbed. when ζ < 1 the mass trace
+// overshoots and rings past the road's steps; when ζ ≥ 1 it lags cleanly with
+// no overshoot. a --faint dashed midline marks the rest height (0).
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('road (jagged) vs mass (smooth) height over the last ' + WINDOW + 's — the gap is the shock absorbed', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the rest-height midline (0) the mass settles onto between bumps
+  const midY = yOfHeight(0);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, midY); ctx.lineTo(PLOT_RIGHT, midY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('rest height', PLOT_LEFT + 6, midY - 8);
+
+  // the ROAD trace — faint, jagged: the raw surface the wheel rode.
+  ctx.strokeStyle = faint; ctx.lineWidth = 2; ctx.beginPath();
+  let pen = true;
+  for (const p of trace) {
+    const px = xOfTime(p.t), py = yOfHeight(p.r);
+    pen ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    pen = false;
+  }
+  ctx.stroke();
+
+  // the MASS trace — ink, smooth: what the body felt after filtering.
+  ctx.strokeStyle = ink; ctx.lineWidth = 2.5; ctx.beginPath();
+  pen = true;
+  for (const p of trace) {
+    const px = xOfTime(p.t), py = yOfHeight(p.x);
+    pen ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    pen = false;
+  }
+  ctx.stroke();
+
+  // the live head dots at the right edge (road + mass)
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = faint;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfHeight(p.r), 6, 0, TAU); ctx.fill();
+    ctx.fillStyle = ink;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfHeight(p.x), 6, 0, TAU); ctx.fill();
+  }
+
+  // a small legend
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillStyle = faint; ctx.fillText('road', PLOT_RIGHT - 6, PLOT_TOP + 24);
+  ctx.fillStyle = ink;   ctx.fillText('mass', PLOT_RIGHT - 6, PLOT_TOP + 46);
+  ctx.textAlign = 'left';
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawTrace();
+}
+
+// --- regime read: the damping regime named by ζ -------------------------
+// the threshold is exact: ζ < 1 rings (under-damped), ζ = 1 is the fastest
+// clean settle (critically damped), ζ > 1 is sluggish (over-damped).
+function regimeOf() {
+  const z = zeta();
+  if (z < 0.98) return 'UNDER-damped — the mass overshoots and rings before settling (a bouncy car)';
+  if (z <= 1.02) return 'CRITICALLY damped — settles fastest with no overshoot (the ideal)';
+  return 'OVER-damped — no overshoot but sluggish, slow to return';
+}
+
+function updateReadout() {
+  const z = zeta();
+  const cc = cCrit();
+
+  readout.innerHTML =
+    'damping c <b>' + c.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'stiffness k <b>' + K_SPRING.toFixed(0) + '</b> &nbsp;·&nbsp; '
+    + 'mass m <b>' + MASS.toFixed(0) + '</b> &nbsp;·&nbsp; '
+    + 'bump <b>' + bump.toFixed(2) + '</b>'
+    + '<br>ζ = c / (2√(k·m)) = <b>' + z.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'c_crit = 2√(k·m) = <b>' + cc.toFixed(1) + '</b>'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  dampV.textContent = c.toFixed(1);
+  bumpV.textContent = bump.toFixed(2);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset the mass. the regime
+// (ζ) shifts and the ride re-settles from wherever the mass currently sits.
+dampEl.oninput = () => { c = dampEl.value / 1; refresh(); };
+bumpEl.oninput = () => { bump = bumpEl.value / 100; refresh(); };
+
+// step bump — raise a clean curb under the wheel for a held span, the classic
+// step input the VERIFY threshold reads: the mass overshoots (rings) iff ζ < 1,
+// settles with no overshoot iff ζ ≥ 1. it does not reset the mass; it drives it.
+bStep.onclick = () => {
+  stepT0 = simT;
+  stepUntil = simT + STEP_HOLD;
+  bStep.classList.add('on');
+  setTimeout(() => bStep.classList.remove('on'), 120);
+};
+
+// reset — mass back to rest on the road, clear the trace, watch a fresh ride.
+bReset.onclick = () => {
+  x = 0; xv = 0;
+  road = 0; roadPrev = 0;
+  trace.length = 0; simT = 0;
+  stepUntil = -1;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: small fixed sub-steps for a stable integration -------
+// SLICE small so the oscillator integrates cleanly even when ζ < 1 and the
+// mass rings — the ringing must come from the physics, not from a coarse dt
+// (a large step would inject false energy and fake overshoot at any ζ). the
+// VERIFY threshold (ring iff ζ < 1) only reads true when the sub-step is small.
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED * ROAD_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const SLICE = 0.005;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

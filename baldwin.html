@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>baldwin</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --line: #5b6b74;
+    --sq: #c9bfa6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 10rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>baldwin</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">squares</span><input type="range" id="squares" min="0" max="100" value="100"><span class="val" id="squaresV"></span></div>
+    <div class="row"><span class="name">match</span><input type="range" id="match" min="0" max="100" value="0"><span class="val" id="matchV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="520"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two slate lines are exactly the same length. the top one ends in big squares and reads short; the bottom in small squares and reads long &mdash; the flanks steal or lend the line their scale. fade the <b>squares</b> to nothing and the lines are plainly equal; raise <b>match</b> to drop the same end-marks on both.</div>
+
+<script>
+'use strict';
+
+const CX = 500;
+const L = 250;                       // both lines are exactly this long
+const YA = 200, YB = 360;            // top line (big squares), bottom line (small squares)
+const BIG = 92, SMALL = 34;
+
+let squares = 1;   // 0 => flanks gone, two bare equal lines
+let match = 0;     // proof end-marks fade in
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const sEl = document.getElementById('squares'), sV = document.getElementById('squaresV');
+const mEl = document.getElementById('match'), mV = document.getElementById('matchV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function bar(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+function square(cx, cy, s) { ctx.fillRect(cx - s / 2, cy - s / 2, s, s); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  const xL = CX - L / 2, xR = CX + L / 2;
+
+  // the flanking squares — big on top, small on bottom
+  if (squares > 0.005) {
+    ctx.save();
+    ctx.globalAlpha = squares;
+    ctx.fillStyle = css('--sq');
+    square(xL, YA, BIG); square(xR, YA, BIG);
+    square(xL, YB, SMALL); square(xR, YB, SMALL);
+    ctx.restore();
+  }
+
+  // the two identical lines, drawn on top
+  ctx.strokeStyle = css('--line'); ctx.lineWidth = 5; ctx.lineCap = 'round';
+  bar(xL, YA, xR, YA);
+  bar(xL, YB, xR, YB);
+
+  // proof: identical end-marks dropped at both ends of both lines
+  if (match > 0) {
+    ctx.save();
+    ctx.globalAlpha = match;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+    for (const x of [xL, xR]) bar(x, YA - 60, x, YB + 60);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = squares < 0.02
+    ? 'no flanks &mdash; two bare lines, both length <b>' + L + '</b>, plainly equal.'
+    : match > 0.98
+      ? 'the end-marks line up on both &mdash; both lines are length <b>' + L + '</b>.'
+      : 'both lines are length <b>' + L + '</b>. only the squares at the ends differ.';
+}
+
+function refresh() {
+  sV.textContent = squares < 0.02 ? 'none' : Math.round(squares * 100) + '%';
+  mV.textContent = match > 0.98 ? 'end-marks on' : match > 0 ? 'rising' : 'off';
+  draw();
+}
+
+sEl.oninput = () => { squares = +sEl.value / 100; refresh(); };
+mEl.oninput = () => { match = +mEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hering</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --fan: #7c7565;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 10rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(620px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>hering</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">lines</span><input type="range" id="lines" min="12" max="180" value="120"><span class="val" id="linesV"></span></div>
+    <div class="row"><span class="name">fan</span><input type="range" id="fan" min="0" max="100" value="100"><span class="val" id="fanV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="640"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two orange lines are perfectly straight and parallel. laid across a fan of lines bursting from the centre, they seem to bow outward at the middle &mdash; the radial pattern reads as false perspective, and your eye bends the straight lines to fit it. pack more <b>lines</b> into the fan and the bow deepens; fade the <b>fan</b> to nothing and, with the background gone, only the two plainly straight lines remain.</div>
+
+<script>
+'use strict';
+
+const CX = 450, CY = 320;               // fan centre
+const BARX = 150;                       // test bars at CX ± BARX
+const BY0 = 90, BY1 = 550;              // bars run past the fan, into clear paper
+
+let lines = 120;  // number of radial spokes — the denser, the stronger the bow
+let fan = 1;      // 0 => no fan, only the two straight lines remain
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const linesEl = document.getElementById('lines'), linesV = document.getElementById('linesV');
+const fanEl = document.getElementById('fan'), fanV = document.getElementById('fanV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // the radial fan — spokes from the centre to well past the frame
+  if (fan > 0) {
+    ctx.save();
+    ctx.globalAlpha = fan;
+    ctx.strokeStyle = css('--fan'); ctx.lineWidth = 1.4;
+    const R = 900;
+    for (let i = 0; i < lines; i++) {
+      const a = i * 2 * Math.PI / lines;
+      line(CX, CY, CX + R * Math.cos(a), CY + R * Math.sin(a));
+    }
+    ctx.restore();
+  }
+
+  // the two straight test lines
+  ctx.strokeStyle = css('--mark'); ctx.lineWidth = 5; ctx.lineCap = 'round';
+  line(CX - BARX, BY0, CX - BARX, BY1);
+  line(CX + BARX, BY0, CX + BARX, BY1);
+
+  readout.innerHTML = fan < 0.02
+    ? 'the fan is gone &mdash; two plainly straight, parallel lines.'
+    : 'both lines are straight and parallel; the fan only makes them look bowed.';
+}
+
+function refresh() {
+  linesV.textContent = lines + ' lines';
+  fanV.textContent = fan < 0.02 ? 'off — lines only' : Math.round(fan * 100) + '%';
+  draw();
+}
+
+linesEl.oninput = () => { lines = +linesEl.value; refresh(); };
+fanEl.oninput = () => { fan = +fanEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

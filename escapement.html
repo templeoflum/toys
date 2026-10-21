@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>escapement</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>escapement</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">length L</span><input type="range" id="len" min="10" max="250" value="100" step="1"><span class="val" id="lenV"></span></div>
+    <div class="row"><span class="name">impulse</span><input type="range" id="imp" min="0" max="100" value="45" step="1"><span class="val" id="impV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a swinging <b>pendulum</b> drives an <b>anchor</b> whose two pallets rock into a toothed <b>escape wheel</b>. each beat the anchor <b>locks</b> the wheel dead still, then <b>releases</b> exactly <b>one tooth</b> &mdash; the tooth slides off the pallet and gives the pendulum a tiny <b>impulse</b> back, replacing what friction stole. so the wheel does not spin freely: it steps one tooth per beat, chained to the swing &mdash; the <b>tick-tock</b>. the swing's period sets the rate: <b>T = 2&pi;&radic;(L/g)</b>, longer pendulum, slower clock. give too little impulse and the swing <b>dies</b>; give enough and it holds forever.<span class="cite">the escapement (verge / anchor) &middot; Huygens' pendulum clock 1656 &middot; one tooth per beat, T = 2&pi;&radic;(L/g) &middot; field: horology / harmonic oscillator</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the escapement: pendulum + anchor + escape wheel -------------------
+// a rigid pendulum of length L swings under gravity g. its exact motion is
+// θ'' = −(g/L)·sinθ (small-angle: −(g/L)·θ), integrated in small fixed
+// sub-steps. the period is T = 2π·√(L/g) — longer L, slower swing.
+//   the pendulum carries an ANCHOR (two pallets). the pallets rock into a
+// toothed ESCAPE WHEEL and alternately LOCK it (hold it dead still) and
+// RELEASE it. on each RELEASE exactly ONE tooth escapes past a pallet, the
+// wheel advances one tooth-pitch, and the escaping tooth pushes back on the
+// pallet — a small IMPULSE that tops the swing's energy up against friction.
+//   the release happens once per HALF-period (once per beat): the anchor
+// unlocks when the pendulum crosses through centre (θ = 0). left-to-right
+// crossing frees the right pallet, right-to-left frees the left — so one
+// tooth per zero-crossing, two teeth per full period, locked to the beat.
+// VERIFY (load-bearing): the escape wheel advances EXACTLY one tooth per
+// half-period (per beat); the swing period obeys T = 2π√(L/g) (small-angle);
+// therefore over elapsed sim-time t the running count of teeth advanced must
+// equal floor(t / (T/2)). the release fires on the θ zero-crossing and the
+// tooth counter increments there — the two must stay in lockstep, and the
+// readout's counted teeth must match t/(T/2). small impulse < friction ⇒ the
+// amplitude decays (swing dies); impulse ≥ friction ⇒ it sustains.
+//   GEOMETRY (also load-bearing): the escape-wheel tooth tips all lie on ONE
+// circle of radius Rw about the wheel centre Ow, evenly spaced by 360/N. the
+// anchor pivots at Oa, placed JUST above the wheel top at 1.14·Rw (close over the
+// rim, not high above it). its two pallets hang DOWN and embrace only a FEW teeth
+// at the TOP: the entry pallet at rim-angle −90°−SPAN/2, the exit at −90°+SPAN/2,
+// with SPAN = 2.5 tooth-pitches ≈ 37.5° at N=24 — the two pallets sit ~2–3 teeth
+// apart across the top, NOT on opposite rims. the .5 (half-pitch) is deliberate:
+// when the engaged pallet's tip lands ON a real tooth tip, the other pallet is a
+// half-pitch off (in the tooth GAP, clear of every tip). so at every instant
+// EXACTLY ONE pallet engages a real tooth — its tip snapped onto that tooth's tip
+// (radius Rw), the held tooth + that pallet highlighted in --mark — while the
+// other pallet is lifted clear of the rim. the wheel phase is fixed so a tooth
+// locking face meets the engaged pallet tip at each locked rest.
+const G = 9.81;              // gravity (units chosen so periods read in seconds)
+const TEETH = 24;            // escape-wheel tooth count (fixed)
+const FRICTION = 0.010;      // fractional energy lost per beat (pivot + air)
+
+let L = 1.00;               // pendulum length (sets the period)
+let impulse = 0.45;         // impulse strength 0..1 — energy each release returns
+
+// pendulum state — angle θ (rad, from vertical) and angular velocity ω.
+let theta = 0.30;           // start with a modest swing
+let omega = 0;
+let prevTheta = theta;      // previous θ, to detect the zero-crossing (a beat)
+
+// escape wheel state — its rotation, stepped one tooth per beat.
+let wheelAngle = 0;         // current wheel rotation (rad)
+let wheelTarget = 0;        // rotation it is stepping toward (one pitch per beat)
+let teeth = 0;              // running count of teeth advanced (the tick count)
+let beats = 0;              // running count of beats (half-periods) elapsed
+let locked = true;          // anchor state — true = wheel held, false = released
+let tickFlash = 0;          // brief flash timer when a tooth escapes (a tick)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const lenEl = document.getElementById('len'), lenV = document.getElementById('lenV');
+const impEl = document.getElementById('imp'), impV = document.getElementById('impV');
+const readout = document.getElementById('readout').firstElementChild;
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+const PITCH = TAU / TEETH;   // angular pitch of one tooth on the wheel
+
+// the analytic small-angle period T = 2π√(L/g), and the beat (half-period).
+function period() { return TAU * Math.sqrt(L / G); }
+function beat()   { return period() / 2; }
+function bps()    { return 1 / beat(); }         // beats per second
+
+// --- the swing + escape logic per sub-step ------------------------------
+// integrate the pendulum (semi-implicit: ω then θ) and, on each centre
+// crossing, unlock the anchor: release ONE tooth, kick the wheel one pitch
+// forward, and return a small impulse to the swing. friction bleeds a little
+// energy each beat so the impulse has something to replace.
+let simT = 0;
+function stepSim(dt) {
+  simT += dt;
+  prevTheta = theta;
+
+  // pendulum equation of motion — the exact θ'' = −(g/L)·sinθ.
+  const alpha = -(G / L) * Math.sin(theta);
+  omega += alpha * dt;
+  theta += omega * dt;
+
+  // a beat = the pendulum passing through centre (θ = 0). detect the sign
+  // change of θ across this sub-step; that crossing is where the anchor
+  // unlocks and one tooth escapes.
+  if (prevTheta === 0) prevTheta = 1e-9;
+  if (Math.sign(theta) !== Math.sign(prevTheta)) {
+    // --- one beat: release exactly ONE tooth -----------------------------
+    beats += 1;
+    teeth += 1;
+    wheelTarget += PITCH;          // step the wheel one tooth-pitch forward
+    locked = false;
+    tickFlash = 1;
+
+    // the impulse: the escaping tooth pushes back on the pallet, returning a
+    // little energy to the swing (in the current direction of travel). scaled
+    // so that above ~the friction loss it sustains, below it the swing dies.
+    const kick = impulse * 0.06;
+    omega += Math.sign(omega || 1) * kick;
+
+    // friction — a fixed fractional velocity loss each beat (what the impulse
+    // must replace). |ω| grows if impulse > loss, shrinks if impulse < loss.
+    omega *= (1 - FRICTION);
+  }
+
+  // the wheel eases toward its stepped target (a quick settle each release,
+  // then LOCKED still until the next beat) — a visible one-tooth step, not a
+  // free spin. when it has arrived, the anchor is locking again.
+  const rate = 18;               // how fast the tooth-step settles
+  const gap = wheelTarget - wheelAngle;
+  wheelAngle += gap * Math.min(1, rate * dt);
+  if (Math.abs(gap) < 0.002) { wheelAngle = wheelTarget; locked = true; }
+
+  if (tickFlash > 0) tickFlash = Math.max(0, tickFlash - dt * 4);
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the pendulum swinging over its arc. bottom band: the anchor +
+// escape wheel meshing, stepping one tooth per beat.
+const PIVOT_X = Math.round(W * 0.30);
+const PIVOT_Y = 120;
+const ROD_LEN = 520;                 // drawn rod length (visual, not L)
+
+const WHEEL_X = Math.round(W * 0.70);
+const WHEEL_Y = Math.round(H * 0.58);
+const WHEEL_R = 300;                 // escape-wheel radius Rw (to tooth tips)
+
+// --- anchor geometry, all derived from the wheel (Ow, Rw) ----------------
+// the wheel tooth tips lie on a circle of radius Rw about Ow = (WHEEL_X,
+// WHEEL_Y). the anchor pivots at Oa, JUST above the wheel top at OA_DIST from
+// Ow — measured from Rw (not a hardcoded guess) so it scales with the wheel.
+// a real anchor sits close over the wheel: OA_DIST = 1.14·Rw drops the pivot
+// just clear of the tooth-tip circle (the pallets hang down onto the top teeth).
+const Ow = { x: WHEEL_X, y: WHEEL_Y };
+const Rw = WHEEL_R;
+const OA_DIST = 1.14 * Rw;                        // anchor pivot height above Ow
+const Oa = { x: WHEEL_X, y: WHEEL_Y - OA_DIST };  // anchor pivot point
+
+// the two pallets embrace only a FEW teeth at the TOP of the wheel — close
+// together, not opposite sides. rim angles are in canvas convention (0 = +x,
+// +y downward), so the top of the wheel is at −90°; entry sits to the left,
+// exit to the right, both within a narrow band across the top.
+const TOP_ANG = -Math.PI / 2;                    // straight up from Ow
+// the span is 3 tooth-pitches (45° at N=24 — within the operator's 30–52° /
+// 2–3.5-tooth reach), so entry & exit are 3 teeth apart across the TOP, never on
+// opposite rims. an INTEGER span lets BOTH pallet tips land exactly on real tooth
+// tips at their locked rest (no half-pitch float); the "only one engaged at a
+// time" comes from the anchor ROCK — the engaged pallet is dipped onto a tip
+// while the free pallet is lifted clear of the tooth circle (see palletTips).
+const SPAN_PITCHES = 3;                           // pallet span in tooth-pitches
+const PALLET_SPAN = SPAN_PITCHES * PITCH;         // arc between the two pallets
+const ENTRY_ANG = TOP_ANG - PALLET_SPAN / 2;     // rim angle of the entry pallet
+const EXIT_ANG  = TOP_ANG + PALLET_SPAN / 2;     // rim angle of the exit pallet
+
+// a fixed drawing phase for the wheel so that at each locked rest a tooth TIP
+// sits EXACTLY at the engaged pallet's rim angle. tooth tips fall at
+// i·PITCH − 90° + WHEEL_PHASE + wheelAngle. the entry pallet is at rim angle
+// −90° − 1.5·PITCH; choosing WHEEL_PHASE = −1.5·PITCH puts the tip at i = 0
+// exactly on ENTRY_ANG when wheelAngle ≡ 0 mod PITCH (each locked rest). with the
+// 3-pitch (integer) span, the EXIT rim angle also lands on a tip — but the engaged
+// pallet is snapped to its held tooth and the free one rocked clear of the rim, so
+// only one reads as locked (see palletTips + anchorRock).
+const WHEEL_PHASE = -1.5 * PITCH;
+
+// the live swing angle drives the drawn pendulum; the amplitude is read from
+// the swing's energy so it visibly grows/decays with the impulse balance.
+function drawPendulum() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  // the pivot
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(PIVOT_X, PIVOT_Y, 8, 0, TAU); ctx.fill();
+
+  // a faint arc showing the swing's reach
+  const amp = Math.min(0.9, Math.abs(theta) + Math.abs(omega) * Math.sqrt(L / G));
+  ctx.strokeStyle = shade; ctx.lineWidth = 2; ctx.setLineDash([4, 10]);
+  ctx.beginPath();
+  ctx.arc(PIVOT_X, PIVOT_Y, ROD_LEN, Math.PI / 2 - amp, Math.PI / 2 + amp);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the rod + bob at the live angle θ (0 = straight down)
+  const bx = PIVOT_X + Math.sin(theta) * ROD_LEN;
+  const by = PIVOT_Y + Math.cos(theta) * ROD_LEN;
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(PIVOT_X, PIVOT_Y); ctx.lineTo(bx, by); ctx.stroke();
+  // the bob warms toward --mark for the brief instant a tick fires
+  ctx.fillStyle = tickFlash > 0 ? mark : ink;
+  ctx.beginPath(); ctx.arc(bx, by, 30, 0, TAU); ctx.fill();
+
+  // the centre (θ = 0) line — where the anchor unlocks each beat
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 8]);
+  ctx.beginPath(); ctx.moveTo(PIVOT_X, PIVOT_Y); ctx.lineTo(PIVOT_X, PIVOT_Y + ROD_LEN + 40); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // a quiet label
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('pendulum  L = ' + L.toFixed(2) + '   T = 2π√(L/g)', PAD + 6, 44);
+  ctx.fillText('beat = T/2  (one tooth per beat)', PAD + 6, 74);
+}
+
+// --- the escape wheel + anchor ------------------------------------------
+// a toothed wheel that steps one tooth per beat (never free-spins). the anchor
+// pivots at Oa above the wheel and carries two pallets; each pallet tip is
+// computed to sit EXACTLY on the tooth-tip circle (radius Rw from Ow). the
+// anchor rocks with the pendulum, so the entry pallet locks a tooth on one side
+// and the exit pallet locks on the other — always exactly one engaged. the
+// tooth held against the engaged pallet, and that pallet, flash --mark.
+
+// which pallet is currently locking: while the wheel is settled (locked), the
+// side the pendulum has swung to holds a tooth. θ > 0 (swung right) locks the
+// EXIT pallet; θ < 0 (swung left) locks the ENTRY pallet. during a release the
+// engaged pallet is lifting clear — draw both mid-swing but keep one on the rim.
+function engagedSide() { return theta >= 0 ? 'exit' : 'entry'; }
+
+// the anchor's rock angle about Oa, proportional to θ and clamped small so the
+// pallet tips travel only a tooth's worth across the rim (a real anchor rocks
+// only a few degrees). used to lift the free pallet a touch more as it clears.
+function anchorRock() { return Math.max(-0.09, Math.min(0.09, theta * 0.28)); }
+
+// the tooth-tip angle of the tooth currently locked by a pallet at rim-angle
+// `ang` — the nearest drawn tooth tip to that rim angle (same phase as the
+// teeth). at a locked rest this coincides with the pallet's rim angle exactly.
+function lockedToothAngle(ang) {
+  const rel = ang + Math.PI / 2 - wheelAngle - WHEEL_PHASE;
+  const iNear = Math.round(rel / PITCH);
+  return iNear * PITCH + wheelAngle - Math.PI / 2 + WHEEL_PHASE;
+}
+// a point on the wheel at rim-angle `ang` but radius `r` (r = Rw is the tooth
+// tip circle; r < Rw sits INSIDE it, clear of the teeth).
+function wheelPoint(ang, r) {
+  return { x: Ow.x + Math.cos(ang) * r, y: Ow.y + Math.sin(ang) * r };
+}
+
+// the two pallet tip positions this frame. the ENGAGED pallet's tip is SNAPPED
+// onto the real tooth tip it is holding — a point EXACTLY on the tooth-tip circle
+// (radius Rw), touching a real tooth. the FREE pallet's tip is pulled INWARD off
+// the tooth circle (radius Rw − CLEAR, plus a little more with the rock) so it is
+// visibly clear of every tooth — exactly one tip sits on the circle at all times.
+const CLEAR = 46;                              // how far inside Rw the free tip sits
+function palletTips() {
+  const rock = Math.abs(anchorRock());         // free pallet lifts a touch more
+  const engaged = engagedSide();
+  const rFree = Rw - CLEAR - rock * Rw * 0.5;   // free-pallet radius, inside the rim
+  if (engaged === 'exit') {
+    // exit snapped to its held tooth tip; entry pulled inward, clear of the teeth
+    const aTooth = lockedToothAngle(EXIT_ANG);
+    return {
+      exit:  wheelPoint(aTooth, Rw),
+      entry: wheelPoint(ENTRY_ANG, rFree),
+    };
+  }
+  // entry snapped to its held tooth tip; exit pulled inward, clear of the teeth
+  const aTooth = lockedToothAngle(ENTRY_ANG);
+  return {
+    entry: wheelPoint(aTooth, Rw),
+    exit:  wheelPoint(EXIT_ANG, rFree),
+  };
+}
+
+function drawEscapement() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const engaged = engagedSide();
+
+  // --- the escape wheel — TEETH pointed asymmetric teeth on the rim -------
+  // every tooth TIP lies on the circle of radius Rw about Ow; teeth are evenly
+  // spaced by PITCH and rotated by wheelAngle. each tooth: a gently sloping
+  // BACK (long trailing edge) rising to a sharp tip, then a steep LOCKING FACE
+  // (short, near-radial) dropping to the next root — the face a pallet catches.
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.fillStyle = shade;
+  ctx.beginPath();
+  const rTip = Rw, rRoot = Rw - 30;
+  for (let i = 0; i < TEETH; i++) {
+    const aTip  = i * PITCH + wheelAngle - Math.PI / 2 + WHEEL_PHASE;  // tip (on circle)
+    const aRoot = aTip - PITCH * 0.30;                    // root before the face
+    const xTip  = Ow.x + Math.cos(aTip) * rTip;
+    const yTip  = Ow.y + Math.sin(aTip) * rTip;
+    const xRoot = Ow.x + Math.cos(aRoot) * rRoot;
+    const yRoot = Ow.y + Math.sin(aRoot) * rRoot;
+    // sloping back sweeps up from the previous root to this tip, then the
+    // steep locking face drops from the tip to this tooth's root.
+    if (i === 0) ctx.moveTo(xRoot, yRoot); else ctx.lineTo(xRoot, yRoot);
+    ctx.lineTo(xTip, yTip);
+    // close the tip to its own root (the steep locking face) — next iteration's
+    // sloping back continues from here.
+    const aNextRoot = aTip + (PITCH - PITCH * 0.30);
+    const xNext = Ow.x + Math.cos(aNextRoot) * rRoot;
+    const yNext = Ow.y + Math.sin(aNextRoot) * rRoot;
+    ctx.lineTo(xNext, yNext);
+  }
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  // the tooth-tip circle (faint) — every tip lands here, and so does each
+  // engaged pallet tip: the shared circle makes the contact unambiguous.
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([3, 7]);
+  ctx.beginPath(); ctx.arc(Ow.x, Ow.y, Rw, 0, TAU); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the inner hub + a spoke so the one-tooth step is unmistakable
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(Ow.x, Ow.y, Rw - 70, 0, TAU); ctx.stroke();
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(Ow.x, Ow.y, 14, 0, TAU); ctx.fill();
+  ctx.strokeStyle = mark; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(Ow.x, Ow.y);
+  ctx.lineTo(Ow.x + Math.cos(wheelAngle - Math.PI / 2) * (Rw - 70),
+             Ow.y + Math.sin(wheelAngle - Math.PI / 2) * (Rw - 70));
+  ctx.stroke();
+
+  // --- the tooth held against the engaged pallet --------------------------
+  // the engaged pallet tip is snapped onto the nearest real tooth tip; highlight
+  // that same tooth in --mark so the viewer sees a REAL tooth held against the
+  // pallet face (same tooth the pallet tip lands on, both on the tooth circle).
+  const tips = palletTips();
+  const engAng = engaged === 'exit' ? EXIT_ANG : ENTRY_ANG;
+  const aLocked = lockedToothAngle(engAng);
+  const lx = Ow.x + Math.cos(aLocked) * rTip;
+  const ly = Ow.y + Math.sin(aLocked) * rTip;
+  ctx.strokeStyle = mark; ctx.lineWidth = 4;
+  // draw this tooth's locking face heavier, in --mark
+  const aLockedRoot = aLocked - PITCH * 0.30;
+  ctx.beginPath();
+  ctx.moveTo(lx, ly);
+  ctx.lineTo(Ow.x + Math.cos(aLockedRoot) * rRoot, Ow.y + Math.sin(aLockedRoot) * rRoot);
+  ctx.stroke();
+  ctx.fillStyle = mark;
+  ctx.beginPath(); ctx.arc(lx, ly, 9, 0, TAU); ctx.fill();
+
+  // --- the anchor: a rigid bent arm on Oa carrying two pallets ------------
+  // drawn directly from Oa to each computed pallet tip (no eyeballed feet). the
+  // engaged pallet is --mark (it is holding a tooth), the free one --ink. the
+  // engaged tip lies on the tooth circle; the free tip is lifted clear of it.
+  const engTip  = engaged === 'exit' ? tips.exit  : tips.entry;
+  const freeTip = engaged === 'exit' ? tips.entry : tips.exit;
+  const engAngP  = aLocked;                                       // flush to the held tooth
+  const freeAngP = engaged === 'exit' ? ENTRY_ANG : EXIT_ANG;
+
+  // the anchor body — a shallow bent yoke from tip to Oa to tip.
+  ctx.strokeStyle = ink; ctx.lineWidth = 8; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(tips.entry.x, tips.entry.y);
+  ctx.lineTo(Oa.x - 46, Oa.y + 24);
+  ctx.lineTo(Oa.x, Oa.y);
+  ctx.lineTo(Oa.x + 46, Oa.y + 24);
+  ctx.lineTo(tips.exit.x, tips.exit.y);
+  ctx.stroke();
+
+  // the pallet faces — short blocks at each tip. the free pallet (--ink) is
+  // lifted clear of the rim; the engaged pallet (--mark) presses on the
+  // highlighted tooth's locking face, its tip exactly on the tooth circle.
+  drawPallet(freeTip, freeAngP, ink);
+  drawPallet(engTip,  engAngP,  mark);
+
+  // the anchor pivot Oa
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(Oa.x, Oa.y, 10, 0, TAU); ctx.fill();
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(Oa.x, Oa.y, 10, 0, TAU); ctx.stroke();
+
+  // labels
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('escape wheel (' + TEETH + ' teeth)', Ow.x, Ow.y + Rw + 50);
+  ctx.fillText('anchor / pallets', Oa.x, Oa.y - 26);
+  ctx.fillStyle = faint; ctx.font = '16px "Courier New", monospace';
+  ctx.fillText('entry', tips.entry.x - 54, tips.entry.y - 6);
+  ctx.fillText('exit',  tips.exit.x + 48,  tips.exit.y - 6);
+  ctx.fillStyle = locked ? faint : mark; ctx.font = '22px "Courier New", monospace';
+  ctx.fillText(locked ? 'LOCKED' : 'RELEASE', Ow.x, Ow.y - 8);
+}
+
+// a pallet face: a short block centred on the tip, its long edge tangent to the
+// rim at rim-angle `ang` (so it lies flush against a tooth's locking face).
+function drawPallet(tip, ang, colour) {
+  const tang = ang + Math.PI / 2;                  // tangent direction at the rim
+  const tx = Math.cos(tang), ty = Math.sin(tang);  // along the face
+  const nx = Math.cos(ang), ny = Math.sin(ang);    // outward (radial) normal
+  const half = 26, thick = 12;
+  ctx.fillStyle = colour;
+  ctx.beginPath();
+  ctx.moveTo(tip.x - tx * half - nx * thick, tip.y - ty * half - ny * thick);
+  ctx.lineTo(tip.x + tx * half - nx * thick, tip.y + ty * half - ny * thick);
+  ctx.lineTo(tip.x + tx * half + nx * thick, tip.y + ty * half + ny * thick);
+  ctx.lineTo(tip.x - tx * half + nx * thick, tip.y - ty * half + ny * thick);
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawPendulum();
+  drawEscapement();
+}
+
+// --- regime read: does the impulse sustain the swing? -------------------
+// the impulse each beat competes with the friction loss each beat. above the
+// loss the amplitude grows/holds (the clock runs); below it the swing dies.
+// the crossover is where the per-beat impulse energy ≈ the per-beat friction.
+function regimeOf() {
+  // per-beat impulse velocity vs the per-beat friction velocity at the
+  // current speed — a live balance, the clock runs when impulse wins.
+  const kick = impulse * 0.06;
+  const loss = Math.abs(omega) * FRICTION;
+  if (kick < loss * 0.9) return 'STARVING — impulse below friction, the swing is dying';
+  if (kick > loss * 1.1) return 'SUSTAINED — impulse tops the swing up, the clock runs';
+  return 'BALANCED — impulse just holds the swing against friction';
+}
+
+function updateReadout() {
+  const T = period(), b = beat();
+  const amp = Math.abs(theta);
+  // the running teeth count should equal simT / beat — the load-bearing tie.
+  const expected = Math.floor(simT / b);
+
+  readout.innerHTML =
+    'length L <b>' + L.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'T = 2π√(L/g) = <b>' + T.toFixed(2) + ' s</b> &nbsp;·&nbsp; '
+    + 'beats/s <b>' + bps().toFixed(2) + '</b>'
+    + '<br>teeth advanced <b>' + teeth + '</b> &nbsp;·&nbsp; '
+    + 'beats elapsed <b>' + beats + '</b> &nbsp;·&nbsp; '
+    + 't / (T/2) = <b>' + expected + '</b>'
+    + '<br>impulse <b>' + impulse.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'swing amplitude <b>' + amp.toFixed(3) + ' rad</b>'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  lenV.textContent = L.toFixed(2);
+  impV.textContent = impulse.toFixed(2);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset the swing. length
+// retunes the period (the wheel steps at the new rate); impulse shifts the
+// sustain balance and the amplitude drifts toward the new steady state.
+lenEl.oninput = () => { L = lenEl.value / 100; refresh(); };
+impEl.oninput = () => { impulse = impEl.value / 100; refresh(); };
+
+// reset — swing back to a fresh start, wheel + counts to zero, watch the
+// clock find its steady amplitude under the current impulse.
+bReset.onclick = () => {
+  theta = 0.30; omega = 0; prevTheta = theta;
+  wheelAngle = 0; wheelTarget = 0;
+  teeth = 0; beats = 0; simT = 0;
+  locked = true; tickFlash = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: small fixed sub-steps for a stable swing ------------
+// SLICE small so θ'' = −(g/L)·sinθ integrates cleanly and the period lands on
+// T = 2π√(L/g) — a coarse step would drift the period and break the one-tooth-
+// per-beat tie the VERIFY invariant rests on. the zero-crossing detection (a
+// beat) also wants a small dt so no crossing is skipped at short L (fast swing).
+const SIM_SPEED = 1.0;
+let last = performance.now();
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const SLICE = 0.002;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

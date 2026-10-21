@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>best fraction</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --bar: #4a6670;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .5rem; margin-bottom: 1rem; flex-wrap: wrap; justify-content: center; }
+  button { font: inherit; font-size: .9rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .9rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .cf { font-family: 'Courier New', monospace; font-size: 1.05rem; margin-bottom: .3rem; letter-spacing: .04em; }
+  .cf .a0 { color: var(--mark); }
+  .val { font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; margin-bottom: 1.6rem; }
+  table { border-collapse: collapse; width: min(720px, 96vw); font-family: 'Courier New', monospace; font-size: .9rem; }
+  td { padding: .35rem .5rem; border-bottom: 1px solid var(--shade); }
+  td.frac { font-size: 1.15rem; white-space: nowrap; }
+  td.side { color: var(--faint); text-align: center; width: 2rem; }
+  td.err { color: #6d6653; text-align: right; white-space: nowrap; }
+  td.bar { width: 40%; }
+  .bar div { height: 10px; background: var(--bar); border-radius: 2px; }
+  tr.best td.frac { color: var(--mark); }
+  .note { margin-top: 1.4rem; font-family: 'Courier New', monospace; font-size: .82rem; color: var(--mark); text-align: center; min-height: 1.2rem; }
+  .hint { margin-top: 1.4rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>best fraction</h1>
+  <div class="controls">
+    <button data-k="pi" class="on">&pi;</button>
+    <button data-k="phi">&phi; golden</button>
+    <button data-k="sqrt2">&radic;2</button>
+    <button data-k="e">e</button>
+  </div>
+  <div class="cf" id="cf"></div>
+  <div class="val" id="val"></div>
+  <table><tbody id="rows"></tbody></table>
+  <div class="note" id="note"></div>
+  <div class="hint">peel a number into a nest of fractions and each stage you stop at is the <b>best</b> fraction of its size &mdash; no simpler ratio lands closer. they close in from alternating sides, above then below. the <b>golden</b> ratio&rsquo;s peeling is all 1s: the slowest to close, the hardest number to pin with a fraction.</div>
+
+<script>
+'use strict';
+const TARGETS = {
+  pi: { label: 'π', v: Math.PI },
+  phi: { label: 'φ', v: (1 + Math.sqrt(5)) / 2 },
+  sqrt2: { label: '√2', v: Math.SQRT2 },
+  e: { label: 'e', v: Math.E },
+};
+let key = 'pi';
+const N = 9;
+
+const cfEl = document.getElementById('cf');
+const valEl = document.getElementById('val');
+const rowsEl = document.getElementById('rows');
+const noteEl = document.getElementById('note');
+
+function contFrac(v, n) {
+  const a = []; let x = v;
+  for (let i = 0; i < n; i++) {
+    const ai = Math.floor(x); a.push(ai);
+    const frac = x - ai;
+    if (frac < 1e-12) break;
+    x = 1 / frac;
+  }
+  return a;
+}
+function convergents(a) {
+  const out = []; let pm1 = 1, pm2 = 0, qm1 = 0, qm2 = 1;
+  for (const ai of a) {
+    const p = ai * pm1 + pm2, q = ai * qm1 + qm2;
+    out.push([p, q]); pm2 = pm1; pm1 = p; qm2 = qm1; qm1 = q;
+  }
+  return out;
+}
+
+function render() {
+  const t = TARGETS[key];
+  const a = contFrac(t.v, N);
+  const conv = convergents(a);
+
+  cfEl.innerHTML = '[ <span class="a0">' + a[0] + '</span> ; ' + a.slice(1).join(', ') + ', … ]';
+  valEl.textContent = t.label + ' = ' + t.v.toFixed(10);
+
+  // scale bars by -log10(error): more accurate → longer bar
+  const errs = conv.map(([p, q]) => Math.abs(t.v - p / q) || 1e-16);
+  const logs = errs.map(e => -Math.log10(e));
+  const maxLog = Math.max(...logs);
+
+  rowsEl.innerHTML = '';
+  conv.forEach(([p, q], i) => {
+    const val = p / q;
+    const err = t.v - val;
+    const side = err > 0 ? '↓' : '↑';   // fraction below target (↓) or above (↑)
+    const tr = document.createElement('tr');
+    if (i === conv.length - 1) tr.className = 'best';
+    const barW = Math.max(2, (logs[i] / maxLog) * 100);
+    tr.innerHTML =
+      '<td class="frac">' + p + '/' + q + '</td>' +
+      '<td class="side">' + (i === 0 ? '' : side) + '</td>' +
+      '<td>' + val.toFixed(8) + '</td>' +
+      '<td class="err">off ' + errs[i].toExponential(1) + '</td>' +
+      '<td class="bar"><div style="width:' + barW + '%"></div></td>';
+    rowsEl.appendChild(tr);
+  });
+
+  noteEl.textContent = key === 'phi'
+    ? 'all 1s — every step barely improves; φ is the hardest to approximate'
+    : key === 'pi'
+      ? '355/113 is famously good — the next term (292) is huge, so stopping there costs almost nothing'
+      : '';
+}
+
+for (const b of document.querySelectorAll('.controls button')) {
+  b.onclick = () => {
+    key = b.dataset.k;
+    for (const j of document.querySelectorAll('.controls button')) j.classList.toggle('on', j === b);
+    render();
+  };
+}
+render();
+</script>
+</body>
+</html>

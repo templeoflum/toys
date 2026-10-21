@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>story shapes</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --curve: #b8603a;
+    --good: #4a6670;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .5rem; margin-bottom: 1.2rem; flex-wrap: wrap; justify-content: center; max-width: 720px; }
+  button { font: inherit; font-size: .82rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .7rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; cursor: ns-resize; touch-action: none; }
+  #readout { margin-top: 1.3rem; text-align: center; font-family: 'Courier New', monospace; font-size: 1rem; color: var(--ink); }
+  #readout .sub { display: block; font-size: .82rem; color: #6d6653; margin-top: .3rem; }
+  .hint { margin-top: 1.4rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>story shapes</h1>
+  <div class="controls">
+    <button data-s="hole" class="on">man in a hole</button>
+    <button data-s="rags">rags to riches</button>
+    <button data-s="icarus">icarus</button>
+    <button data-s="boy">boy meets girl</button>
+    <button data-s="cinderella">cinderella</button>
+    <button data-s="tragedy">tragedy</button>
+  </div>
+  <canvas id="cv" width="1640" height="820"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a story is a line of <b style="color:var(--good)">fortune</b> rising and falling across <b>time</b>. pick a shape and read its turns &mdash; or grab the dots and drag your own story into being. the famous plots are just the handful of paths this line likes to take.</div>
+
+<script>
+'use strict';
+const NP = 7;
+
+const SHAPES = {
+  hole:       { name: 'Man in a Hole', y: [0.5, 0.3, -0.5, -0.72, -0.4, 0.5, 0.85], beats: { 2: 'into the hole', 3: 'the low', 6: 'out — higher than before' } },
+  rags:       { name: 'Rags to Riches', y: [-0.78, -0.52, -0.22, 0.08, 0.38, 0.66, 0.9], beats: { 0: 'nothing', 6: 'everything' } },
+  icarus:     { name: 'Icarus', y: [-0.1, 0.32, 0.66, 0.9, 0.58, -0.12, -0.86], beats: { 3: 'the height', 6: 'the fall' } },
+  boy:        { name: 'Boy Meets Girl', y: [0.2, 0.56, 0.85, 0.28, -0.46, 0.25, 0.82], beats: { 2: 'gets it', 4: 'loses it', 6: 'gets it back' } },
+  cinderella: { name: 'Cinderella', y: [-0.62, -0.36, 0.16, 0.52, -0.55, 0.2, 0.95], beats: { 3: 'almost', 4: 'the setback', 6: 'the crown' } },
+  tragedy:    { name: 'Tragedy', y: [0.66, 0.46, 0.2, -0.1, -0.42, -0.66, -0.9], beats: { 0: 'the height', 6: 'ruin' } },
+};
+
+let shape = 'hole';
+let pts = SHAPES.hole.y.slice();
+let custom = false;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const PADL = 70, PADR = 40, PADT = 40, PADB = 60;
+function px(i) { return PADL + (i / (NP - 1)) * (cv.width - PADL - PADR); }
+function py(f) { return PADT + (1 - (f + 1) / 2) * (cv.height - PADT - PADB); }
+function fFromY(y) { return Math.max(-1, Math.min(1, 1 - 2 * (y - PADT) / (cv.height - PADT - PADB))); }
+
+// Catmull-Rom through the points, sampled
+function curve() {
+  const P = pts.map((f, i) => [px(i), py(f)]);
+  const out = [];
+  for (let i = 0; i < NP - 1; i++) {
+    const p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || P[i + 1];
+    for (let t = 0; t < 1; t += 0.04) {
+      const t2 = t * t, t3 = t2 * t;
+      const x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3);
+      const y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3);
+      out.push([x, y]);
+    }
+  }
+  out.push([px(NP - 1), py(pts[NP - 1])]);
+  return out;
+}
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), curveC = css('--curve'), good = css('--good'), shade = css('--shade');
+  ctx.clearRect(0, 0, W, H);
+
+  // axes
+  const zeroY = py(0);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PADL, zeroY); ctx.lineTo(W - PADR, zeroY); ctx.stroke();   // neutral fortune
+  ctx.setLineDash([3, 5]);
+  ctx.beginPath(); ctx.moveTo(PADL, PADT); ctx.lineTo(PADL, H - PADB); ctx.stroke();
+  ctx.setLineDash([]);
+  // axis words
+  ctx.fillStyle = faint; ctx.font = '20px Georgia';
+  ctx.save(); ctx.translate(30, PADT + 30); ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'right'; ctx.fillStyle = good; ctx.fillText('good fortune', 0, 0); ctx.restore();
+  ctx.save(); ctx.translate(30, H - PADB - 4); ctx.rotate(-Math.PI / 2);
+  ctx.fillStyle = faint; ctx.textAlign = 'left'; ctx.fillText('ill fortune', 0, 0); ctx.restore();
+  ctx.fillStyle = faint; ctx.textAlign = 'left'; ctx.fillText('beginning', PADL, H - PADB + 30);
+  ctx.textAlign = 'right'; ctx.fillText('end', W - PADR, H - PADB + 30);
+
+  // the curve
+  const c = curve();
+  ctx.strokeStyle = curveC; ctx.lineWidth = 3;
+  ctx.beginPath(); c.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.stroke();
+
+  // beat labels (presets only)
+  if (!custom) {
+    const beats = SHAPES[shape].beats;
+    ctx.fillStyle = ink; ctx.font = '19px Georgia';
+    for (const i in beats) {
+      const x = px(+i), y = py(pts[+i]);
+      const above = pts[+i] < 0.4;
+      ctx.textAlign = +i === 0 ? 'left' : (+i === NP - 1 ? 'right' : 'center');
+      ctx.fillText(beats[i], x, above ? y - 18 : y + 30);
+    }
+  }
+
+  // control dots
+  for (let i = 0; i < NP; i++) {
+    ctx.fillStyle = css('--paper'); ctx.strokeStyle = ink; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(px(i), py(pts[i]), 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+
+  readout.innerHTML = (custom ? 'your story' : SHAPES[shape].name)
+    + '<span class="sub">' + (custom ? 'drag the dots — or pick a shape above' : 'drag any dot to make it your own') + '</span>';
+}
+
+// drag
+let drag = -1;
+function pointer(ev) {
+  const r = cv.getBoundingClientRect();
+  return [(ev.clientX - r.left) / r.width * cv.width, (ev.clientY - r.top) / r.height * cv.height];
+}
+cv.addEventListener('pointerdown', (ev) => {
+  const [mx, my] = pointer(ev);
+  let best = -1, bd = 60;
+  for (let i = 0; i < NP; i++) { const d = Math.hypot(px(i) - mx, py(pts[i]) - my); if (d < bd) { bd = d; best = i; } }
+  drag = best;
+  if (drag >= 0) { cv.setPointerCapture(ev.pointerId); custom = true; setBtns(null); pts[drag] = fFromY(my); draw(); }
+});
+cv.addEventListener('pointermove', (ev) => {
+  if (drag < 0) return;
+  const [, my] = pointer(ev);
+  pts[drag] = fFromY(my); draw();
+});
+cv.addEventListener('pointerup', () => { drag = -1; });
+
+function setBtns(key) {
+  for (const b of document.querySelectorAll('.controls button'))
+    b.classList.toggle('on', b.dataset.s === key);
+}
+for (const b of document.querySelectorAll('.controls button')) {
+  b.onclick = () => { shape = b.dataset.s; pts = SHAPES[shape].y.slice(); custom = false; setBtns(shape); draw(); };
+}
+draw();
+</script>
+</body>
+</html>

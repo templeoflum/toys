@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the trail</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 8rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; margin-bottom: 1.2rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button:hover { border-color: var(--ink); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the trail</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">evaporation</span><input type="range" id="evap" min="1" max="60" value="12" step="1"><span class="val" id="evapV"></span></div>
+    <div class="row"><span class="name">ants</span><input type="range" id="ants" min="4" max="160" value="60" step="1"><span class="val" id="antsV"></span></div>
+    <div class="row"><span class="name">randomness</span><input type="range" id="rand" min="0" max="80" value="20" step="1"><span class="val" id="randV"></span></div>
+  </div>
+  <div class="modes">
+    <button id="reset">reset</button>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">ants shuttle between the <b>nest</b> and the <b>food</b>. each ant drops <b>pheromone</b> on the cell it stands on and steps next toward the strongest scent nearby &mdash; with a dash of randomness so it still explores. pheromone <b>evaporates</b> everywhere every tick. two routes are open: a <b>short</b> one and a <b>long</b> one. no ant knows which is shorter, yet the colony converges on the short path &mdash; a round trip on it finishes <b>sooner</b>, so it gets <b>more deposits per unit time</b>, out-accumulating evaporation while the long path fades. a global path chosen by no one, built from local marks alone.<span class="cite">stigmergy &middot; ant-colony pheromone trails &middot; Grass&eacute; 1959 &middot; Deneubourg double-bridge 1990</span></div>
+
+<script>
+'use strict';
+
+// --- the trail: stigmergy on a grid -------------------------------------
+// a coarse grid of cells. two special cells: the NEST and the FOOD. between
+// them the world has WALLS that leave exactly two open corridors — a SHORT
+// route and a LONG route. ants walk cell-to-cell. each ant DEPOSITS pheromone
+// on the cell it occupies; the whole field EVAPORATES a little every tick; an
+// ant CHOOSES its next cell PROBABILISTICALLY, weighted toward neighbours with
+// more pheromone, plus a randomness floor so it keeps exploring. no ant holds
+// the plan — the short route wins itself (see WHY-SHORT-WINS below).
+const COLS = 86, ROWS = 50;   // grid resolution
+let evapRate = 0.12;          // fraction of pheromone lost per tick (per cell)
+let antN = 60;                // number of ants
+let randF = 0.20;             // exploration floor: weight added to every option
+
+// per-ant randomness is seeded by ant INDEX (a fixed per-ant phase), NOT the
+// wall clock — so behaviour is reproducible and the exploration is spread
+// evenly across the colony rather than tied to frame timing. Math.random is
+// still used for the actual weighted-choice draw (a live stochastic sim);
+// the index-phase only decides HOW exploratory each ant is baseline.
+
+// the pheromone field: one float per cell, 0..∞ (bounded in practice by the
+// deposit/evaporate balance). index = r*COLS + c.
+let pher = new Float32Array(COLS * ROWS);
+
+// walls: true = impassable. carved so two corridors remain (short + long).
+let wall = new Uint8Array(COLS * ROWS);
+
+// the two endpoints (cell coords).
+const NEST = { c: 6,  r: ROWS >> 1 };
+const FOOD = { c: COLS - 7, r: ROWS >> 1 };
+
+// each ant: grid position, a phase (goal — heading to food or back to nest),
+// its exploration bias (from index), and a route tag for the accounting.
+let ants = [];
+
+// --- route accounting ----------------------------------------------------
+// every completed one-way trip (nest→food or food→nest) is tagged by which
+// corridor it used, so we can read which route the colony is currently
+// favouring. smoothed so the readout doesn't jitter each tick.
+let shortHits = 0, longHits = 0;     // rolling completed-trip counts (decayed)
+let totalTrips = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const evapEl = document.getElementById('evap'), evapV = document.getElementById('evapV');
+const antsEl = document.getElementById('ants'), antsV = document.getElementById('antsV');
+const randEl = document.getElementById('rand'), randV = document.getElementById('randV');
+const resetEl = document.getElementById('reset');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+const GRID_TOP = 60;
+const GRID_H = Math.round(H * 0.82);
+const CELL = Math.min((W - 2 * PAD) / COLS, GRID_H / ROWS);
+const GRID_LEFT = Math.round((W - CELL * COLS) / 2);
+
+function cellX(c) { return GRID_LEFT + c * CELL; }
+function cellY(r) { return GRID_TOP + r * CELL; }
+function idx(c, r) { return r * COLS + c; }
+function inBounds(c, r) { return c >= 0 && c < COLS && r >= 0 && r < ROWS; }
+
+// --- the world: two corridors between nest and food ---------------------
+// we fill the middle with wall, then carve two horizontal corridors that both
+// reach from near the nest row to near the food row: a SHORT one straight
+// across the middle, and a LONG one that detours up and over. the SHORT route
+// is a shorter cell-path, so a round trip on it completes in fewer ticks.
+const midR = ROWS >> 1;
+const highR = 6;                     // the long detour rides along this row
+function buildWorld() {
+  wall.fill(0);
+  // a solid block spanning the region between the two endpoints, top to bottom,
+  // leaving a clear margin around nest and food so ants can turn around.
+  const x0 = NEST.c + 3, x1 = FOOD.c - 3;
+  for (let c = x0; c <= x1; c++) {
+    for (let r = 0; r < ROWS; r++) wall[idx(c, r)] = 1;
+  }
+  // carve the SHORT corridor — one clear row straight across the middle.
+  for (let c = x0; c <= x1; c++) { wall[idx(c, midR)] = 0; wall[idx(c, midR - 1)] = 0; }
+  // carve the LONG corridor — up from near the nest, across the top, back down
+  // near the food. a strictly longer cell-path between the same two endpoints.
+  const upC = x0, downC = x1;
+  for (let r = highR; r <= midR; r++) { wall[idx(upC, r)] = 0; wall[idx(downC, r)] = 0; }
+  for (let c = x0; c <= x1; c++) { wall[idx(c, highR)] = 0; wall[idx(c, highR - 1)] = 0; }
+  // never wall the endpoints themselves.
+  wall[idx(NEST.c, NEST.r)] = 0;
+  wall[idx(FOOD.c, FOOD.r)] = 0;
+}
+
+// which corridor a cell belongs to (for tagging a trip). a cell on the top
+// detour rows counts as LONG; the straight middle counts as SHORT; anything
+// else (the open ends) is untagged and doesn't credit either route.
+function routeOfCell(c, r) {
+  if (r <= highR + 1) return 'long';
+  if (r === midR || r === midR - 1) return 'short';
+  return null;
+}
+
+// --- ants ----------------------------------------------------------------
+function spawnAnt(i) {
+  return {
+    c: NEST.c, r: NEST.r,
+    goal: 'food',                       // heading to food, then back to nest
+    bias: 0.4 + (i % 7) / 7 * 1.2,      // index-seeded exploration weight (fixed)
+    routeSeen: null,                    // corridor tag observed this leg
+  };
+}
+function buildAnts() {
+  ants = new Array(antN);
+  for (let i = 0; i < antN; i++) ants[i] = spawnAnt(i);
+}
+
+// the CHOICE rule — the heart. from the ant's cell, look at the 4 orthogonal
+// neighbours that are in-bounds and not wall. give each a weight:
+//   weight = pheromone(neighbour) + randFloor
+// where randFloor = randF * (global) + a per-ant index bias, so even an empty
+// field still gets explored and the strongest-scent cell only gets a *bias*,
+// not a lock. then draw one neighbour with probability ∝ its weight. a mild
+// goal pull nudges toward the current target so ants actually shuttle rather
+// than diffuse — but the pheromone term is what makes the route self-reinforce.
+function chooseStep(a) {
+  const opts = [];
+  let sum = 0;
+  const floor = randF * 2.0 + a.bias * 0.15;   // exploration floor for this ant
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const tgt = a.goal === 'food' ? FOOD : NEST;
+  for (const [dc, dr] of dirs) {
+    const nc = a.c + dc, nr = a.r + dr;
+    if (!inBounds(nc, nr) || wall[idx(nc, nr)]) continue;
+    // a small pull toward the current goal (does the ant get closer?). this is
+    // a weak directional prior, not a solver — it can't tell short from long.
+    const here = Math.abs(a.c - tgt.c) + Math.abs(a.r - tgt.r);
+    const there = Math.abs(nc - tgt.c) + Math.abs(nr - tgt.r);
+    const goalPull = there < here ? 0.6 : 0.15;
+    const w = pher[idx(nc, nr)] + floor + goalPull;
+    opts.push({ nc, nr, w });
+    sum += w;
+  }
+  if (!opts.length) return null;                // boxed in — shouldn't happen
+  // weighted draw (Math.random — the live stochastic step)
+  let x = Math.random() * sum;
+  for (const o of opts) { x -= o.w; if (x <= 0) return o; }
+  return opts[opts.length - 1];
+}
+
+// one tick: every ant deposits on its current cell, steps once, and the whole
+// field evaporates. a leg completes when the ant reaches its target — we tag
+// the corridor it travelled and flip the goal.
+const DEPOSIT = 1.0;                    // pheromone dropped per ant per tick
+function step() {
+  // 1. DEPOSIT — each ant marks the cell it currently stands on, and notes
+  //    which corridor it is in (for the trip tag when it arrives).
+  for (const a of ants) {
+    pher[idx(a.c, a.r)] += DEPOSIT;
+    const rt = routeOfCell(a.c, a.r);
+    if (rt) a.routeSeen = rt;
+  }
+  // 2. FOLLOW — each ant chooses and takes one step by the weighted rule.
+  for (const a of ants) {
+    const tgt = a.goal === 'food' ? FOOD : NEST;
+    const nxt = chooseStep(a);
+    if (nxt) { a.c = nxt.nc; a.r = nxt.nr; }
+    // arrival: leg done. credit the corridor it used, then turn around.
+    if (a.c === tgt.c && a.r === tgt.r) {
+      if (a.routeSeen === 'short') shortHits += 1;
+      else if (a.routeSeen === 'long') longHits += 1;
+      totalTrips += 1;
+      a.routeSeen = null;
+      a.goal = a.goal === 'food' ? 'nest' : 'food';
+    }
+  }
+  // 3. EVAPORATE — every cell loses a fraction of its pheromone. this is the
+  //    forgetting that lets a stale route fade; only a route refreshed FASTER
+  //    than it evaporates survives (see WHY-SHORT-WINS).
+  const keep = 1 - evapRate;
+  for (let i = 0; i < pher.length; i++) pher[i] *= keep;
+  // slow decay on the route tallies so the readout tracks the *recent* mix,
+  // not the whole run's history.
+  shortHits *= 0.995; longHits *= 0.995;
+}
+
+// WHY-SHORT-WINS (the invariant, in words):
+//   both corridors start equal. an ant on the SHORT route completes its round
+//   trip in fewer ticks, so per unit time it lays MORE deposits along it than a
+//   long-route ant does along the long one. evaporation removes the same
+//   FRACTION from every cell each tick. so the short route's deposit-rate beats
+//   its evaporation-loss sooner and its pheromone climbs; the higher pheromone
+//   biases the weighted choice, pulling still more ants onto it; those ants
+//   round-trip fast and deposit more — a positive loop. the long route, fed
+//   slower, can't out-run the same evaporation and fades. the colony converges
+//   on the short path though no single ant ever compared the two.
+
+// --- draw ----------------------------------------------------------------
+function drawField() {
+  const paper = css('--paper'), faint = css('--faint'), shade = css('--shade'),
+        ink = css('--ink'), mark = css('--mark');
+
+  // find the current max pheromone for a normalised shade (a soft ceiling so
+  // one hot cell doesn't wash the rest out).
+  let mx = 0.001;
+  for (let i = 0; i < pher.length; i++) if (pher[i] > mx) mx = pher[i];
+
+  // cells: walls as --shade blocks; open cells tinted by pheromone from paper
+  // toward --mark. the trail is literally the accumulated marks.
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x = cellX(c), y = cellY(r);
+      if (wall[idx(c, r)]) {
+        ctx.fillStyle = shade;
+        ctx.fillRect(x, y, CELL, CELL);
+      } else {
+        const p = pher[idx(c, r)] / mx;         // 0..1
+        if (p > 0.02) {
+          // lerp paper→mark by p (a warm scent stain)
+          const a = Math.min(1, p * 1.15);
+          ctx.fillStyle = mark;
+          ctx.globalAlpha = a;
+          ctx.fillRect(x, y, CELL, CELL);
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+  }
+
+  // nest and food markers.
+  ctx.fillStyle = ink;
+  ctx.fillRect(cellX(NEST.c) - CELL, cellY(NEST.r) - CELL, CELL * 3, CELL * 3);
+  ctx.fillStyle = mark;
+  ctx.fillRect(cellX(FOOD.c) - CELL, cellY(FOOD.r) - CELL, CELL * 3, CELL * 3);
+  ctx.fillStyle = faint; ctx.font = Math.round(CELL * 2.2) + 'px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('nest', cellX(NEST.c) + CELL / 2, cellY(NEST.r) - CELL * 2);
+  ctx.fillStyle = mark;
+  ctx.fillText('food', cellX(FOOD.c) + CELL / 2, cellY(FOOD.r) - CELL * 2);
+
+  // the ants themselves — small --ink dots so you see the live shuttle.
+  ctx.fillStyle = ink;
+  const rad = Math.max(1.5, CELL * 0.32);
+  for (const a of ants) {
+    ctx.beginPath();
+    ctx.arc(cellX(a.c) + CELL / 2, cellY(a.r) + CELL / 2, rad, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // corridor labels so the eye can name short vs long.
+  ctx.fillStyle = faint; ctx.font = Math.round(CELL * 1.8) + 'px Georgia';
+  ctx.textAlign = 'left';
+  ctx.fillText('long route (the detour)', cellX(NEST.c + 5), cellY(highR) - CELL * 1.4);
+  ctx.fillText('short route', cellX(NEST.c + 5), cellY(midR) + CELL * 3.2);
+
+  // frame
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(GRID_LEFT, GRID_TOP, CELL * COLS, CELL * ROWS);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawField();
+}
+
+// --- the route read ------------------------------------------------------
+function regimeOf() {
+  const tot = shortHits + longHits;
+  if (tot < 1) return 'warming up — ants exploring both corridors, no route favoured yet';
+  const sf = shortHits / tot;
+  if (sf > 0.75) return 'CONVERGED — the colony has settled on the short route, built from marks alone';
+  if (sf > 0.55) return 'the short route is pulling ahead — deposits out-pacing evaporation there';
+  if (sf < 0.35) return 'the long route leads for now — raise evaporation or lower randomness to let the short win';
+  return 'both routes live — the marks haven\'t yet tipped the balance';
+}
+
+function updateReadout() {
+  const tot = shortHits + longHits;
+  const sf = tot > 0 ? shortHits / tot : 0;
+  readout.innerHTML =
+    'evaporation <b>' + evapRate.toFixed(2) + '</b>/tick &nbsp;·&nbsp; '
+    + 'ants <b>' + antN + '</b> &nbsp;·&nbsp; '
+    + 'randomness <b>' + randF.toFixed(2) + '</b>'
+    + '<br>recent trips &nbsp; short <b>' + shortHits.toFixed(0) + '</b>'
+    + ' &nbsp;/&nbsp; long <b>' + longHits.toFixed(0) + '</b>'
+    + ' &nbsp;·&nbsp; short share <b>' + (sf * 100).toFixed(0) + '%</b>'
+    + ' &nbsp;·&nbsp; completed <b>' + totalTrips + '</b>'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  evapV.textContent = evapRate.toFixed(2);
+  antsV.textContent = antN;
+  randV.textContent = randF.toFixed(2);
+  updateReadout();
+}
+
+function reset() {
+  pher = new Float32Array(COLS * ROWS);
+  shortHits = 0; longHits = 0; totalTrips = 0;
+  buildWorld();
+  buildAnts();
+  refresh();
+}
+
+// evaporation & randomness take effect live (no reset — you watch the field
+// respond). the ant count re-seeds the colony (a discrete population change).
+evapEl.oninput = () => { evapRate = evapEl.value / 100; refresh(); };
+randEl.oninput = () => { randF = randEl.value / 100; refresh(); };
+antsEl.oninput = () => { antN = +antsEl.value; buildAnts(); refresh(); };
+resetEl.onclick = () => reset();
+
+// --- the live loop: fixed sim step, steady cadence ----------------------
+// advance one sim tick every STEP_INT seconds so the shuttle is watchable and
+// the deposit/evaporate balance plays out at a readable pace regardless of
+// framerate. the rAF loop only paces arrival — the sim itself is tick-driven.
+const STEP_INT = 0.05;
+let last = performance.now();
+let acc = 0;
+
+function frame(now) {
+  let elapsed = (now - last) / 1000;
+  last = now;
+  if (elapsed > 0.25) elapsed = 0.25;    // guard tab-switch jumps
+  acc += elapsed;
+  let stepped = false;
+  while (acc >= STEP_INT) { step(); acc -= STEP_INT; stepped = true; }
+  if (stepped) { draw(); updateReadout(); }
+  requestAnimationFrame(frame);
+}
+
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

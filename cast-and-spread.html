@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the cast and the spread</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --rule: #8a8270;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .4rem; }
+  .controls { display: flex; gap: .5rem; margin: .8rem 0 1.4rem; }
+  button {
+    font: inherit; font-size: .88rem;
+    background: none; border: 1px solid var(--ink); border-radius: 2px;
+    color: var(--ink); padding: .35rem .9rem; cursor: pointer;
+  }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  #cast-btn { font-size: 1rem; padding: .5rem 1.6rem; }
+  #layers {
+    width: min(640px, 94vw); display: flex; gap: .5rem; margin-bottom: 1.4rem;
+  }
+  .layer {
+    flex: 1; border: 1.5px solid var(--ink); border-radius: 2px;
+    padding: .5rem .7rem; background: #faf7ef;
+  }
+  .layer .name { font-size: .68rem; letter-spacing: .18em; color: var(--rule); font-family: 'Courier New', monospace; }
+  .layer .val { font-size: .86rem; margin-top: .2rem; }
+  #result {
+    width: min(640px, 94vw); display: flex; gap: .8rem; justify-content: center;
+    flex-wrap: wrap; min-height: 10rem;
+  }
+  .pos {
+    flex: 1; min-width: 9rem; border: 1.5px solid var(--ink); border-radius: 2px;
+    background: #faf7ef; padding: .8rem .6rem; text-align: center;
+    animation: land .3s ease-out both;
+  }
+  @keyframes land { from { opacity: 0; transform: translateY(-5px); } }
+  .pos .q { font-size: .7rem; letter-spacing: .14em; color: var(--rule); font-family: 'Courier New', monospace; }
+  .pos .sym { font-size: 2.2rem; margin: .5rem 0 .3rem; line-height: 1.15; white-space: pre; }
+  .pos .nm { font-size: .92rem; }
+  .pos .raw { font-size: .7rem; color: var(--rule); margin-top: .45rem; font-family: 'Courier New', monospace; }
+  .hint { margin-top: 1.6rem; font-style: italic; font-size: .8rem; color: var(--faint); text-align: center; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <h1>the cast and the spread</h1>
+  <div class="controls">
+    <button class="sys on" data-s="iching">coins</button>
+    <button class="sys" data-s="tarot">cards</button>
+    <button class="sys" data-s="runes">lots</button>
+    <span style="width:1.2rem"></span>
+    <button id="cast-btn">cast</button>
+  </div>
+  <div id="layers">
+    <div class="layer"><div class="name">SAMPLER</div><div class="val" id="l-sampler"></div></div>
+    <div class="layer"><div class="name">POSITIONS</div><div class="val" id="l-positions"></div></div>
+    <div class="layer"><div class="name">TABLE</div><div class="val" id="l-table"></div></div>
+  </div>
+  <div id="result"></div>
+  <div class="hint">three different hands, one machine:<br>
+  a chance mechanism &middot; a grammar of positions &middot; a table of signs.<br>
+  switch hands &mdash; the shape of the machine never changes.</div>
+
+<script>
+'use strict';
+const TRIGRAMS = {
+  '111': ['☰', 'heaven'], '110': ['☱', 'lake'], '101': ['☲', 'fire'],
+  '100': ['☳', 'thunder'], '011': ['☴', 'wind'], '010': ['☵', 'water'],
+  '001': ['☶', 'mountain'], '000': ['☷', 'earth'],
+};
+const MAJORS = ['the fool','the magician','the high priestess','the empress','the emperor',
+  'the hierophant','the lovers','the chariot','strength','the hermit','wheel of fortune',
+  'justice','the hanged man','death','temperance','the devil','the tower','the star',
+  'the moon','the sun','judgement','the world'];
+const RUNES = [
+  ['ᚠ','fehu'],['ᚢ','uruz'],['ᚦ','thurisaz'],['ᚨ','ansuz'],
+  ['ᚱ','raidho'],['ᚲ','kenaz'],['ᚷ','gebo'],['ᚹ','wunjo'],
+  ['ᚺ','hagalaz'],['ᚾ','nauthiz'],['ᛁ','isa'],['ᛃ','jera'],
+  ['ᛇ','eihwaz'],['ᛈ','perthro'],['ᛉ','algiz'],['ᛊ','sowilo'],
+  ['ᛏ','tiwaz'],['ᛒ','berkano'],['ᛖ','ehwaz'],['ᛗ','mannaz'],
+  ['ᛚ','laguz'],['ᛜ','ingwaz'],['ᛞ','dagaz'],['ᛟ','othala']];
+
+const SYSTEMS = {
+  iching: {
+    layers: ['three coins, six throws', 'six lines, ground up', '64 hexagrams'],
+    cast() {
+      const lines = [];
+      for (let i = 0; i < 6; i++) {
+        let sum = 0, faces = [];
+        for (let c = 0; c < 3; c++) { const h = Math.random() < .5; sum += h ? 3 : 2; faces.push(h ? 'H' : 'T'); }
+        lines.push({ sum, faces, yang: sum % 2 === 1, moving: sum === 6 || sum === 9 });
+      }
+      const glyph = lines.map(l => l.yang ? '━━━' : '━ ━').reverse().join('\n');
+      const lo = TRIGRAMS[lines.slice(0, 3).map(l => +l.yang).join('')];
+      const hi = TRIGRAMS[lines.slice(3).map(l => +l.yang).join('')];
+      const moving = lines.map((l, i) => l.moving ? i + 1 : 0).filter(Boolean);
+      return [{
+        q: 'THE HEXAGRAM', sym: glyph,
+        nm: hi[1] + ' ' + hi[0] + ' over ' + lo[0] + ' ' + lo[1],
+        raw: lines.map(l => l.faces.join('') + '=' + l.sum).join(' · ')
+          + (moving.length ? '  moving: ' + moving.join(',') : ''),
+      }];
+    },
+  },
+  tarot: {
+    layers: ['a shuffle, three draws', 'past · present · future', '22 majors'],
+    cast() {
+      const deck = MAJORS.map((n, i) => [n, i]);
+      for (let i = deck.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [deck[i], deck[j]] = [deck[j], deck[i]];
+      }
+      return ['PAST', 'PRESENT', 'FUTURE'].map((q, i) => {
+        const [nm, idx] = deck[i];
+        const rev = Math.random() < .5;
+        const ROM = ['0','I','II','III','IV','V','VI','VII','VIII','IX','X','XI',
+          'XII','XIII','XIV','XV','XVI','XVII','XVIII','XIX','XX','XXI'];
+        return { q, sym: ROM[idx], rev, nm: nm + (rev ? ' (reversed)' : ''), raw: 'card ' + idx + ' of 22' };
+      });
+    },
+  },
+  runes: {
+    layers: ['a bag, three pulls', 'situation · challenge · way', '24 staves'],
+    cast() {
+      const bag = RUNES.slice();
+      const out = [];
+      for (const q of ['SITUATION', 'CHALLENGE', 'WAY']) {
+        const i = Math.floor(Math.random() * bag.length);
+        const [g, nm] = bag.splice(i, 1)[0];
+        out.push({ q, sym: g, nm, raw: 'pulled of ' + (bag.length + 1) });
+      }
+      return out;
+    },
+  },
+};
+
+let sys = 'iching';
+
+function render() {
+  const s = SYSTEMS[sys];
+  document.getElementById('l-sampler').textContent = s.layers[0];
+  document.getElementById('l-positions').textContent = s.layers[1];
+  document.getElementById('l-table').textContent = s.layers[2];
+  const res = document.getElementById('result');
+  res.innerHTML = '';
+  s.cast().forEach((p, i) => {
+    const d = document.createElement('div');
+    d.className = 'pos';
+    d.style.animationDelay = (i * 90) + 'ms';
+    d.innerHTML = '<div class="q">' + p.q + '</div><div class="sym"' +
+      (p.rev ? ' style="transform:rotate(180deg)"' : '') + '>' + p.sym +
+      '</div><div class="nm">' + p.nm + '</div><div class="raw">' + p.raw + '</div>';
+    res.appendChild(d);
+  });
+}
+
+document.getElementById('cast-btn').onclick = render;
+for (const b of document.querySelectorAll('.sys')) {
+  b.onclick = () => {
+    sys = b.dataset.s;
+    for (const x of document.querySelectorAll('.sys')) x.classList.toggle('on', x === b);
+    render();
+  };
+}
+render();
+</script>
+</body>
+</html>

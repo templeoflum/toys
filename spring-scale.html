@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spring scale</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>spring scale</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">load L</span><input type="range" id="load" min="0" max="100" value="30" step="1"><span class="val" id="loadV"></span></div>
+    <div class="row"><span class="name">stiffness k</span><input type="range" id="stiff" min="4" max="20" value="10" step="1"><span class="val" id="stiffV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bElastic">elastic limit</button>
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a coil spring hangs from a fixed hook; a <b>load</b> pulls its free end down. by <b>Hooke's law</b> the spring's stretch is proportional to the force: <b>F = k&middot;x</b>, so a load L stretches it by <b>x = L / k</b>. a pointer fixed to the free end travels down a graduated <b>scale</b> exactly in step with the stretch &mdash; where it lands IS the weight. a stiffer spring (bigger k) stretches less for the same load. past the spring's <b>elastic limit</b> it over-stretches and no longer returns Hooke's law &mdash; the reading goes non-linear and invalid.<span class="cite">the spring (Hooke's-law) scale &middot; Robert Hooke 1678 &middot; <i>ut tensio, sic vis</i> &mdash; x = F/k, extension proportional to load &middot; field: elasticity / statics</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the spring (Hooke's-law) scale -------------------------------------
+// a helical spring hangs from a fixed hook. a load L pulls its free end
+// down with force F = L (weight, in load-units). Hooke's law says the
+// stretch is proportional to that force:
+//   F = k·x    ⇒    x = F / k = L / k
+// the pointer is fixed to the free end, so it moves down the graduated
+// scale by exactly the stretch x. the tick it lands on IS the weight.
+// a stiffer spring (bigger k) stretches less for the same load.
+//
+// the scale is graduated in LOAD units, not raw pixels: it is drawn so a
+// stretch of x = L/k lands the pointer at the tick reading L. because the
+// scale spacing is itself k · (px-per-unit-stretch), the k in x = L/k and
+// the k baked into the graduation cancel — the pointer always reads the
+// true load, whatever k is. that is the instrument's whole trick.
+//
+// VERIFY (load-bearing): pointer offset in load-units = x·k = (L/k)·k = L.
+//   · doubling L doubles the pointer travel        (linear in load)
+//   · a stiffer k shrinks the raw stretch x but the scale re-graduates so
+//     the READING stays L (raw travel px = (L/loadMax)·scaleLen exactly).
+// the drawn pointer y and the readout load both come from L via one map —
+// that is the check. the ELASTIC-LIMIT mode is the honest caveat: past a
+// threshold the spring yields, extra stretch appears that Hooke's law does
+// NOT predict, so the scale reading over-reads and is flagged invalid.
+
+const LOAD_MAX = 100;   // full-scale load — the bottom of the graduated scale
+
+// live knobs.
+let L = 30;             // load (weight) hung on the spring, load-units
+let k = 10;             // spring stiffness, force per unit stretch
+let elastic = false;    // elastic-limit mode: honest over-stretch past yield
+
+// the elastic (proportional) limit as a fraction of full scale. below it
+// Hooke's law holds exactly; above it the spring yields and over-stretches.
+const YIELD_FRAC = 0.80;                 // yields at 80% of full scale
+const YIELD_LOAD = LOAD_MAX * YIELD_FRAC;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const loadEl = document.getElementById('load'), loadV = document.getElementById('loadV');
+const stiffEl = document.getElementById('stiff'), stiffV = document.getElementById('stiffV');
+const readout = document.getElementById('readout').firstElementChild;
+const bElastic = document.getElementById('bElastic');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const PAD = 30;
+
+// the true Hooke's-law stretch of the spring: x = L / k.
+function stretch() { return L / k; }
+
+// --- the yield model (elastic-limit mode) -------------------------------
+// below the yield load the spring is linear (Hooke). at or above it, in
+// elastic mode, the material gives: for every extra load-unit the spring
+// stretches EXTRA beyond Hooke's prediction, growing with how far past
+// yield you are. the effective load the SCALE reads is the Hooke inverse
+// of the true stretch — so the over-stretch makes the scale over-read.
+// PLAST governs how hard it runs away past yield (visual/tuned).
+const PLAST = 2.4;   // over-stretch gain past yield — tuned, cosmetic
+
+// the actual (possibly yielded) stretch used for the drawing + reading.
+// in linear mode, or below yield, this is exactly x = L/k. past yield in
+// elastic mode it adds the runaway term.
+function stretchEff() {
+  const xHooke = stretch();                       // L / k — the honest law
+  if (!elastic || L <= YIELD_LOAD) return xHooke;
+  const over = (L - YIELD_LOAD) / k;              // Hooke stretch of the excess
+  return xHooke + over * PLAST;                   // plus the yield runaway
+}
+
+// what the SCALE reports for a given effective stretch: it is graduated by
+// the same k, so scaleReads = xEff · k. below yield that is exactly L; past
+// yield the extra stretch makes it read HIGH (over-read) — the invalid zone.
+function scaleReads() { return stretchEff() * k; }
+
+// --- layout of the drawn scene ------------------------------------------
+// the whole apparatus is one tall band: a fixed top bracket, the coil
+// spring hanging from it, the pointer + pan at its free end, and the
+// graduated load scale running down the right of the spring.
+const RIG_TOP = 90;               // the fixed hook / bracket line
+const SCALE_TOP = RIG_TOP + 20;   // top of the graduated scale (reads 0)
+const SCALE_LEN = H - SCALE_TOP - 150;   // pixel length of the full scale
+const SPRING_X = Math.round(W * 0.42);   // spring axis x
+const SCALE_X  = Math.round(W * 0.58);   // graduated scale x
+
+// map a SCALE READING (load-units) to a y down the scale. reading 0 sits at
+// the top (natural length), reading LOAD_MAX at the bottom. this is the ONE
+// linear map: pointer_y = SCALE_TOP + (reading / LOAD_MAX) · SCALE_LEN.
+function yOfReading(r) {
+  return SCALE_TOP + (r / LOAD_MAX) * SCALE_LEN;
+}
+
+// the pointer's y comes straight from the effective scale reading, so in the
+// honest (linear) regime pointer_y = SCALE_TOP + (L/LOAD_MAX)·SCALE_LEN.
+function pointerY() { return yOfReading(scaleReads()); }
+
+// --- the coil spring ----------------------------------------------------
+// a helix drawn as a zig-zag between the fixed top and the free end. the
+// free end sits at the pointer y, so the coils visibly spread as the load
+// (and the stretch) grows — the coil spacing IS the stretch made visible.
+function drawSpring() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const topY = RIG_TOP;
+  const endY = Math.min(pointerY(), SCALE_TOP + SCALE_LEN);   // clamp to pan travel
+  const coils = 12;                 // number of coils drawn
+  const amp = 46;                   // coil half-width (px)
+  const helixTop = topY + 40;       // where the coils begin below the bracket
+  const helixBot = endY - 40;       // where they end above the pointer hub
+  const span = Math.max(helixBot - helixTop, coils * 4);
+
+  // the fixed top bracket the spring hangs from
+  ctx.strokeStyle = ink; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(SPRING_X - 120, topY); ctx.lineTo(SPRING_X + 120, topY); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('fixed hook', SPRING_X, topY - 16);
+
+  // the short wire from the bracket to the first coil
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(SPRING_X, topY); ctx.lineTo(SPRING_X, helixTop); ctx.stroke();
+
+  // the coils — a zig-zag helix. the vertical pitch grows with the stretch
+  // because helixBot follows the pointer; wider spacing = more stretch.
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(SPRING_X, helixTop);
+  const steps = coils * 2;
+  for (let i = 1; i <= steps; i++) {
+    const y = helixTop + span * (i / steps);
+    const side = (i % 2 === 0) ? 0 : ((i % 4 === 1) ? -amp : amp);
+    ctx.lineTo(SPRING_X + side, y);
+  }
+  ctx.lineTo(SPRING_X, helixBot);
+  ctx.stroke();
+
+  // the wire from the last coil down to the pointer hub
+  ctx.beginPath(); ctx.moveTo(SPRING_X, helixBot); ctx.lineTo(SPRING_X, endY); ctx.stroke();
+
+  // --- the pointer + pan at the free end --------------------------------
+  // a horizontal index arm reaches from the spring end across to the scale;
+  // where its tip crosses the scale is the reading. a small pan hangs below
+  // carrying the load.
+  const over = elastic && L > YIELD_LOAD;   // in the invalid over-stretch zone
+  const idx = over ? mark : ink;
+
+  // the pointer hub on the spring axis
+  ctx.fillStyle = idx; ctx.beginPath(); ctx.arc(SPRING_X, endY, 10, 0, TAU); ctx.fill();
+
+  // the index arm sweeping across to the scale
+  ctx.strokeStyle = idx; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(SPRING_X, endY); ctx.lineTo(SCALE_X + 40, endY); ctx.stroke();
+  // the arrow tip pointing at the scale
+  arrowHead(SCALE_X + 40, endY, 1, 0, idx);
+
+  // the pan hanging below the hub, carrying the load
+  const panY = endY + 70;
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(SPRING_X - 60, endY); ctx.lineTo(SPRING_X - 46, panY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(SPRING_X + 60, endY); ctx.lineTo(SPRING_X + 46, panY); ctx.stroke();
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(SPRING_X - 70, panY); ctx.lineTo(SPRING_X + 70, panY); ctx.stroke();
+  // the weight sitting on the pan — its size grows a little with the load
+  const wR = 22 + (L / LOAD_MAX) * 40;
+  ctx.fillStyle = shade; ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.rect(SPRING_X - wR, panY - wR * 1.1, wR * 2, wR * 1.1); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = pick; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillStyle = css('--ink');
+  ctx.fillText('L = ' + L, SPRING_X, panY - wR * 0.4);
+
+  // the load-force arrow (weight pulling down) from the pan
+  ctx.strokeStyle = mark; ctx.fillStyle = mark; ctx.lineWidth = 3;
+  arrow(SPRING_X, panY + wR * 0.2, SPRING_X, panY + wR * 0.2 + 40 + (L / LOAD_MAX) * 60);
+  ctx.fillStyle = mark; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('F = L', SPRING_X + 16, panY + wR * 0.2 + 40);
+
+  // the stretch bracket — from the natural (unloaded) end down to the free
+  // end, labelled with the true Hooke stretch x = L/k.
+  const natY = yOfReading(0);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(SPRING_X - amp - 30, natY); ctx.lineTo(SPRING_X - amp - 30, endY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(SPRING_X - amp - 40, natY); ctx.lineTo(SPRING_X - amp - 20, natY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(SPRING_X - amp - 40, endY); ctx.lineTo(SPRING_X - amp - 20, endY); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('x = L/k = ' + stretchEff().toFixed(2), SPRING_X - amp - 48, (natY + endY) / 2);
+}
+
+// --- the graduated load scale -------------------------------------------
+// a vertical rule down the right of the spring, ticked in load-units from 0
+// (top, natural length) to LOAD_MAX (bottom). a --mark tick at the pointer
+// reads the load straight off. this scale IS the k-graduation: the spacing
+// per load-unit is SCALE_LEN/LOAD_MAX, so the pointer (at x·k = L) lands on L.
+function drawScale() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  const top = yOfReading(0), bot = yOfReading(LOAD_MAX);
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(SCALE_X, top); ctx.lineTo(SCALE_X, bot); ctx.stroke();
+
+  // ticks every 5 load-units, longer + labelled every 20
+  ctx.font = '18px "Courier New", monospace';
+  for (let r = 0; r <= LOAD_MAX; r += 5) {
+    const ty = yOfReading(r);
+    const major = (r % 20 === 0);
+    ctx.strokeStyle = faint; ctx.lineWidth = major ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(SCALE_X, ty); ctx.lineTo(SCALE_X + (major ? 28 : 15), ty); ctx.stroke();
+    if (major) {
+      ctx.fillStyle = faint; ctx.textAlign = 'left';
+      ctx.fillText(String(r), SCALE_X + 36, ty + 6);
+    }
+  }
+  // the units caption
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('load L', SCALE_X + 36, top - 18);
+
+  // the elastic-limit mark on the scale (where the spring yields)
+  if (elastic) {
+    const yy = yOfReading(YIELD_LOAD);
+    ctx.strokeStyle = mark; ctx.lineWidth = 1.5; ctx.setLineDash([4, 5]);
+    ctx.beginPath(); ctx.moveTo(SCALE_X - 200, yy); ctx.lineTo(SCALE_X + 90, yy); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = mark; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'left';
+    ctx.fillText('elastic limit (' + YIELD_LOAD + ')', SCALE_X + 96, yy - 6);
+  }
+
+  // the live pointer marker on the scale — reads the load off the graduation
+  const reads = scaleReads();
+  const my = Math.min(yOfReading(reads), bot);
+  const over = elastic && L > YIELD_LOAD;
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(SCALE_X - 20, my); ctx.lineTo(SCALE_X + 32, my); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('reads ' + reads.toFixed(1) + (over ? '  (invalid — yielded)' : ''),
+               SCALE_X + 96, my + 7);
+}
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  arrowHead(x1, y1, Math.cos(a), Math.sin(a), ctx.strokeStyle);
+}
+function arrowHead(x, y, dx, dy, colour) {
+  const s = 14, a = Math.atan2(dy, dx);
+  ctx.fillStyle = colour;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // a quiet mode label at the top-left
+  ctx.fillStyle = css('--faint'); ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText(elastic ? 'mode: elastic limit — Hooke holds below ' + YIELD_LOAD + ', yields above'
+                       : 'mode: linear — Hooke’s law x = L/k throughout', PAD + 6, 40);
+  drawScale();
+  drawSpring();
+}
+
+// --- regime read: honest linear vs over-stretched -----------------------
+function regimeOf() {
+  if (L < 1e-6) return 'unloaded — pointer at natural length (reads 0)';
+  if (elastic && L > YIELD_LOAD) return 'past the elastic limit — spring yielded, scale over-reads (invalid)';
+  return 'within the elastic range — reading proportional to load, x = L/k';
+}
+
+function updateReadout() {
+  const x = stretch();               // the true Hooke stretch L/k
+  const reads = scaleReads();        // what the graduated scale reports
+  const over = elastic && L > YIELD_LOAD;
+  readout.innerHTML =
+    'load L <b>' + L + '</b> &nbsp;·&nbsp; '
+    + 'stiffness k <b>' + k + '</b> &nbsp;·&nbsp; '
+    + 'stretch x = L/k = <b>' + x.toFixed(2) + '</b>'
+    + '<br>scale reading = x·k = <b>' + reads.toFixed(1) + '</b>'
+    + (over ? ' &nbsp;·&nbsp; <b>INVALID (yielded)</b>' : ' &nbsp;·&nbsp; = load L (exact)')
+    + '<br>Hooke: extension proportional to load — double L → double travel'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  loadV.textContent = String(L);
+  stiffV.textContent = String(k);
+  updateReadout();
+}
+
+// slider changes take effect live via the rAF redraw. load and stiffness
+// feed the stretch directly; nothing integrates over time — the pointer
+// reads the equilibrium at once.
+loadEl.oninput = () => { L = +loadEl.value; refresh(); };
+stiffEl.oninput = () => { k = +stiffEl.value; refresh(); };
+
+// elastic-limit — toggle the honest over-stretch caveat.
+bElastic.onclick = () => {
+  elastic = !elastic;
+  bElastic.classList.toggle('on', elastic);
+  refresh();
+};
+
+// reset — load and stiffness back to mid, linear mode.
+bReset.onclick = () => {
+  L = 30; k = 10; elastic = false;
+  loadEl.value = 30; stiffEl.value = 10;
+  bElastic.classList.remove('on');
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: pure redraw (no integration) ------------------------
+// the spring equilibrium is algebraic — x = L/k — so the loop just keeps
+// the canvas painted against the current knob values.
+function frame() {
+  draw();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

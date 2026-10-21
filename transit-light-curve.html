@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>transit-light-curve</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 7rem; text-align: right; }
+  .row span.val { width: 4rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>transit light curve</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">planet Rp/Rs</span><input type="range" id="rp" min="2" max="40" value="12" step="1"><span class="val" id="rpV"></span></div>
+    <div class="row"><span class="name">impact b</span><input type="range" id="b" min="0" max="120" value="20" step="1"><span class="val" id="bV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a <b>planet</b> drifts across the face of its <b>star</b>, and while it hides part of that bright disc the total light <b>dips</b>. the depth of the dip is just the fraction of the star it covers &mdash; at mid-transit, <b>(Rp/Rs)&sup2;</b>. a central pass (b=0) carves a <b>flat-bottomed</b> box; a grazing pass (b near 1) only clips the edge, a shallow <b>V</b> with no flat floor. the curve IS the reading &mdash; how Kepler and TESS weigh worlds they never see.<span class="cite">transit photometry (exoplanet detection) &middot; dip depth = (Rp/Rs)&sup2; &middot; Charbonneau et al. 2000 (HD&nbsp;209458b), the Kepler/TESS method</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- transit photometry: the exoplanet light curve ----------------------
+// a uniform (no limb-darkening) stellar disc of radius Rs, brightness 1.0.
+// a dark planet disc of radius Rp crosses in front along a horizontal chord
+// offset from the star's center by the impact parameter b (in units of Rs).
+// observed brightness is 1 minus the fraction of the star's area the planet
+// occults:
+//   brightness = 1 - overlapArea(d, Rp, Rs) / (pi * Rs^2)
+// where overlapArea is the EXACT circle-circle intersection (lens) area of
+// two discs whose centers sit a distance d apart:
+//   d >= Rs+Rp          -> 0            (no overlap, out of transit)
+//   d <= |Rs-Rp|        -> pi*min(R)^2  (one disc wholly inside the other)
+//   else (partial):
+//     a = acos((d^2 + Rp^2 - Rs^2) / (2*d*Rp))
+//     c = acos((d^2 + Rs^2 - Rp^2) / (2*d*Rs))
+//     overlap = Rp^2*(a - sin(2a)/2) + Rs^2*(c - sin(2c)/2)
+// VERIFY: for a central transit (b=0) with Rp < Rs the planet passes wholly
+// inside the star at mid-transit, so overlap = pi*Rp^2 and the MINIMUM
+// brightness must equal 1 - (Rp/Rs)^2 EXACTLY. this analytic mid-depth is
+// the load-bearing check the numeric curve must land on.
+const RS = 1.0;              // stellar radius — the unit; b is measured in Rs
+
+let rpRatio = 0.12;          // Rp/Rs — planet size, sets the depth
+let bImpact = 0.20;          // impact parameter b (0 central .. >1 no transit)
+
+// orbital phase: the planet sweeps its sky-plane x-position across the star.
+// phase runs 0..1 and wraps; x maps linearly onto a track a little wider than
+// the star+planet so the curve shows full flat 1.0 shoulders before/after.
+let phase = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rpEl = document.getElementById('rp'), rpV = document.getElementById('rpV');
+const bEl = document.getElementById('b'), bV = document.getElementById('bV');
+const bReset = document.getElementById('bReset');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// exact circle-circle intersection (lens) area of discs radius r0, r1 whose
+// centers are a distance d apart. the two textbook degenerate cases first.
+function overlapArea(d, r0, r1) {
+  if (d >= r0 + r1) return 0;                      // disjoint
+  if (d <= Math.abs(r0 - r1)) {                    // one wholly inside the other
+    const rm = Math.min(r0, r1);
+    return Math.PI * rm * rm;
+  }
+  const a = Math.acos((d * d + r1 * r1 - r0 * r0) / (2 * d * r1));
+  const c = Math.acos((d * d + r0 * r0 - r1 * r1) / (2 * d * r0));
+  return r1 * r1 * (a - Math.sin(2 * a) / 2) + r0 * r0 * (c - Math.sin(2 * c) / 2);
+}
+
+// brightness for a given center separation d — the VERIFY relation.
+function brightnessAt(d) {
+  return 1 - overlapArea(d, rpRatio * RS, RS) / (Math.PI * RS * RS);
+}
+
+// the half-track: the planet's sky-plane x ranges over [-XMAX, +XMAX] as
+// phase goes 0..1, wide enough to sit clear of the star at the shoulders.
+function xMax() { return RS + rpRatio * RS + 0.35; }
+
+// the planet's center separation d from the star center at a given phase.
+// x = the horizontal offset (sky plane); y = b (fixed chord). d = hypot(x,b).
+function sepAtPhase(p) {
+  const x = (p * 2 - 1) * xMax();
+  return Math.hypot(x, bImpact * RS);
+}
+
+// --- the scrolling light-curve buffer -----------------------------------
+// a rolling record of (phase, brightness) over the visible window. the plot
+// is drawn straight from the analytic curve each frame (deterministic), and
+// the live head dot rides the planet's current phase.
+const CURVE_N = 900;         // samples across the plotted phase window
+
+// analytic mid-transit depth for the live Rp/Rs — the (Rp/Rs)^2 invariant.
+function midDepth() { return rpRatio * rpRatio; }
+
+// is the planet ever fully inside the star along this chord? a FULL transit
+// needs b + Rp/Rs <= 1 (the far rim clears the star's edge at mid-transit);
+// otherwise it only ever grazes — a V-shaped dip with no flat floor.
+function isFull() { return bImpact + rpRatio <= 1; }
+// does the planet touch the star at all? b - Rp/Rs < 1.
+function transits() { return bImpact - rpRatio < 1; }
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+const PERIOD = 6.0;          // seconds per full orbital sweep (phase 0..1)
+
+function stepSim(dt) {
+  phase += dt / PERIOD;
+  while (phase >= 1) phase -= 1;
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the star with the planet crossing it. bottom band: the curve.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.40);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 90;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// vertical extent of the plotted brightness: 1.0 at the top, a small floor
+// below the deepest possible dip so the box/V has headroom.
+const B_TOP = 1.0;
+const B_BOT = 0.55;
+
+// map a phase in [0..1] to an x across the plot
+function xOfPhase(p) { return PLOT_LEFT + p * PLOT_W; }
+// map a brightness in [B_BOT..B_TOP] to a y (1.0 up, dip down)
+function yOfBright(b) {
+  const frac = (b - B_BOT) / (B_TOP - B_BOT);
+  return PLOT_TOP + PLOT_H - Math.max(0, Math.min(1, frac)) * PLOT_H;
+}
+
+// --- top band: the star with the planet crossing its face ---------------
+// the star is a bright filled disc (--mark); the planet a smaller dark disc
+// (--ink) riding a horizontal chord offset by b. the chord and the b-tick
+// are drawn faint so the impact parameter reads at a glance.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const cx = Math.round(W * 0.5);
+  const cy = SCENE_TOP + Math.round(SCENE_H * 0.5);
+  // pixels per Rs — sized to leave room for the shoulders of the track
+  const SCALE = Math.round(SCENE_H * 0.34);
+  const rsPx = RS * SCALE;
+  const rpPx = rpRatio * RS * SCALE;
+
+  // the star — a bright filled disc with a soft --shade halo
+  ctx.fillStyle = shade;
+  ctx.beginPath(); ctx.arc(cx, cy, rsPx + 10, 0, TAU); ctx.fill();
+  ctx.fillStyle = mark;
+  ctx.beginPath(); ctx.arc(cx, cy, rsPx, 0, TAU); ctx.fill();
+
+  // the chord the planet rides: a faint horizontal line offset by b·Rs
+  const chordY = cy + bImpact * RS * SCALE;
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(cx - xMax() * SCALE, chordY); ctx.lineTo(cx + xMax() * SCALE, chordY); ctx.stroke();
+  ctx.setLineDash([]);
+  // the b tick: a faint bracket from center down to the chord
+  if (bImpact > 0.001) {
+    ctx.strokeStyle = faint; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, chordY); ctx.stroke();
+    ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+    ctx.fillText('b = ' + bImpact.toFixed(2), cx + 8, (cy + chordY) / 2 + 6);
+  }
+
+  // the planet — a dark disc at the current phase's x along the chord
+  const px = cx + (phase * 2 - 1) * xMax() * SCALE;
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(px, chordY, rpPx, 0, TAU); ctx.fill();
+
+  // a quiet label naming the scene
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('star (uniform disc)  ·  planet Rp/Rs = ' + rpRatio.toFixed(2), PAD + 6, SCENE_TOP + 4);
+}
+
+// --- bottom band: the light curve — brightness over one sweep -----------
+// the full analytic curve across phase 0..1, drawn deterministically each
+// frame. a faint dashed line marks the mid-transit floor 1-(Rp/Rs)^2 (the
+// VERIFY depth) and the 1.0 baseline. the ink head dot rides the live phase.
+function drawCurve() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('brightness over one orbital sweep — the transit dip', PLOT_LEFT + 6, PLOT_TOP - 14);
+
+  // the 1.0 baseline (out of transit, full light)
+  const yBase = yOfBright(1.0);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([2, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, yBase); ctx.lineTo(PLOT_RIGHT, yBase); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('1.00', PLOT_LEFT + 6, yBase - 8);
+
+  // the mid-transit floor = 1 - (Rp/Rs)^2 — the analytic depth (only a real
+  // floor when the planet transits fully; on a graze the dip never reaches it)
+  const floorB = 1 - midDepth();
+  const yFloor = yOfBright(floorB);
+  ctx.strokeStyle = mark; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, yFloor); ctx.lineTo(PLOT_RIGHT, yFloor); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = mark;
+  ctx.fillText('1 - (Rp/Rs)² = ' + floorB.toFixed(4) + (isFull() ? '' : '  (grazing — not reached)'),
+               PLOT_LEFT + 6, yFloor + (isFull() ? 24 : 24));
+
+  // the analytic light curve across the whole sweep
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i <= CURVE_N; i++) {
+    const p = i / CURVE_N;
+    const x = xOfPhase(p), y = yOfBright(brightnessAt(sepAtPhase(p)));
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // the live head dot riding the planet's current phase
+  const bNow = brightnessAt(sepAtPhase(phase));
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(xOfPhase(phase), yOfBright(bNow), 6, 0, TAU); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawCurve();
+}
+
+// --- regime read: in transit vs out, full vs grazing --------------------
+function regimeOf() {
+  const inTransit = sepAtPhase(phase) < RS + rpRatio * RS;
+  if (!transits()) return 'no transit — the planet misses the disc (b too high)';
+  if (!inTransit) return 'out of transit — full light, brightness holds at 1.00';
+  return isFull()
+    ? 'in transit — full occultation, a flat-bottomed box of depth (Rp/Rs)²'
+    : 'in transit — grazing, a shallow V-dip that never flattens';
+}
+
+function updateReadout() {
+  const bNow = brightnessAt(sepAtPhase(phase));
+  const kind = !transits() ? 'no transit' : (isFull() ? 'full transit' : 'grazing transit');
+
+  readout.innerHTML =
+    'Rp/Rs <b>' + rpRatio.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'impact b <b>' + bImpact.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + '<b>' + kind + '</b>'
+    + '<br>brightness <b>' + bNow.toFixed(4) + '</b> &nbsp;·&nbsp; '
+    + 'mid-transit depth (Rp/Rs)² <b>' + midDepth().toFixed(4) + '</b>'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  rpV.textContent = rpRatio.toFixed(2);
+  bV.textContent = bImpact.toFixed(2);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset the phase. the curve
+// redraws from the new Rp/Rs or b and the planet keeps sweeping.
+rpEl.oninput = () => { rpRatio = rpEl.value / 100; refresh(); };
+bEl.oninput = () => { bImpact = bEl.value / 100; refresh(); };
+
+// reset — phase back to the start of the sweep, watch the transit from clear.
+bReset.onclick = () => {
+  phase = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: small fixed sub-steps for a smooth sweep -------------
+// SLICE small so the phase advances in fine increments — the curve's ingress
+// and egress read as clean slopes rather than jumps even on a fast period.
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const SLICE = 0.005;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

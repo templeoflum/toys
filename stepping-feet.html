@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stepping feet</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4rem; text-align: right; }
+  .row span.val { width: 13rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(700px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>stepping feet</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">stripes</span><input type="range" id="stripes" min="0" max="100" value="100"><span class="val" id="stripesV"></span></div>
+    <div class="row"><span class="name">rail</span><input type="range" id="rail" min="0" max="100" value="0"><span class="val" id="railV"></span></div>
+  </div>
+  <canvas id="cv" width="720" height="340"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the pale bar and the dark bar glide across at the exact same steady speed. but over the stripes they seem to take turns &mdash; each stalls where it matches the stripe under it and lurches where it contrasts, like two feet stepping. fade the <b>stripes</b> to a flat field and they plainly move together; raise the <b>rail</b> to lay evenly-spaced marks and watch each bar cross them at a steady rate.</div>
+
+<script>
+'use strict';
+
+const W = 720, H = 340;
+const SP = 72;                           // stripe period
+const BW = 96, BH = 46;                  // bar size
+const Y1 = 96, Y2 = 198;                 // pale bar, dark bar rows
+const SPEED = 0.07;                      // px per ms
+const LIGHT = 232, DARK = 34;            // the two bars, fixed
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const sEl = document.getElementById('stripes'), sV = document.getElementById('stripesV');
+const rEl = document.getElementById('rail'), rV = document.getElementById('railV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let stripes = 1;   // 0 => flat grey field, bars plainly move together
+let rail = 0;      // proof: evenly-spaced marks to time the steady crossings
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
+function g2(v) { return 'rgb(' + v + ',' + v + ',' + v + ')'; }
+
+function draw(ts) {
+  // background: vertical stripes fading to flat grey as stripes -> 0
+  const dk = lerp(150, 26, stripes), lt = lerp(150, 238, stripes);
+  for (let x = 0; x < W; x += SP) {
+    ctx.fillStyle = g2(dk); ctx.fillRect(x, 0, SP / 2, H);
+    ctx.fillStyle = g2(lt); ctx.fillRect(x + SP / 2, 0, SP / 2, H);
+  }
+
+  // proof rail: fixed evenly-spaced marks
+  if (rail > 0) {
+    ctx.save();
+    ctx.globalAlpha = rail;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.setLineDash([5, 6]);
+    for (let x = SP / 2; x < W; x += SP) { ctx.beginPath(); ctx.moveTo(x, 40); ctx.lineTo(x, H - 40); ctx.stroke(); }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // the two bars, same x, moving together at constant speed
+  const pos = ((ts * SPEED) % (W + BW)) - BW;
+  ctx.fillStyle = g2(LIGHT); ctx.fillRect(pos, Y1, BW, BH);
+  ctx.fillStyle = g2(DARK); ctx.fillRect(pos, Y2, BW, BH);
+
+  requestAnimationFrame(draw);
+}
+
+function refresh() {
+  sV.textContent = stripes < 0.02 ? 'flat — move together' : Math.round(stripes * 100) + '%';
+  rV.textContent = rail > 0.98 ? 'marks — steady rate' : rail > 0 ? 'rising' : 'off';
+  readout.innerHTML = stripes < 0.02
+    ? 'no stripes &mdash; both bars plainly glide together at one steady speed.'
+    : rail > 0.98
+      ? 'both bars cross the evenly-spaced marks at the same steady rate &mdash; constant speed.'
+      : 'both bars move at the same constant speed; the stripes make them seem to step.';
+}
+
+sEl.oninput = () => { stripes = +sEl.value / 100; refresh(); };
+rEl.oninput = () => { rail = +rEl.value / 100; refresh(); };
+refresh();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

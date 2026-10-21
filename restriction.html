@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>restriction</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #state.capped { color: var(--mark); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>restriction</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">width</span><input type="range" id="width" min="5" max="100" value="45" step="1"><span class="val" id="widthV"></span></div>
+    <div class="row"><span class="name">input</span><input type="range" id="input" min="0" max="100" value="70" step="1"><span class="val" id="inputV"></span></div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">flow funnels toward a narrowing <b>throat</b>, and the throat's <b>width</b> caps how much can pass &mdash; the tightest point sets the ceiling for the whole line. feed in more than the throat can carry and the surplus has nowhere to go: it <b>backs up</b> upstream as a growing pile. throughput holds at the cap no matter how hard you push; the cost of the restriction shows as the <b>backlog</b>. pinch the width down and the pile grows faster; open it and the pile drains. the bottleneck made visible.<span class="cite">flow restriction &amp; the bottleneck &middot; conservation of flow &middot; throughput = min(input, capacity)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- flow restriction & the bottleneck ----------------------------------
+// flow arrives upstream at rate `input`. it must pass a narrowing throat
+// whose gap `width` sets the maximum it can carry — the throat CAPACITY.
+// the tightest point caps the whole line:
+//   capacity   = kThroat · width              (wider gap → higher ceiling)
+//   throughput = min(input, capacity)          (can't push past the cap)
+//   excess     = input − throughput  (≥ 0)     (what won't fit this instant)
+// the surplus does not vanish — it PILES UP upstream as a backlog B. per
+// sub-step dt the pile changes at exactly the excess rate, and drains at
+// capacity when the input falls below the cap:
+//   dB/dt = input − throughput   while input > capacity   (growing)
+//         = (input − capacity)   drained by min(B/dt+…, capacity) when under
+// held as one conservation law: dB = (input − throughput_out)·dt, where
+// throughput_out never exceeds capacity and B never goes negative.
+// VERIFY: flow is conserved. throughput must read EXACTLY min(input,capacity),
+// and the backlog must change at rate (input − throughput_out) with B ≥ 0 —
+// it grows only while input > capacity and drains at the cap otherwise, never
+// dipping below zero. that balance is the load-bearing check.
+const K_THROAT = 1.0;   // capacity per unit of throat width (units/s per width)
+
+// sliders are 0..100; scaled to abstract flow units below.
+let widthF = 0.45;      // throat gap, as a fraction of the full width range
+let inputF = 0.70;      // incoming flow rate, as a fraction of the full range
+
+// abstract scales so the numbers read cleanly on the readout.
+const CAP_MAX = 10.0;   // capacity at full width (units/s)
+const IN_MAX  = 10.0;   // input at full slider (units/s)
+
+let backlog = 0;        // the upstream pile, in flow-units (never < 0)
+
+// derived flow state for the live width / input.
+function flowState() {
+  const input    = inputF * IN_MAX;                 // incoming rate
+  const capacity = K_THROAT * widthF * CAP_MAX;     // throat ceiling
+  // throughput_out: what actually passes the throat this instant. if a pile
+  // is waiting it feeds the throat too, so the throat runs at capacity while
+  // anything is backed up; otherwise it passes only what arrives.
+  const supply     = input + (backlog > 0 ? capacity : 0); // what wants through
+  const throughput = Math.min(supply, capacity);           // ≤ capacity, always
+  const excess     = input - throughput;                    // may be − while draining
+  const capped     = input > capacity + 1e-9;               // is the cap binding?
+  return { input, capacity, throughput, excess, capped };
+}
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const widthEl = document.getElementById('width'), widthV = document.getElementById('widthV');
+const inputEl = document.getElementById('input'), inputV = document.getElementById('inputV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the scrolling backlog trace ----------------------------------------
+// a rolling record of the backlog B over the last WINDOW seconds. newest at
+// the right, like feedback's timeline. the trace sits flat on the floor while
+// input ≤ capacity (nothing piles), then climbs the moment the input outruns
+// the throat — the cost of the restriction drawn as a rising pile.
+let simT = 0;
+const WINDOW = 12;          // visible trace span (seconds)
+let trace = [];             // {t, b, capped} samples
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function stepSim(dt) {
+  simT += dt;
+  const st = flowState();
+  // conservation: the pile integrates the excess. it grows at (input−capacity)
+  // while capped, drains at capacity while under, and clamps at zero — flow in
+  // minus flow out, never negative.
+  backlog += st.excess * dt;
+  if (backlog < 0) backlog = 0;
+
+  trace.push({ t: simT, b: backlog, capped: st.capped });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the funnel, throat and backlog pool. bottom band: the B(t) trace.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.42);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 110;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// backlog plot vertical span — headroom above a comfortably large pile so the
+// rise after the cap binds sits inside the band.
+const B_MAX = 40.0;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a backlog in [0..B_MAX] to a y in the plot band (up = larger pile)
+function yOfBack(b) {
+  const frac = Math.max(0, Math.min(1, b / B_MAX));
+  return PLOT_TOP + PLOT_H - frac * PLOT_H;
+}
+
+// --- the flowing particles (scene decoration, driven by the rates) ------
+// three streaks of particles: upstream (arriving at `input`), through the
+// throat (moving at `throughput`), downstream (leaving at `throughput`).
+// they are pure decoration — the numbers come from flowState — but their
+// density and speed track the live rates so the eye reads the cap.
+let particles = [];
+const N_PART = 90;
+function seedParticles() {
+  particles = [];
+  for (let i = 0; i < N_PART; i++) {
+    particles.push({ x: Math.random(), y: Math.random() * 2 - 1 });
+  }
+}
+seedParticles();
+
+// --- top band: the funnel, throat and upstream backlog pool -------------
+// flow moves left → right. a wide mouth funnels down to a throat gap whose
+// height ∝ width, then opens downstream. particles stream through, their
+// speed set by the throughput. when input outruns the throat, the pile fills
+// a --mark pool that grows just left of the throat; throughput meter beneath.
+function drawScene(dt) {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const st = flowState();
+  const cy = SCENE_TOP + Math.round(SCENE_H * 0.44);
+
+  // the pipe geometry. the throat sits a bit right of centre; the mouth flares
+  // wide on the left, the throat pinches to a gap ∝ width, the exit opens back.
+  const pipeTop = SCENE_TOP + 20, pipeBot = SCENE_TOP + SCENE_H - 90;
+  const pipeMid = (pipeTop + pipeBot) / 2;
+  const mouthX = PAD + 40;                       // left mouth
+  const throatX = Math.round(W * 0.56);          // the narrowest point
+  const exitX = W - PAD - 40;                    // right exit
+  const mouthHalf = (pipeBot - pipeTop) * 0.5;   // full mouth half-height
+  const throatHalf = Math.max(6, widthF * mouthHalf); // gap ∝ width
+
+  // the pipe walls — two converging-then-diverging lines, top and bottom.
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(mouthX, pipeMid - mouthHalf);
+  ctx.lineTo(throatX, pipeMid - throatHalf);
+  ctx.lineTo(exitX, pipeMid - mouthHalf);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(mouthX, pipeMid + mouthHalf);
+  ctx.lineTo(throatX, pipeMid + throatHalf);
+  ctx.lineTo(exitX, pipeMid + mouthHalf);
+  ctx.stroke();
+
+  // the throat gap marker — a --faint bracket calling out the capping width.
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(throatX, pipeMid - throatHalf); ctx.lineTo(throatX, pipeMid + throatHalf); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('throat', throatX, pipeMid - throatHalf - 14);
+  ctx.fillText('cap ' + st.capacity.toFixed(1), throatX, pipeMid + throatHalf + 26);
+
+  // the upstream backlog POOL — a --mark wedge that fills the mouth just left
+  // of the throat, its width ∝ the live backlog. this is the cost of the
+  // restriction made visible: the surplus that can't pass, piling up.
+  const poolMax = throatX - mouthX - 20;
+  const poolW = Math.min(poolMax, backlog * 6);
+  if (poolW > 1) {
+    const poolL = throatX - poolW;
+    // wedge shaped to the converging walls at its right edge
+    ctx.fillStyle = mark;
+    ctx.globalAlpha = 0.28;
+    ctx.beginPath();
+    // interpolate wall half-height at the pool's left and right x
+    const halfAt = x => {
+      const f = (x - mouthX) / (throatX - mouthX);
+      return mouthHalf + (throatHalf - mouthHalf) * Math.max(0, Math.min(1, f));
+    };
+    const hL = halfAt(poolL), hR = halfAt(throatX);
+    ctx.moveTo(poolL, pipeMid - hL);
+    ctx.lineTo(throatX, pipeMid - hR);
+    ctx.lineTo(throatX, pipeMid + hR);
+    ctx.lineTo(poolL, pipeMid + hL);
+    ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = mark; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+    ctx.fillText('backlog', throatX - 8, pipeMid - hR - 8);
+  }
+
+  // the streaming particles. upstream speed ∝ input, downstream ∝ throughput.
+  // a particle x runs 0→1 across the pipe; it slows through the pinched throat
+  // (mass flow constant, so it speeds where the pipe narrows — drawn as denser).
+  const inSpeed = 0.10 + st.input * 0.02;
+  const outSpeed = 0.10 + st.throughput * 0.02;
+  for (const p of particles) {
+    // advance: left half at input pace, right half at throughput pace
+    const pace = p.x < 0.56 ? inSpeed : outSpeed;
+    p.x += pace * dt;
+    if (p.x > 1) { p.x -= 1; p.y = Math.random() * 2 - 1; }
+    const px = mouthX + p.x * (exitX - mouthX);
+    // half-height of the pipe at this x → keep the particle inside the walls
+    let half;
+    if (px <= throatX) {
+      const f = (px - mouthX) / (throatX - mouthX);
+      half = mouthHalf + (throatHalf - mouthHalf) * Math.max(0, Math.min(1, f));
+    } else {
+      const f = (px - throatX) / (exitX - throatX);
+      half = throatHalf + (mouthHalf - throatHalf) * Math.max(0, Math.min(1, f));
+    }
+    const py = pipeMid + p.y * (half - 8);
+    // a particle stuck in the pool (upstream, capped) warms toward --mark
+    const inPool = st.capped && px > throatX - poolW && px < throatX;
+    ctx.fillStyle = inPool ? mark : shade;
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, TAU); ctx.fill();
+  }
+
+  // labels: input arriving at the mouth, throughput leaving the exit.
+  ctx.fillStyle = ink; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('input ' + st.input.toFixed(1), mouthX, pipeTop - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText('throughput ' + st.throughput.toFixed(1), exitX, pipeTop - 6);
+
+  // a throughput meter under the pipe: the full bar is the input rate, the
+  // filled --ink portion is what actually passes, a --faint tick marks the cap.
+  const mY = pipeBot + 46, mL = PAD + 40, mR = W - PAD - 40, mW = mR - mL;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(mL, mY, mW, 30);
+  const gFrac = r => Math.max(0, Math.min(1, r / IN_MAX));
+  // throughput fill (--ink) — never past the cap
+  ctx.fillStyle = ink;
+  ctx.fillRect(mL + 1, mY + 1, (mW - 2) * gFrac(st.throughput), 28);
+  // the excess portion (--mark) — the part of the input that doesn't pass
+  if (st.capped) {
+    const xL = mL + 1 + (mW - 2) * gFrac(st.throughput);
+    const xW = (mW - 2) * (gFrac(st.input) - gFrac(st.throughput));
+    ctx.fillStyle = mark; ctx.globalAlpha = 0.5;
+    ctx.fillRect(xL, mY + 1, xW, 28);
+    ctx.globalAlpha = 1;
+  }
+  // the capacity tick (--faint) — the ceiling the fill cannot cross
+  const capX = mL + gFrac(st.capacity) * mW;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(capX, mY - 8); ctx.lineTo(capX, mY + 38); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('capacity', capX, mY - 14);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = ink;
+  ctx.fillText('throughput meter', mL, mY + 52);
+}
+
+// --- bottom band: the backlog over time ---------------------------------
+// B(t) scrolling right-to-left, newest at the right. it stays flat on the
+// floor (0) while input ≤ capacity — the throat keeps up, nothing piles —
+// then climbs the moment the input outruns the cap. open the width and it
+// tips back down and drains toward the floor. the trace is the running cost
+// of the restriction: a flat run while the ceiling isn't binding, a rise once
+// it is.
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('upstream backlog over the last ' + WINDOW + 's — flat while the throat keeps up, then it climbs', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the zero floor — the drained line the backlog pins to while the cap slacks.
+  const zeroY = yOfBack(0);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, zeroY); ctx.lineTo(PLOT_RIGHT, zeroY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('drained floor  B = 0  (throat keeping up)', PLOT_LEFT + 6, zeroY - 8);
+
+  // the backlog trace — flat on the floor while under the cap, rising once the
+  // input outruns the throat. drawn --faint while draining/idle, --mark while
+  // the cap is binding and the pile grows, so the two regimes read distinctly.
+  ctx.lineWidth = 2;
+  let prev = null;
+  for (const p of trace) {
+    const px = xOfTime(p.t), py = yOfBack(p.b);
+    if (prev) {
+      ctx.strokeStyle = p.capped ? mark : faint;
+      ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(px, py); ctx.stroke();
+    }
+    prev = { x: px, y: py };
+  }
+
+  // the live head dot at the right edge
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = p.capped ? mark : faint;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfBack(p.b), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw(dt) {
+  ctx.clearRect(0, 0, W, H);
+  drawScene(dt);
+  drawTrace();
+}
+
+// --- regime read: is the throat keeping up, or is the cap binding? -------
+function regimeOf() {
+  const st = flowState();
+  if (st.capped) return 'capped — input outruns the throat, the surplus piles upstream';
+  if (backlog > 0.05) return 'draining — input under the cap, the pile works down';
+  return 'clear — the throat carries the whole input, nothing backs up';
+}
+
+function updateReadout() {
+  const st = flowState();
+
+  readout.innerHTML =
+    'input <b>' + st.input.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'throat capacity <b>' + st.capacity.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'throughput <b>' + st.throughput.toFixed(1) + '</b>'
+    + '<br>backlog <b>' + backlog.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'excess in <b>' + Math.max(0, st.input - st.capacity).toFixed(1) + '</b>'
+    + '<br>state <span id="state"' + (st.capped ? ' class="capped"' : '') + '>'
+      + (st.capped ? 'CAPPED (piling up)' : 'CLEAR (throat keeps up)') + '</span>'
+    + '<br>throughput = min(input, capacity)'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  const st = flowState();
+  widthV.textContent = st.capacity.toFixed(1);
+  inputV.textContent = st.input.toFixed(1);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset the backlog. pinching
+// the width drops the cap and the pile starts growing; opening it lifts the
+// cap and the pile drains from wherever it currently sits.
+widthEl.oninput = () => { widthF = widthEl.value / 100; refresh(); };
+inputEl.oninput = () => { inputF = inputEl.value / 100; refresh(); };
+
+// --- the live loop: small fixed sub-steps for a stable integration -------
+// SLICE small so the backlog integral of (input − throughput) accumulates
+// evenly — the pile's growth and drain read as clean straight ramps only if
+// dt stays small.
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const dtFrame = elapsed;   // for the particle/scene animation
+  const SLICE = 0.01;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw(dtFrame);
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

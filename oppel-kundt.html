@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oppel-kundt</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --tick: #5b6b74;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4rem; text-align: right; }
+  .row span.val { width: 11rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>oppel&mdash;kundt</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">fill</span><input type="range" id="fill" min="0" max="20" value="12"><span class="val" id="fillV"></span></div>
+    <div class="row"><span class="name">match</span><input type="range" id="match" min="0" max="100" value="0"><span class="val" id="matchV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="430"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the left span and the right span are exactly the same width. the left is filled with ticks and the right is empty &mdash; and the filled one looks distinctly wider. a divided stretch reads as longer than a bare one. empty the <b>fill</b> to none and the two spans are plainly equal; raise <b>match</b> to measure both and see the same width.</div>
+
+<script>
+'use strict';
+
+const X0 = 210, XM = 500, X1 = 790;   // two equal spans: X0..XM and XM..X1
+const W = XM - X0;                      // each span is this wide
+const CY = 210;
+const POST = 62, TICK = 44;            // heights of the boundary posts and interior ticks
+
+let fill = 12;   // interior ticks in the LEFT span — 0 empties it, both plainly equal
+let match = 0;   // proof: measure both spans, same width
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const fEl = document.getElementById('fill'), fV = document.getElementById('fillV');
+const mEl = document.getElementById('match'), mV = document.getElementById('matchV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function vline(x, half, w) { ctx.beginPath(); ctx.moveTo(x, CY - half); ctx.lineTo(x, CY + half); ctx.lineWidth = w; ctx.stroke(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  ctx.strokeStyle = css('--tick'); ctx.lineCap = 'round';
+
+  // the three boundary posts — they bound the two equal spans
+  vline(X0, POST / 2, 4);
+  vline(XM, POST / 2, 4);
+  vline(X1, POST / 2, 4);
+
+  // interior ticks fill the LEFT span only; the right span stays bare
+  for (let i = 1; i <= fill; i++) {
+    const x = X0 + i * W / (fill + 1);
+    vline(x, TICK / 2, 2);
+  }
+
+  // proof: measure both spans below — same width W
+  if (match > 0) {
+    ctx.save();
+    ctx.globalAlpha = match;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+    const my = CY + 118;
+    ctx.beginPath();
+    ctx.moveTo(X0, my); ctx.lineTo(XM, my);
+    ctx.moveTo(XM + 6, my); ctx.lineTo(X1, my);
+    ctx.stroke();
+    for (const x of [X0, XM, X1]) { ctx.beginPath(); ctx.moveTo(x, my - 9); ctx.lineTo(x, my + 9); ctx.stroke(); }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = fill === 0
+    ? 'the fill is gone &mdash; two bare spans, both width <b>' + W + '</b>, plainly equal.'
+    : match > 0.98
+      ? 'both measures are width <b>' + W + '</b> &mdash; filled and empty, the same.'
+      : 'both spans are width <b>' + W + '</b>. the filled one only looks wider.';
+}
+
+function refresh() {
+  fV.textContent = fill === 0 ? 'empty — spans equal' : fill + ' ticks';
+  mV.textContent = match > 0.98 ? 'measured — same width' : match > 0 ? 'rising' : 'off';
+  draw();
+}
+
+fEl.oninput = () => { fill = +fEl.value; refresh(); };
+mEl.oninput = () => { match = +mEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

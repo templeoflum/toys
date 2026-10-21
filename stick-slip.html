@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stick-slip</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #state.slip { color: var(--mark); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>stick-slip</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">pull speed V</span><input type="range" id="pull" min="5" max="80" value="45" step="1"><span class="val" id="pullV"></span></div>
+    <div class="row"><span class="name">stiffness k</span><input type="range" id="stiff" min="10" max="120" value="50" step="1"><span class="val" id="stiffV"></span></div>
+    <div class="row"><span class="name">friction gap</span><input type="range" id="gap" min="0" max="100" value="55" step="1"><span class="val" id="gapV"></span></div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">static friction holds the block while the spring loads with tension; when the pull beats the grip it <b>slips</b> and releases in a jerk, then sticks again &mdash; a sawtooth of build-and-release. it&rsquo;s the gap between static and kinetic friction that makes the stutter; close the gap and it slides smooth. earthquakes, a bowed string, a creaking hinge.<span class="cite">stick-slip friction &middot; Coulomb 1785 &middot; a relaxation oscillator (earthquakes, the bowed string)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the stick-slip block -----------------------------------------------
+// a block on a surface is pulled by a spring whose far end (the anchor) is
+// dragged at a steady speed V. static friction (MU_S·N) holds the block
+// still while the spring stretches and tension Fs = k·(A − x) builds; when
+// Fs beats the static grip the block breaks free and SLIPS under weaker
+// kinetic friction (MU_K·N), the spring relaxes, it slows and STICKS again.
+// per sub-step dt:
+//   A   += V*dt                      (anchor advances at pull speed)
+//   Fs   = k*(A − x)                 (spring tension on the block)
+//   stuck: x fixed until Fs > MU_S*N → break free
+//   slip:  accel = (Fs − MU_K*N*sign(vel)) / m ; vel += a*dt ; x += vel*dt
+//          re-stick when vel crosses 0 with Fs ≤ MU_S*N (snap vel=0)
+// the MU_S > MU_K gap is the whole mechanism: equal → smooth sliding, no
+// jerk. the friction-gap knob raises MU_S above a fixed MU_K (gap 0 → equal).
+const N = 1;          // normal load (constant)
+const M = 1;          // block mass (constant)
+const MU_K = 0.4;     // kinetic friction coefficient (fixed)
+const MU_S_MAX = 0.9; // static coefficient at full gap
+const C_DAMP = 0.4;   // viscous damping during slip — settles the jerk to a clean
+                      // stop (a true sawtooth) instead of a sustained spring ring
+
+// sliders scaled by 100 (V, k) so steps read finely; gap is 0..1.
+let V = 0.45;         // pull speed — how fast the anchor is dragged
+let k = 0.50;         // spring stiffness
+let gap = 0.55;       // friction gap 0..1 → MU_S = MU_K + gap*(MU_S_MAX−MU_K)
+
+function muS() { return MU_K + gap * (MU_S_MAX - MU_K); }
+
+// state: the block and the anchor. positions in the same abstract units.
+let x = 0;            // block position
+let A = 0;            // anchor position (starts level with the block)
+let vel = 0;          // block velocity (unused in the idealized-slip model)
+let stuck = true;     // STUCK (loading) vs SLIPPING (releasing)
+let slipFlash = 0;    // seconds of --mark "slip" flash left after a release
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const pullEl = document.getElementById('pull'), pullV = document.getElementById('pullV');
+const stiffEl = document.getElementById('stiff'), stiffV = document.getElementById('stiffV');
+const gapEl = document.getElementById('gap'), gapV = document.getElementById('gapV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the scrolling force trace ------------------------------------------
+// a rolling record of the spring force Fs over the last WINDOW seconds.
+// newest at the right, like feedback's timeline. each slip logs its time so
+// a --mark tick drops where the sawtooth releases.
+let simT = 0;
+const WINDOW = 10;            // visible trace span (seconds)
+let trace = [];             // {t, fs} samples
+let slips = [];             // sim-times of slip onsets (release ticks)
+
+// slip-interval estimate: time between the last two break-frees.
+let lastSlipT = -1, slipInterval = 0;
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function stepSim(dt) {
+  simT += dt;
+  A += V * dt;                 // the anchor is dragged steadily ahead
+  const FmaxS = muS() * N;     // maximum static friction grip
+
+  if (slipFlash > 0) slipFlash -= dt;
+
+  // the block grips (STUCK) while the spring loads with tension; the MOMENT the
+  // spring force beats the static grip it SLIPS. modelled as a relaxation
+  // oscillator: the release is near-instant — the block jumps forward so the
+  // spring unloads from the static grip straight down to the kinetic level Fk.
+  // that snap is the sharp edge of the sawtooth (slip-time << stick-time, the
+  // limit that makes a violin sing and a fault rupture).
+  const Fs0 = k * (A - x);
+  if (Fs0 > FmaxS) {
+    x = A - (MU_K * N) / k;      // spring force snaps to the kinetic level Fk
+    slipFlash = 0.16;            // brief --mark flash so the eye catches the jerk
+    stuck = false;
+    if (lastSlipT >= 0) slipInterval = simT - lastSlipT;
+    lastSlipT = simT;
+    slips.push(simT);
+    while (slips.length && slips[0] < simT - WINDOW) slips.shift();
+  } else {
+    stuck = slipFlash <= 0;      // gripping again once the flash fades
+  }
+
+  // blow-up guard: keep everything finite.
+  if (!isFinite(x) || !isFinite(A)) { x = 0; A = 0; slipFlash = 0; stuck = true; }
+
+  const Fs = k * (A - x);
+  trace.push({ t: simT, fs: Fs });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the block, spring, surface, anchor. bottom band: the force trace.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.42);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 110;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// force plot vertical span — a fixed ceiling headroom so the sawtooth and the
+// static-friction line both sit comfortably. MU_S*N maxes at MU_S_MAX.
+const FS_MAX = MU_S_MAX * N * 1.35;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a force in [0..FS_MAX] to a y in the plot band (up = larger)
+function yOfForce(f) {
+  const frac = Math.max(0, Math.min(1, f / FS_MAX));
+  return PLOT_TOP + PLOT_H - frac * PLOT_H;
+}
+
+// --- top band: the block, spring and anchor -----------------------------
+// the world scrolls so the block stays roughly centred: we draw everything
+// relative to x, so the block sits still and the surface + anchor slide by.
+// the spring is a zig-zag coil from a fixed wall-hook at the left to the
+// block; the anchor handle rides the coil's far end as it pulls ahead.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'), pick = css('--pick');
+
+  const railY = SCENE_TOP + Math.round(SCENE_H * 0.62);
+  const blockW = 150, blockH = 96;
+  const blockCX = Math.round(W * 0.62);        // the block sits here, fixed
+  const blockL = blockCX - blockW / 2;
+
+  // stretch = A − x in world units → pixels. scale so a full-grip stretch
+  // (roughly FmaxS/k) reads as a healthy coil length.
+  const FmaxS = muS() * N;
+  const Fs = k * (A - x);
+  const stretch = A - x;
+  const PX_PER_UNIT = 900;                      // world→pixel for the coil
+  let coilLen = stretch * PX_PER_UNIT;
+  const baseCoil = 180;                         // rest length of the drawn coil
+  const drawnCoil = baseCoil + Math.max(0, coilLen);
+  const anchorX = blockL - drawnCoil;           // anchor handle to the block's left
+
+  // the surface (a hatched rail) — hatches scroll with the world so the eye
+  // reads the block holding still against a moving ground while it sticks,
+  // then lurching when it slips.
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(PAD, railY); ctx.lineTo(W - PAD, railY); ctx.stroke();
+  ctx.lineWidth = 1.5;
+  const hatchGap = 46, hatchH = 22;
+  const scroll = (x * PX_PER_UNIT) % hatchGap;  // world scroll offset
+  for (let hx = PAD - hatchGap; hx < W - PAD + hatchGap; hx += hatchGap) {
+    const px = hx - scroll;
+    if (px < PAD || px > W - PAD) continue;
+    ctx.beginPath(); ctx.moveTo(px, railY); ctx.lineTo(px - hatchH, railY + hatchH); ctx.stroke();
+  }
+
+  // the anchor: a small handle at the coil's far end, with a pull arrow.
+  ctx.strokeStyle = faint; ctx.fillStyle = faint; ctx.lineWidth = 2;
+  const aTop = railY - blockH * 0.6;
+  ctx.strokeRect(anchorX - 26, aTop, 26, blockH * 0.6);
+  // the steady-pull arrow off the anchor's left
+  ctx.beginPath(); ctx.moveTo(anchorX - 26, aTop - 20); ctx.lineTo(anchorX - 96, aTop - 20); ctx.stroke();
+  arrowHead(anchorX - 96, aTop - 20, -1, 0);
+  ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('pull', anchorX - 61, aTop - 30);
+
+  // the spring coil — a zig-zag from the anchor to the block's left face.
+  // its colour warms toward --mark as tension nears the static ceiling, so
+  // the eye feels the load building before the break.
+  const load = FmaxS > 0 ? Math.min(1, Math.abs(Fs) / FmaxS) : 0;
+  const coilColor = stuck ? mixToMark(faint, mark, load) : mark;
+  ctx.strokeStyle = coilColor; ctx.lineWidth = 3;
+  drawCoil(anchorX, railY - blockH / 2, blockL, railY - blockH / 2, 16);
+
+  // the block itself — --mark while SLIPPING (releasing), --ink while STUCK.
+  ctx.fillStyle = stuck ? ink : mark;
+  ctx.fillRect(blockL, railY - blockH, blockW, blockH);
+  ctx.fillStyle = css('--paper'); ctx.font = '22px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(stuck ? 'stuck' : 'slip', blockCX, railY - blockH / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  // a tension bar under the scene: fills as Fs climbs toward FmaxS, glowing
+  // --mark near the break point. the loading meter the sawtooth mirrors.
+  const barY = SCENE_TOP + 24, barL = PAD + 20, barW = W - 2 * (PAD + 20), barH = 26;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(barL, barY, barW, barH);
+  const fillFrac = FmaxS > 0 ? Math.min(1, Math.abs(Fs) / FmaxS) : 0;
+  ctx.fillStyle = fillFrac > 0.85 ? mark : (stuck ? ink : mark);
+  ctx.fillRect(barL + 1, barY + 1, (barW - 2) * fillFrac, barH - 2);
+  // the static-grip ceiling marker at the bar's right end
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('tension → static grip', barL, barY - 10);
+  ctx.textAlign = 'right';
+  ctx.fillText('MU_S·N', barL + barW, barY - 10);
+  ctx.textAlign = 'left';
+}
+
+// a faint→mark colour blend by fraction t (both are hex like #rrggbb)
+function mixToMark(a, b, t) {
+  const pa = hex(a), pb = hex(b);
+  const r = Math.round(pa[0] + (pb[0] - pa[0]) * t);
+  const g = Math.round(pa[1] + (pb[1] - pa[1]) * t);
+  const bl = Math.round(pa[2] + (pb[2] - pa[2]) * t);
+  return 'rgb(' + r + ',' + g + ',' + bl + ')';
+}
+function hex(h) {
+  h = h.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+// draw a zig-zag spring coil between two points with `coils` zig segments.
+function drawCoil(x0, y0, x1, y1, coils) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;         // along-axis unit
+  const nx = -uy, ny = ux;                    // perpendicular unit
+  const amp = 18;                             // coil half-width
+  const lead = 24;                            // straight lead-in at each end
+  const inner = len - 2 * lead;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x0 + ux * lead, y0 + uy * lead);
+  for (let i = 0; i <= coils; i++) {
+    const f = i / coils;
+    const along = lead + f * inner;
+    const side = (i % 2 === 0) ? 1 : -1;
+    if (i === 0 || i === coils) {
+      ctx.lineTo(x0 + ux * along, y0 + uy * along);
+    } else {
+      ctx.lineTo(x0 + ux * along + nx * amp * side, y0 + uy * along + ny * amp * side);
+    }
+  }
+  ctx.lineTo(x1 - ux * 0, y1 - uy * 0);
+  ctx.stroke();
+}
+
+function arrowHead(x, y, dx, dy) {
+  const s = 12, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+// --- bottom band: the force sawtooth ------------------------------------
+// Fs(t) scrolling right-to-left, newest at the right. the static-friction
+// ceiling MU_S*N is a --faint dashed line the ramp climbs to; each slip drops
+// a --mark tick. stick = slow linear ramp, slip = sudden vertical release.
+// at gap 0 (MU_S == MU_K) the sawtooth flattens into a smooth line at the
+// ceiling — steady sliding, no jerks.
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('spring force Fs over the last ' + WINDOW + 's — the stick-slip sawtooth', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the static-friction ceiling — the ramp climbs to it, then releases.
+  const ceilY = yOfForce(muS() * N);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, ceilY); ctx.lineTo(PLOT_RIGHT, ceilY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('static ceiling  MU_S·N = ' + (muS() * N).toFixed(2), PLOT_LEFT + 6, ceilY - 8);
+
+  // slip ticks — --mark verticals where the block broke free (the releases)
+  ctx.strokeStyle = mark; ctx.lineWidth = 1;
+  for (const st of slips) {
+    const sx = xOfTime(st);
+    if (sx < PLOT_LEFT) continue;
+    ctx.beginPath(); ctx.moveTo(sx, PLOT_TOP + 1); ctx.lineTo(sx, PLOT_TOP + PLOT_H - 1); ctx.stroke();
+  }
+
+  // the force trace itself — clamped into the panel so nothing runs off.
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.beginPath();
+  let startpen = true;
+  for (const p of trace) {
+    const px = xOfTime(p.t), py = yOfForce(p.fs);
+    startpen ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    startpen = false;
+  }
+  ctx.stroke();
+
+  // the live head dot at the right edge
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = ink;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfForce(p.fs), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawTrace();
+}
+
+// --- regime read: does the gap make a sawtooth, or slide smooth? ---------
+function regimeOf() {
+  if (muS() - MU_K < 0.02) return 'smooth sliding — no gap, no jerk';
+  return 'stick-slip — tension builds then jerks free';
+}
+
+function updateReadout() {
+  const Fs = k * (A - x);
+  const g = muS() - MU_K;
+  const rate = slipInterval > 0.01 ? (1 / slipInterval).toFixed(2) : '—';
+  const intv = slipInterval > 0.01 ? slipInterval.toFixed(2) + ' s' : '—';
+
+  readout.innerHTML =
+    'pull V <b>' + V.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'stiffness k <b>' + k.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'Fs <b>' + Fs.toFixed(2) + '</b>'
+    + '<br>MU_S <b>' + muS().toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'MU_K <b>' + MU_K.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'gap <b>' + g.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'slip interval <b>' + intv + '</b> (' + rate + '/s)'
+    + '<br>state <span id="state"' + (stuck ? '' : ' class="slip"') + '>'
+      + (stuck ? 'STUCK (loading)' : 'SLIP (release)') + '</span>'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  pullV.textContent = V.toFixed(2);
+  stiffV.textContent = k.toFixed(2);
+  gapV.textContent = (muS() - MU_K).toFixed(2);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset the run.
+pullEl.oninput = () => { V = pullEl.value / 100; refresh(); };
+stiffEl.oninput = () => { k = stiffEl.value / 100; refresh(); };
+gapEl.oninput = () => { gap = gapEl.value / 100; refresh(); };
+
+// --- the live loop: small fixed sub-steps for a stable integration -------
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  // integrate in small slices so k·V·dt and the slip accel stay well-behaved
+  const SLICE = 0.02;
+  while (elapsed > 0) {
+    const dt = Math.min(SLICE, elapsed);
+    stepSim(dt);
+    elapsed -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

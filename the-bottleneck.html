@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the bottleneck</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the bottleneck</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">S1 rate</span><input type="range" id="r0" min="0.2" max="5" value="3.0" step="0.1"><span class="val" id="r0V"></span></div>
+    <div class="row"><span class="name">S2 rate</span><input type="range" id="r1" min="0.2" max="5" value="2.5" step="0.1"><span class="val" id="r1V"></span></div>
+    <div class="row"><span class="name">S3 rate</span><input type="range" id="r2" min="0.2" max="5" value="1.0" step="0.1"><span class="val" id="r2V"></span></div>
+    <div class="row"><span class="name">S4 rate</span><input type="range" id="r3" min="0.2" max="5" value="2.2" step="0.1"><span class="val" id="r3V"></span></div>
+    <div class="row"><span class="name">S5 rate</span><input type="range" id="r4" min="0.2" max="5" value="3.5" step="0.1"><span class="val" id="r4V"></span></div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a line is only as fast as its slowest station. work piles up in the buffer <b>before</b> the bottleneck and every station <b>after</b> it starves; speeding up any other station buys nothing. find the constraint &mdash; only it moves the whole.<span class="cite">theory of constraints &middot; Goldratt, The Goal (1984)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- five stations in a row, rates in tokens/sec ------------------------
+// an unlimited source feeds S1; S5 pushes to finished goods. the SLOWEST
+// station is the bottleneck — it alone caps the whole line's throughput.
+const NS = 5;
+let rate = [3.0, 2.5, 1.0, 2.2, 3.5];   // per-station rates; S3 the bottleneck
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rEl = [], rV = [];
+for (let i = 0; i < NS; i++) {
+  rEl[i] = document.getElementById('r' + i);
+  rV[i] = document.getElementById('r' + i + 'V');
+}
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- simulation state ---------------------------------------------------
+// buf[i] = count of tokens waiting in station i's INPUT buffer. the source
+// before S1 is infinite (S1 always has one to take), so buf[0] is unused as
+// a real queue — S1 draws straight from the source. buf[1..4] are the real
+// inter-station buffers; a station starves when its buffer is empty.
+let buf = new Array(NS).fill(0);        // buf[i] = waiting before station i
+let busy = new Array(NS).fill(false);   // is station i processing a token
+let rem = new Array(NS).fill(0);        // seconds left on the in-progress token
+let finished = 0;                       // cumulative finished goods
+
+// rolling throughput window: timestamps of recent completions (sim-seconds).
+let simT = 0;
+let doneTimes = [];                     // completion times within the window
+const WIN = 3.0;                        // rolling window length (seconds)
+
+// deterministic 1/r timer per station: cleaner than a probabilistic server
+// for a bottleneck demo. process S5→S1 so a token can't cross two stations
+// in one sub-step (a downstream slot frees before the upstream push).
+function stepSim(dt) {
+  simT += dt;
+  for (let i = NS - 1; i >= 0; i--) {
+    if (busy[i]) {
+      rem[i] -= dt;
+      if (rem[i] <= 0) {
+        // finish: push downstream (or to finished goods past S5), go idle
+        busy[i] = false;
+        if (i === NS - 1) { finished += 1; doneTimes.push(simT); }
+        else buf[i + 1] += 1;
+      }
+    }
+    // (re)load if idle and a token is available in the input buffer.
+    // S1 draws from the infinite source, so it's always able to load.
+    if (!busy[i]) {
+      const has = (i === 0) ? true : buf[i] > 0;
+      if (has) {
+        if (i !== 0) buf[i] -= 1;
+        busy[i] = true;
+        rem[i] = 1 / rate[i];           // rate ≥ 0.2 → no div-by-zero
+      }
+    }
+  }
+  // drop completions that have aged out of the rolling window
+  const cut = simT - WIN;
+  while (doneTimes.length && doneTimes[0] < cut) doneTimes.shift();
+}
+
+// bottleneck = index of the min rate (first on a tie)
+function bottleneck() {
+  let bi = 0;
+  for (let i = 1; i < NS; i++) if (rate[i] < rate[bi]) bi = i;
+  return bi;
+}
+
+// measured throughput = finished within the rolling window / window length.
+// ramp the denominator up over the first WIN seconds so it reads sane early.
+function throughput() {
+  const span = Math.min(simT, WIN);
+  if (span <= 0) return 0;
+  return doneTimes.length / span;
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the line of stations + buffers. bottom band: the rate bar chart.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.55);
+const CHART_TOP = SCENE_H + 130, CHART_H = H - CHART_TOP - 40;
+
+const BOX_W = 150, BOX_H = 150;
+const TOKEN_R = 13;
+const LINE_Y = SCENE_TOP + Math.round(SCENE_H * 0.48);
+// evenly space the five station boxes across the width, leaving room at the
+// right for the finished-goods count.
+const LEFT = PAD + 60;                              // source sits left of this
+const RIGHT = W - PAD - 130;                        // finished count column
+const SLOT = (RIGHT - LEFT) / NS;                   // per-station horizontal slot
+function boxX(i) { return LEFT + i * SLOT + (SLOT - BOX_W) / 2; }
+
+// draw a small pile of tokens rising in a column, capped, with a "+N" tally.
+function drawPile(cx, count, colTok, colMark) {
+  const cap = 6;                        // dots per column before overflow text
+  const drawn = Math.min(count, cap);
+  const overflow = count - drawn;
+  ctx.fillStyle = colTok;
+  for (let k = 0; k < drawn; k++) {
+    const y = LINE_Y + 34 - k * (TOKEN_R * 2 + 6);   // stack upward
+    ctx.beginPath();
+    ctx.arc(cx, y, TOKEN_R, 0, TAU);
+    ctx.fill();
+  }
+  if (overflow > 0) {
+    ctx.fillStyle = colMark;
+    ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+    ctx.fillText('+' + overflow, cx, LINE_Y + 34 - drawn * (TOKEN_R * 2 + 6) - 4);
+  }
+}
+
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        paper = css('--paper'), shade = css('--shade');
+  const bi = bottleneck();
+
+  // the infinite source at the far left, feeding S1
+  ctx.fillStyle = faint; ctx.font = '30px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('∞', PAD + 26, LINE_Y + 8);
+  ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('source', PAD + 26, LINE_Y + 44);
+
+  for (let i = 0; i < NS; i++) {
+    const bx = boxX(i), by = LINE_Y - BOX_H / 2;
+    const isBn = i === bi;
+
+    // the input buffer pile sits just before the box (S1's is the source →
+    // draw no pile, work is always available there).
+    if (i > 0) drawPile(bx - 32, buf[i], ink, mark);
+
+    // the station box — the bottleneck is outlined in --mark and labelled.
+    ctx.strokeStyle = isBn ? mark : faint;
+    ctx.lineWidth = isBn ? 4 : 2;
+    ctx.strokeRect(bx, by, BOX_W, BOX_H);
+
+    ctx.fillStyle = isBn ? mark : faint;
+    ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+    ctx.fillText('S' + (i + 1), bx + BOX_W / 2, by - 40);
+    ctx.font = '16px "Courier New", monospace';
+    ctx.fillText(rate[i].toFixed(1) + '/s', bx + BOX_W / 2, by - 18);
+    if (isBn) {
+      ctx.fillStyle = mark; ctx.font = '17px Georgia';
+      ctx.fillText('bottleneck', bx + BOX_W / 2, by + BOX_H + 30);
+    }
+
+    // the token currently in service — a filled dot inside the box
+    if (busy[i]) {
+      ctx.fillStyle = isBn ? mark : ink;
+      ctx.beginPath();
+      ctx.arc(bx + BOX_W / 2, by + BOX_H / 2, TOKEN_R + 3, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  // finished goods count at the right
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  const fx = RIGHT + 20;
+  ctx.strokeRect(fx, LINE_Y - 46, 100, 92);
+  ctx.fillStyle = faint; ctx.font = '17px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('finished', fx + 50, LINE_Y - 58);
+  ctx.fillStyle = ink; ctx.font = '30px "Courier New", monospace';
+  ctx.fillText('' + finished, fx + 50, LINE_Y + 10);
+
+  // a quiet caption naming what the eye should catch
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('work piles up before the constraint — everything after it starves', LEFT, SCENE_TOP + 4);
+}
+
+// --- bottom band: the rate bar chart ------------------------------------
+// one bar per station (height ∝ rate). the bottleneck bar is --mark; a dashed
+// --faint line sits at the measured system throughput. the throughput line
+// rests at the shortest bar — raising any taller bar never lifts it.
+function drawChart() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+  const bi = bottleneck();
+  const RMAX = 5;                       // slider max — fixes the vertical scale
+  const plotW = W - 2 * PAD;
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD, CHART_TOP, plotW, CHART_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('each bar is a station rate — the line runs at the shortest', PAD + 6, CHART_TOP - 14);
+
+  const yOf = r => CHART_TOP + CHART_H - (r / RMAX) * (CHART_H - 20) - 2;
+  const barW = plotW / NS * 0.5;
+  const bxOf = i => PAD + (i + 0.5) * plotW / NS - barW / 2;
+
+  for (let i = 0; i < NS; i++) {
+    const isBn = i === bi;
+    const x = bxOf(i), yTop = yOf(rate[i]);
+    ctx.fillStyle = isBn ? mark : css('--pick');
+    ctx.fillRect(x, yTop, barW, CHART_TOP + CHART_H - 2 - yTop);
+    ctx.fillStyle = isBn ? mark : '#6d6653';
+    ctx.font = '17px "Courier New", monospace'; ctx.textAlign = 'center';
+    ctx.fillText('S' + (i + 1), x + barW / 2, CHART_TOP + CHART_H + 22);
+    ctx.fillText(rate[i].toFixed(1), x + barW / 2, yTop - 8);
+  }
+
+  // the dashed throughput line — measured live, converges to min(rate)
+  const tp = throughput();
+  const ty = yOf(tp);
+  ctx.strokeStyle = faint; ctx.lineWidth = 2; ctx.setLineDash([10, 8]);
+  ctx.beginPath(); ctx.moveTo(PAD + 2, ty); ctx.lineTo(PAD + plotW - 2, ty); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = mark; ctx.font = '17px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('throughput ' + tp.toFixed(2) + '/s', PAD + plotW - 8, ty - 8);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawChart();
+}
+
+function updateReadout() {
+  const bi = bottleneck();
+  const tp = throughput();
+  const rates = rate.map((r, i) => 'S' + (i + 1) + ' <b>' + r.toFixed(1) + '</b>').join(' &nbsp;·&nbsp; ');
+  const regime = 'S' + (bi + 1) + ' is the constraint — the line makes '
+    + rate[bi].toFixed(1) + '/s no matter how fast the others run';
+
+  readout.innerHTML =
+    rates
+    + '<br>bottleneck <b>S' + (bi + 1) + '</b> at <b>' + rate[bi].toFixed(1) + '/s</b>'
+    + ' &nbsp;·&nbsp; system throughput <b>' + tp.toFixed(2) + '/s</b>'
+    + '<br><span id="regime">' + regime + '</span>';
+}
+
+function refresh() {
+  for (let i = 0; i < NS; i++) rV[i].textContent = rate[i].toFixed(1);
+  updateReadout();
+}
+
+for (let i = 0; i < NS; i++) {
+  rEl[i].oninput = () => { rate[i] = parseFloat(rEl[i].value); refresh(); };
+}
+
+// --- the live loop: small fixed sub-steps for a steady timer server ------
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  // integrate in small slices so a fast station can't finish twice per slice
+  const SLICE = 0.02;
+  while (elapsed > 0) {
+    const dt = Math.min(SLICE, elapsed);
+    stepSim(dt);
+    elapsed -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

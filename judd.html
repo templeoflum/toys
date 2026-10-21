@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>judd</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --line: #4a5560;
+    --dot: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 3.5rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(640px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>judd</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">fins</span><input type="range" id="fins" min="0" max="100" value="100"><span class="val" id="finsV"></span></div>
+    <div class="row"><span class="name">rule</span><input type="range" id="rule" min="0" max="100" value="0"><span class="val" id="ruleV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="360"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the orange dot sits at the exact middle of the shaft. both ends wear arrowheads pointing the same way, and they drag the apparent centre along with them &mdash; the dot looks pushed off to one side. shrink the <b>fins</b> to nothing and the dot is plainly central; or raise the <b>rule</b> to measure the two halves and find them equal.</div>
+
+<script>
+'use strict';
+
+const X0 = 250, X1 = 650, CY = 170;
+const XM = (X0 + X1) / 2;                // true midpoint
+const FMAX = 58;                         // full fin length
+
+let fins = 1;   // 0 => bare shaft, dot plainly central
+let rule = 0;   // proof: measure the two halves, equal
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const fEl = document.getElementById('fins'), fV = document.getElementById('finsV');
+const rEl = document.getElementById('rule'), rV = document.getElementById('ruleV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  ctx.strokeStyle = css('--line'); ctx.lineWidth = 4; ctx.lineCap = 'round';
+  line(X0, CY, X1, CY);
+
+  // both ends wear the same arrowhead ('<', vertex left, fins opening right)
+  const f = fins * FMAX;
+  if (f > 0.5) {
+    for (const vx of [X0, X1]) {
+      line(vx, CY, vx + f, CY - f);
+      line(vx, CY, vx + f, CY + f);
+    }
+  }
+
+  // proof: measure the two halves below — equal
+  if (rule > 0) {
+    ctx.save();
+    ctx.globalAlpha = rule;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+    const my = CY + 96;
+    line(X0, my, XM, my); line(XM + 6, my, X1, my);
+    for (const x of [X0, XM, X1]) line(x, my - 9, x, my + 9);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // the true-centre dot, on top
+  ctx.fillStyle = css('--dot');
+  ctx.beginPath(); ctx.arc(XM, CY, 7, 0, Math.PI * 2); ctx.fill();
+
+  readout.innerHTML = fins < 0.02
+    ? 'no fins &mdash; the dot sits plainly at the middle.'
+    : rule > 0.98
+      ? 'both halves measure <b>' + (XM - X0) + '</b> &mdash; the dot is dead centre.'
+      : 'the dot is at the exact middle; the arrowheads only make it look shoved aside.';
+}
+
+function refresh() {
+  fV.textContent = fins < 0.02 ? 'off — dot centred' : Math.round(fins * 100) + '%';
+  rV.textContent = rule > 0.98 ? 'halves equal' : rule > 0 ? 'rising' : 'off';
+  draw();
+}
+
+fEl.oninput = () => { fins = +fEl.value / 100; refresh(); };
+rEl.oninput = () => { rule = +rEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

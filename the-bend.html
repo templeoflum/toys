@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the bend</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --field: #d9d5ca;   /* the surface the path is drawn on */
+    --guide: #c8c1b0;   /* the lat/long guide lines */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  .btns { display: flex; gap: .6rem; flex-wrap: wrap; justify-content: center; }
+  button { font-family: 'Courier New', monospace; font-size: .78rem; color: var(--ink); background: transparent;
+           border: 1px solid var(--faint); border-radius: 3px; padding: .35rem .8rem; cursor: pointer; margin-bottom: 1.1rem; }
+  button:hover { border-color: var(--mark); color: var(--mark); }
+  button.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; border: 1px solid var(--faint); background: var(--field); }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 44rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 40rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>the bend</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">start lat</span><input type="range" id="lat" min="-70" max="70" step="1" value="20"><span class="val" id="latV"></span></div>
+    <div class="row"><span class="name">start lon</span><input type="range" id="lon" min="-180" max="180" step="1" value="-40"><span class="val" id="lonV"></span></div>
+    <div class="row"><span class="name">heading</span><input type="range" id="head" min="0" max="359" step="1" value="65"><span class="val" id="headV"></span></div>
+  </div>
+  <div class="btns">
+    <button id="walk">walk it</button>
+    <button id="showflat" class="on">flat map: on</button>
+  </div>
+  <canvas id="cv" width="1720" height="820"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">set a <b>start</b> and a <b>heading</b> &mdash; the direction you set off &ldquo;straight,&rdquo; never turning. on the globe that traces a <b>great circle</b>: the one circle whose plane cuts through the sphere&rsquo;s centre, and it loops all the way back to where you began. press <b>walk it</b> to travel it &mdash; you feel yourself going dead straight, yet the path bends around the ball. now read the same path on the <b>flat map</b> beside it: the straight-on-the-sphere line comes out as a <i>curve</i>. nothing steered it; the surface did. a geodesic is the straightest a path can be on its surface (it turns nowhere) &mdash; on a sphere that is always a great circle, and flattening is what makes it look bent.</div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2, D2R = Math.PI / 180, R2D = 180 / Math.PI;
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const readout = document.getElementById('readout').firstElementChild;
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+let lat = 20, lon = -40, head = 65;   // degrees
+let showFlat = true;
+let walkT = null;                     // parameter along the geodesic when walking, else null
+let rafId = 0, lastT = 0;
+
+// --- sphere geometry -------------------------------------------------------
+// unit vector for a lat/lon (radians). z is the view axis (toward camera at +z).
+function toVec(latR, lonR){
+  const cl = Math.cos(latR);
+  return [cl*Math.cos(lonR), Math.sin(latR), cl*Math.sin(lonR)]; // x right-ish, y up, z toward viewer
+}
+function toLatLon(v){
+  const lt = Math.asin(Math.max(-1, Math.min(1, v[1])));
+  const ln = Math.atan2(v[2], v[0]);
+  return [lt, ln];
+}
+function cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function norm(a){ const m=Math.hypot(a[0],a[1],a[2])||1; return [a[0]/m,a[1]/m,a[2]/m]; }
+
+// THE INVARIANT: great circle through P0 with a heading.
+// at P0 build the local frame — north (toward +pole, tangent) and east — then the
+// initial "straight" tangent t = sin(h)*east + cos(h)*north (h from north, clockwise).
+// the geodesic is p(s) = cos(s)*P0 + sin(s)*t, a unit great circle returning at s=2π.
+function frame(latR, lonR){
+  const P0 = toVec(latR, lonR);
+  const pole = [0,1,0];
+  let east = cross(pole, P0);                 // eastward tangent
+  if (Math.hypot(east[0],east[1],east[2]) < 1e-6) east = [1,0,0]; // at a pole: pick one
+  east = norm(east);
+  const north = norm(cross(P0, east));        // northward tangent, ⟂ P0 and east
+  return { P0, east, north };
+}
+function geodesic(latR, lonR, headR){
+  const { P0, east, north } = frame(latR, lonR);
+  const t = norm([ Math.sin(headR)*east[0] + Math.cos(headR)*north[0],
+                   Math.sin(headR)*east[1] + Math.cos(headR)*north[1],
+                   Math.sin(headR)*east[2] + Math.cos(headR)*north[2] ]);
+  return s => [ Math.cos(s)*P0[0] + Math.sin(s)*t[0],
+                Math.cos(s)*P0[1] + Math.sin(s)*t[1],
+                Math.cos(s)*P0[2] + Math.sin(s)*t[2] ];
+}
+
+// --- panels ----------------------------------------------------------------
+const GX = W*0.26, GY = H*0.5, GR = Math.min(W*0.20, H*0.42);   // globe centre + radius
+const FX = W*0.53, FW = W*0.42, FY = H*0.5, FH = FW*0.5;         // flat map: 2:1 box
+function flatXY(latR, lonR){                                     // equirectangular
+  return [ FX + (lonR/Math.PI)*(FW/2), FY - (latR/(Math.PI/2))*(FH/2) ];
+}
+function globeXY(v){                                             // orthographic, z toward viewer
+  return [ GX + v[0]*GR, GY - v[1]*GR, v[2] ];                   // returns [x,y,depth]
+}
+
+function drawGlobe(){
+  const faint = css('--faint'), guide = css('--guide'), ink = css('--ink'), mark = css('--mark');
+  // the ball
+  ctx.fillStyle = '#efe9db';
+  ctx.beginPath(); ctx.arc(GX, GY, GR, 0, TAU); ctx.fill();
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // latitude/longitude guide lines — only the near hemisphere (z >= 0)
+  ctx.strokeStyle = guide; ctx.lineWidth = 1; ctx.globalAlpha = 0.9;
+  for (let la = -60; la <= 60; la += 30){                        // latitudes
+    ctx.beginPath(); let started = false;
+    for (let lo = -180; lo <= 180; lo += 3){
+      const p = globeXY(toVec(la*D2R, lo*D2R));
+      if (p[2] < 0){ started = false; continue; }
+      if (!started){ ctx.moveTo(p[0], p[1]); started = true; } else ctx.lineTo(p[0], p[1]);
+    }
+    ctx.stroke();
+  }
+  for (let lo = -180; lo < 180; lo += 30){                       // longitudes
+    ctx.beginPath(); let started = false;
+    for (let la = -90; la <= 90; la += 3){
+      const p = globeXY(toVec(la*D2R, lo*D2R));
+      if (p[2] < 0){ started = false; continue; }
+      if (!started){ ctx.moveTo(p[0], p[1]); started = true; } else ctx.lineTo(p[0], p[1]);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#6d6653'; ctx.font = '18px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('the sphere', GX, GY - GR - 18);
+}
+
+function drawFlatFrame(){
+  const faint = css('--faint'), guide = css('--guide');
+  ctx.fillStyle = '#efe9db';
+  ctx.fillRect(FX - FW/2, FY - FH/2, FW, FH);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5;
+  ctx.strokeRect(FX - FW/2, FY - FH/2, FW, FH);
+  ctx.strokeStyle = guide; ctx.lineWidth = 1; ctx.globalAlpha = 0.9;
+  for (let la = -60; la <= 60; la += 30){                        // horizontal lat lines
+    const y = FY - (la/90)*(FH/2);
+    ctx.beginPath(); ctx.moveTo(FX - FW/2, y); ctx.lineTo(FX + FW/2, y); ctx.stroke();
+  }
+  for (let lo = -180; lo <= 180; lo += 30){                      // vertical lon lines
+    const x = FX + (lo/180)*(FW/2);
+    ctx.beginPath(); ctx.moveTo(x, FY - FH/2); ctx.lineTo(x, FY + FH/2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#6d6653'; ctx.font = '18px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('flattened (equirectangular)', FX, FY - FH/2 - 18);
+}
+
+// draw the geodesic on the globe (near hemisphere solid, far faint) and on the flat map
+function drawPath(g){
+  const mark = css('--mark');
+  const STEPS = 720, sMax = walkT === null ? TAU : walkT;
+
+  // globe: split into near/far so the great circle reads as a ring on a ball
+  for (const pass of [0,1]){                                     // 0: far (faint), 1: near (solid)
+    ctx.beginPath(); let started = false; let drew = false;
+    for (let i = 0; i <= STEPS; i++){
+      const s = (i/STEPS)*sMax;
+      const v = g(s), p = globeXY(v);
+      const near = p[2] >= 0;
+      if ((pass === 1) !== near){ started = false; continue; }
+      if (!started){ ctx.moveTo(p[0], p[1]); started = true; } else { ctx.lineTo(p[0], p[1]); drew = true; }
+    }
+    if (drew){
+      ctx.strokeStyle = mark; ctx.lineWidth = pass === 1 ? 2.6 : 1.4;
+      ctx.globalAlpha = pass === 1 ? 1 : 0.28; ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  // flat map: sample lon/lat, break the stroke where longitude wraps ±180
+  if (showFlat){
+    ctx.strokeStyle = mark; ctx.lineWidth = 2.4;
+    ctx.beginPath(); let prevLon = null; let started = false;
+    for (let i = 0; i <= STEPS; i++){
+      const s = (i/STEPS)*sMax;
+      const [la, lo] = toLatLon(g(s));
+      if (prevLon !== null && Math.abs(lo - prevLon) > Math.PI) started = false; // seam wrap: lift pen
+      prevLon = lo;
+      const [x, y] = flatXY(la, lo);
+      if (!started){ ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
+function dot(x, y, r, fill){ ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+
+function draw(){
+  ctx.fillStyle = css('--field'); ctx.fillRect(0,0,W,H);
+  drawGlobe();
+  if (showFlat) drawFlatFrame();
+
+  const latR = lat*D2R, lonR = lon*D2R, headR = head*D2R;
+  const g = geodesic(latR, lonR, headR);
+  drawPath(g);
+
+  // start point (both panels)
+  const P0 = toVec(latR, lonR), gp = globeXY(P0);
+  if (gp[2] >= -0.02) dot(gp[0], gp[1], 6, css('--ink'));
+  if (showFlat){ const [fx, fy] = flatXY(latR, lonR); dot(fx, fy, 6, css('--ink')); }
+
+  // the walker
+  if (walkT !== null){
+    const v = g(walkT), wp = globeXY(v);
+    if (wp[2] >= -0.02) dot(wp[0], wp[1], 7, css('--mark'));
+    if (showFlat){ const [la, lo] = toLatLon(v); const [fx, fy] = flatXY(la, lo); dot(fx, fy, 7, css('--mark')); }
+  }
+
+  updateReadout();
+}
+
+function updateReadout(){
+  const frac = walkT === null ? 0 : (walkT / TAU);
+  let s = 'start <b>'+lat+'&deg;, '+lon+'&deg;</b> &middot; heading <b>'+head+'&deg;</b> from north'
+        + ' &middot; on the sphere: a <b>great circle</b> (turns nowhere) &middot; on the flat map: a <b>curve</b>';
+  if (walkT !== null){
+    const back = frac >= 0.999;
+    s += ' &middot; walked <b>'+Math.round(frac*100)+'%</b>'+(back ? ' &mdash; back at the start' : ' of the loop, still straight');
+  }
+  readout.innerHTML = s;
+}
+
+// --- walk animation --------------------------------------------------------
+function step(now){
+  const dt = Math.min(0.05, (now - lastT)/1000); lastT = now;
+  walkT += dt * (TAU/6);                       // one full loop in ~6 s
+  if (walkT >= TAU){ walkT = TAU; draw(); stopWalk(); return; }
+  draw();
+  rafId = requestAnimationFrame(step);
+}
+const walkBtn = document.getElementById('walk');
+function stopWalk(){ cancelAnimationFrame(rafId); walkBtn.textContent = 'walk it'; }
+walkBtn.addEventListener('click', ()=>{
+  if (walkT === null || walkT >= TAU){
+    walkT = 0; walkBtn.textContent = 'stop'; lastT = performance.now(); rafId = requestAnimationFrame(step);
+  } else {
+    walkT = null; stopWalk(); draw();
+  }
+});
+
+document.getElementById('showflat').addEventListener('click', (e)=>{
+  showFlat = !showFlat;
+  e.target.textContent = 'flat map: ' + (showFlat ? 'on' : 'off');
+  e.target.classList.toggle('on', showFlat);
+  draw();
+});
+
+function bind(id, vid, fn, fmt){ const e=document.getElementById(id), v=document.getElementById(vid);
+  const upd = ()=>{ fn(+e.value); v.textContent = fmt(e.value); if (walkT !== null){ walkT = null; stopWalk(); } draw(); };
+  e.oninput = upd; upd(); }
+bind('lat','latV', v=>lat=v, v=>v+'°');
+bind('lon','lonV', v=>lon=v, v=>v+'°');
+bind('head','headV', v=>head=v, v=>v+'° from N');
+
+draw();
+</script>
+</body>
+</html>

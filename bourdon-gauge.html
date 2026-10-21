@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bourdon gauge</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>bourdon gauge</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">pressure P</span><input type="range" id="press" min="0" max="1000" value="0" step="1"><span class="val" id="pressV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bTube">tube</button>
+        <button id="bSection">cross-section</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">vent (P=0)</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a curved metal tube with a <b>flattened</b> (oval) bore is closed at its free tip. raise the internal <b>pressure</b> and the flattened section tries to round out toward a circle &mdash; and a rounder section along a curve makes the curve <b>open</b>, so the C uncurls and its free tip travels. the tip travel is <b>proportional</b> to pressure over the working range; a <b>linkage</b> and rack-and-pinion turn that small tip motion into a needle sweep, so the needle angle <b>= (P/P<sub>max</sub>)&middot;sweep</b>.<span class="cite">the Bourdon tube pressure gauge &middot; Eug&egrave;ne Bourdon 1849 &middot; flattened curved tube uncurls under pressure, tip travel &prop; P, linkage drives the needle &middot; field: elasticity / pressure measurement</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- Bourdon tube pressure gauge ----------------------------------------
+// a curved metal tube (a C) with a FLATTENED oval bore, sealed at its free
+// tip. internal pressure pushes the flattened cross-section toward a circle;
+// a rounder section along a curved tube forces the curve to OPEN — the C
+// uncurls, and its free tip swings out. over the working range the tip
+// travel is proportional to the applied pressure:
+//   tip deflection  d = k·P          (linear elastic deflection)
+// a linkage + rack-and-pinion multiplies that small tip motion into a
+// needle sweep on a round dial. we drive BOTH the drawn uncurl and the
+// needle from ONE quantity, the load fraction:
+//   frac = P / P_max        ∈ [0,1] over the working range
+// the C's total arc span opens by  Δφ = frac·ΔφMAX  (uncurl, drawn),
+// and the needle angle is  θ = frac·SWEEP  (read on the dial).
+// both are the SAME frac, so the drawn uncurl and the needle reading move
+// together — that is the check. the printed P = frac·P_max = the number the
+// needle points to on the graduated dial, exactly.
+// (real Bourdons have slight non-linearity; the toy is linear over the
+//  working range, which is the honest first-order model.)
+
+const P_MAX = 10;                       // full-scale pressure, bar (working range)
+const SWEEP = 270 * Math.PI / 180;      // dial sweep, 0 → full-scale (standard 270°)
+// the tube's arc span at vent (P=0) and the extra opening at full scale.
+// PHI_SPAN0 is how much of a circle the C wraps unpressurised (~250°); the
+// tube uncurls (arc span shrinks) by up to DPHI_MAX at full pressure. these
+// are drawing constants — the physics is d = k·P; the drawn Δφ is the same
+// linear map with DPHI_MAX standing in for k·P_max.
+const PHI_SPAN0 = 250 * Math.PI / 180;  // C wrap angle at P=0
+const DPHI_MAX  = 42 * Math.PI / 180;   // arc opens by this much at full scale
+
+let P = 0;              // applied pressure, bar
+let view = 'tube';      // 'tube' | 'section'
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const pressEl = document.getElementById('press'), pressV = document.getElementById('pressV');
+const readout = document.getElementById('readout').firstElementChild;
+const bTube = document.getElementById('bTube');
+const bSection = document.getElementById('bSection');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const PAD = 30;
+
+// the load fraction — the ONE quantity both the uncurl and the needle read.
+function frac() { return Math.max(0, Math.min(1, P / P_MAX)); }
+// the needle angle off the zero mark: θ = frac·SWEEP (linear in P).
+function needleTheta() { return frac() * SWEEP; }
+// the C's live arc span: it SHRINKS as the tube uncurls under pressure.
+function arcSpan() { return PHI_SPAN0 - frac() * DPHI_MAX; }
+
+// --- layout of the drawn scene ------------------------------------------
+// left: the C-shaped Bourdon tube, anchored at its fixed (socket) end, its
+//   free tip swinging out as it uncurls, a linkage running to a pinion.
+// right: the round graduated dial with the needle the linkage drives.
+const DIAL_CX = Math.round(W * 0.70);
+const DIAL_CY = Math.round(H * 0.50);
+const DIAL_R  = 300;
+
+// the tube geometry: wound about a centre near the left, anchored at the
+// bottom (the socket, fixed) and closed at the free tip (top of the C).
+const TUBE_CX = Math.round(W * 0.28);
+const TUBE_CY = Math.round(H * 0.50);
+const TUBE_R  = 210;                    // mean radius of the C's centreline
+const ANCHOR_PHI = Math.PI / 2 + 0.15;  // where the socket is fixed (lower right of the C)
+
+// a point on the tube centreline at fraction t∈[0,1] along the live arc span,
+// measured from the fixed anchor. as the span shrinks (uncurl), the far end
+// (t=1, the tip) rotates OUTWARD — the tip travel that drives the linkage.
+function tubePoint(t) {
+  const span = arcSpan();
+  const phi = ANCHOR_PHI + t * span;     // sweep from anchor through the live span
+  return { x: TUBE_CX + TUBE_R * Math.cos(phi), y: TUBE_CY + TUBE_R * Math.sin(phi), phi };
+}
+
+// --- the Bourdon tube: a flattened C that uncurls under pressure ---------
+// drawn as a thick curved band (the flattened bore) from the fixed socket to
+// the sealed free tip. the tip's position comes from arcSpan(), which is the
+// same frac() the needle uses. a linkage line runs from the tip to the dial
+// pinion so the tip travel visibly turns the needle.
+function drawTube() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  // the flattened-bore band — two offset arcs (outer + inner wall) closed at
+  // the ends. bore half-thickness kept small: a FLATTENED tube reads thin.
+  const bore = 26;
+  ctx.beginPath();
+  for (let i = 0; i <= 60; i++) {
+    const p = tubePoint(i / 60);
+    const nx = Math.cos(p.phi), ny = Math.sin(p.phi);   // outward normal
+    const x = p.x + nx * bore, y = p.y + ny * bore;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  for (let i = 60; i >= 0; i--) {
+    const p = tubePoint(i / 60);
+    const nx = Math.cos(p.phi), ny = Math.sin(p.phi);
+    ctx.lineTo(p.x - nx * bore, p.y - ny * bore);
+  }
+  ctx.closePath();
+  ctx.fillStyle = shade; ctx.fill();
+  ctx.strokeStyle = ink; ctx.lineWidth = 4; ctx.stroke();
+
+  // the fixed socket at the anchor end — the pressure inlet (P feeds here)
+  const a = tubePoint(0);
+  ctx.fillStyle = pick; ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.rect(a.x - 20, a.y - 6, 130, 54);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = ink; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('P in', a.x + 40, a.y + 82);
+  // inlet arrows into the socket
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  arrow(a.x + 150, a.y + 21, a.x + 112, a.y + 21);
+
+  // the sealed free tip — a cap; this is what travels as the tube uncurls
+  const tip = tubePoint(1);
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(tip.x, tip.y, 10, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = 'italic 20px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('free tip', tip.x, tip.y - 26);
+
+  // a faint ghost of the vented (P=0) tip + a travel arc, so the uncurl reads
+  const tip0 = { x: TUBE_CX + TUBE_R * Math.cos(ANCHOR_PHI + PHI_SPAN0),
+                 y: TUBE_CY + TUBE_R * Math.sin(ANCHOR_PHI + PHI_SPAN0) };
+  if (P > 1e-6) {
+    ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([5, 6]);
+    ctx.beginPath(); ctx.arc(tip0.x, tip0.y, 10, 0, TAU); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = mark; ctx.lineWidth = 2;
+    arrow(tip0.x, tip0.y, tip.x, tip.y);
+  }
+
+  // the linkage — tip → a pivot arm → the pinion at the dial centre. drawn as
+  // straight links; the tip travel pulls the link, the pinion turns the needle.
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  const pinX = DIAL_CX - DIAL_R - 60, pinY = DIAL_CY;   // pinion just left of dial
+  ctx.beginPath();
+  ctx.moveTo(tip.x, tip.y);
+  ctx.lineTo(pinX, pinY);
+  ctx.stroke();
+  // the pinion hub
+  ctx.fillStyle = pick; ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(pinX, pinY, 22, 0, TAU); ctx.fill(); ctx.stroke();
+  // a few teeth ticks on the pinion to read "rack-and-pinion"
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  for (let k = 0; k < 12; k++) {
+    const ka = k / 12 * TAU;
+    ctx.beginPath();
+    ctx.moveTo(pinX + 22 * Math.cos(ka), pinY + 22 * Math.sin(ka));
+    ctx.lineTo(pinX + 30 * Math.cos(ka), pinY + 30 * Math.sin(ka));
+    ctx.stroke();
+  }
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('linkage + pinion', pinX, pinY + 60);
+
+  // a quiet label
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('flattened C-tube — uncurls as P rises', PAD + 6, 44);
+}
+
+// --- the cross-section view: the flattened bore rounding out -------------
+// the underlying REASON the tube uncurls. the bore is an oval, flat at P=0.
+// pressure pushes it toward a circle; a fatter section along a curve makes
+// the curve open. eccentricity eases from flat (frac 0) to round (frac 1).
+function drawSection() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const cx = TUBE_CX + 40, cy = TUBE_CY;
+  const f = frac();
+  // the oval: wide + flat at P=0, rounding toward a circle as P rises.
+  const rMean = 150;
+  const rx = rMean * (1.7 - 0.7 * f);   // wide axis narrows toward the circle
+  const ry = rMean * (0.35 + 0.65 * f); // flat axis fattens toward the circle
+
+  // the vented (flat) outline as a faint ghost
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([5, 6]);
+  ctx.beginPath(); ctx.ellipse(cx, cy, rMean * 1.7, rMean * 0.35, 0, 0, TAU); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the live cross-section
+  ctx.fillStyle = shade; ctx.strokeStyle = ink; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  // inner wall to read "bore"
+  ctx.strokeStyle = pick; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(cx, cy, rx - 16, Math.max(6, ry - 16), 0, 0, TAU); ctx.stroke();
+
+  // pressure arrows pushing the flat walls outward (toward round)
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  for (const s of [-1, 1]) {
+    arrow(cx, cy + s * (ry - 8) * 0.4, cx, cy + s * (ry + 46));
+  }
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('pressure rounds the bore', cx, cy + ry + 100);
+
+  // the round target (a circle of equal perimeter-ish) as the limit
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([2, 6]);
+  ctx.beginPath(); ctx.arc(cx, cy, rMean * 0.9, 0, TAU); ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('cross-section — flat bore rounds out (the reason it uncurls)', PAD + 6, 44);
+}
+
+// --- the round graduated dial + the needle the linkage drives -----------
+// a full round face graduated 0..P_max over SWEEP (270°). the needle angle
+// is θ = frac·SWEEP — the SAME frac the tube uncurl uses — so the needle
+// points at exactly P = frac·P_max on the scale.
+function drawDial() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        pick = css('--pick');
+
+  // 0 sits at the lower-left; the sweep runs clockwise to full-scale at the
+  // lower-right, gap at the bottom (the standard round-gauge layout).
+  const start = Math.PI / 2 + (TAU - SWEEP) / 2;   // angle of the 0 mark
+  const dir = 1;                                    // clockwise (canvas +y down)
+
+  // the face
+  ctx.fillStyle = css('--paper'); ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(DIAL_CX, DIAL_CY, DIAL_R + 30, 0, TAU); ctx.fill(); ctx.stroke();
+
+  // graduations: a major tick + label each bar, minors every 0.5 bar
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let i = 0; i <= P_MAX * 2; i++) {
+    const pv = i / 2;                               // bar value at this tick
+    const a = start + dir * (pv / P_MAX) * SWEEP;
+    const major = (i % 2 === 0);
+    const r0 = DIAL_R - (major ? 34 : 18);
+    ctx.strokeStyle = faint; ctx.lineWidth = major ? 3 : 1.5;
+    ctx.beginPath();
+    ctx.moveTo(DIAL_CX + r0 * Math.cos(a), DIAL_CY + r0 * Math.sin(a));
+    ctx.lineTo(DIAL_CX + DIAL_R * Math.cos(a), DIAL_CY + DIAL_R * Math.sin(a));
+    ctx.stroke();
+    if (major) {
+      ctx.fillStyle = faint; ctx.font = '24px "Courier New", monospace';
+      const lr = DIAL_R - 64;
+      ctx.fillText(String(pv), DIAL_CX + lr * Math.cos(a), DIAL_CY + lr * Math.sin(a));
+    }
+  }
+  // units label
+  ctx.fillStyle = faint; ctx.font = '22px Georgia';
+  ctx.fillText('bar', DIAL_CX, DIAL_CY + 90);
+  ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('θ = (P/Pmax)·270°', DIAL_CX, DIAL_CY + 130);
+
+  // the needle — angle θ = frac·SWEEP from the 0 mark (linear in P)
+  const a = start + dir * needleTheta();
+  ctx.strokeStyle = mark; ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(DIAL_CX - 40 * Math.cos(a), DIAL_CY - 40 * Math.sin(a));
+  ctx.lineTo(DIAL_CX + (DIAL_R - 40) * Math.cos(a), DIAL_CY + (DIAL_R - 40) * Math.sin(a));
+  ctx.stroke();
+  // hub
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(DIAL_CX, DIAL_CY, 16, 0, TAU); ctx.fill();
+  ctx.fillStyle = pick; ctx.beginPath(); ctx.arc(DIAL_CX, DIAL_CY, 7, 0, TAU); ctx.fill();
+
+  ctx.textBaseline = 'alphabetic';
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  if (view === 'section') drawSection(); else drawTube();
+  drawDial();
+}
+
+// --- regime read: vented / rising / full scale --------------------------
+function regimeOf() {
+  if (P < 1e-6) return 'vented — P = 0, tube fully coiled, needle at zero';
+  if (P >= P_MAX - 1e-6) return 'full scale — tube uncurled to the working limit';
+  return 'pressurised — tube uncurling, tip travel ∝ P';
+}
+
+function updateReadout() {
+  const f = frac();
+  const thetaDeg = needleTheta() * 180 / Math.PI;
+  const reads = f * P_MAX;                          // what the needle points to
+  const spanDeg = (PHI_SPAN0 - f * DPHI_MAX) * 180 / Math.PI;
+  readout.innerHTML =
+    'pressure P <b>' + P.toFixed(2) + ' bar</b> &nbsp;·&nbsp; '
+    + 'load fraction P/Pmax <b>' + f.toFixed(3) + '</b>'
+    + '<br>needle θ = (P/Pmax)·270° = <b>' + thetaDeg.toFixed(1) + '°</b> &nbsp;·&nbsp; '
+    + 'reads <b>' + reads.toFixed(2) + ' bar</b>'
+    + '<br>tip travel ∝ P (linear over 0..' + P_MAX + ' bar) &nbsp;·&nbsp; '
+    + 'C arc span <b>' + spanDeg.toFixed(0) + '°</b> (opens as P rises)'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const s = 12, aa = Math.atan2(y1 - y0, x1 - x0);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - s * Math.cos(aa - 0.4), y1 - s * Math.sin(aa - 0.4));
+  ctx.lineTo(x1 - s * Math.cos(aa + 0.4), y1 - s * Math.sin(aa + 0.4));
+  ctx.closePath();
+  ctx.fillStyle = ctx.strokeStyle; ctx.fill();
+}
+
+function refresh() {
+  pressV.textContent = P.toFixed(2);
+  updateReadout();
+}
+
+// slider is P×100 (bar). the needle and the drawn uncurl both read frac(P)
+// live — nothing integrates over time, the deflection is the elastic balance.
+pressEl.oninput = () => { P = pressEl.value / 100; refresh(); };
+
+function setView(v) {
+  view = v;
+  bTube.classList.toggle('on', v === 'tube');
+  bSection.classList.toggle('on', v === 'section');
+  refresh();
+}
+bTube.onclick = () => setView('tube');
+bSection.onclick = () => setView('section');
+
+// vent — pressure back to 0, tube recoils, needle to zero.
+bReset.onclick = () => {
+  P = 0; pressEl.value = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: a slider-driven redraw ------------------------------
+// the Bourdon deflection is an elastic balance (algebraic in P), so the loop
+// just keeps the canvas painted against the current pressure.
+function frame() {
+  draw();
+  requestAnimationFrame(frame);
+}
+
+setView('tube');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

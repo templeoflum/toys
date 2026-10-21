@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vernier caliper</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #coincide { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>vernier caliper</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">jaw open</span><input type="range" id="open" min="0" max="50" value="23.7" step="0.05"><span class="val" id="openV"></span></div>
+    <div class="row"><span class="name">divisions N</span>
+      <span class="modes">
+        <button id="bN10">N = 10</button>
+        <button id="bN20">N = 20</button>
+        <button id="bN50">N = 50</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="900"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a fixed <b>main scale</b> in millimetres and a sliding <b>vernier</b> whose <b>N</b> divisions span exactly <b>N&minus;1</b> main divisions &mdash; so each vernier tick falls a hair <b>short</b> of a main tick. open the jaws and exactly <b>one</b> vernier line meets a main line; <b>which</b> one gives the fraction. the <b>least count</b> &mdash; the finest you can read &mdash; is one main division divided by N.<span class="cite">the vernier scale &middot; Pierre Vernier 1631 &middot; least count = 1 main division / N &middot; the reading is the coincidence</span></div>
+
+<script>
+'use strict';
+
+// --- the vernier principle ----------------------------------------------
+// a fixed MAIN SCALE ruled in whole millimetres, and a sliding VERNIER whose
+// N divisions span exactly (N-1) main divisions. so one vernier division =
+// (N-1)/N mm — shorter than a main division by 1/N mm. slide the vernier's
+// zero to the measured length `open`; write open = m + f, m an integer mm,
+// f the fraction in [0,1). the vernier line i sits at  m + f + i·(N-1)/N.
+// it lands on a main (integer) line when  f + i·(N-1)/N  ≡ 0 (mod 1), i.e.
+//   f - i/N  ≡ 0 (mod 1)  ⇒  i = round(f·N)   is the coinciding line.
+// least count LC = 1/N mm. the reading is taken AT that coincidence:
+//   reading = m + i·LC.
+// VERIFY (load-bearing): N vernier divisions span exactly (N-1) main divisions
+// (each = (N-1)/N mm); LC = 1/N mm; and reading = m + i·LC equals the true
+// jaw opening to within one least count — i = round(f·N) makes it so.
+const MM = 30;            // pixels per main-scale millimetre
+const MAIN_MAX = 50;      // main scale runs 0..50 mm
+
+let open = 23.7;          // jaw opening in mm (the measured length)
+let N = 10;               // vernier divisions
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const openEl = document.getElementById('open'), openV = document.getElementById('openV');
+const bN10 = document.getElementById('bN10');
+const bN20 = document.getElementById('bN20');
+const bN50 = document.getElementById('bN50');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the vernier arithmetic ---------------------------------------------
+// least count = one main division / N.
+function leastCount() { return 1 / N; }
+// the coinciding vernier line index for the current opening.
+// m = floor(open), f = open - m, i = round(f·N) clamped into [0, N].
+// (i can round to N when f is very near 1; that reads as the next mm, which
+//  is correct — the vernier zero has effectively reached the next main line.)
+function coincidence() {
+  const m = Math.floor(open + 1e-9);
+  const f = open - m;
+  let i = Math.round(f * N);
+  return { m, f, i };
+}
+// the reading rebuilt from the coincidence: main mm + index·least count.
+function reading() {
+  const { m, i } = coincidence();
+  return m + i * leastCount();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 40;
+// left origin of both scales in canvas pixels (main mm 0 sits here)
+const X0 = PAD + 30;
+// vertical bands: caliper jaws on top, then the two scales side by side.
+const JAW_TOP = 60, JAW_H = 240;
+const MAIN_Y = 470;                    // baseline of the main scale
+const VERN_Y = 640;                    // baseline of the vernier scale
+
+// canvas x for a value in main-scale mm
+function xOfMM(mm) { return X0 + mm * MM; }
+
+// --- the caliper jaws holding the object --------------------------------
+// a fixed left jaw at mm 0 and a sliding right jaw at mm `open`; the gap
+// between them is the measured object, drawn in --shade. the sliding jaw is
+// rigidly tied to the vernier zero below, so jaw gap == vernier offset.
+function drawJaws() {
+  const ink = css('--ink'), faint = css('--faint'), shade = css('--shade'),
+        mark = css('--mark');
+
+  const xL = xOfMM(0), xR = xOfMM(open);
+  const beamTop = JAW_TOP, beamBot = JAW_TOP + 46;
+
+  // the beam the jaws hang from
+  ctx.fillStyle = shade;
+  ctx.fillRect(xL - 40, beamTop, W - PAD - (xL - 40), beamBot - beamTop);
+
+  // the measured object filling the gap
+  const objTop = beamBot + 20, objBot = JAW_TOP + JAW_H;
+  ctx.fillStyle = shade;
+  ctx.fillRect(xL, objTop, Math.max(0, xR - xL), objBot - objTop);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(xL, objTop, Math.max(0, xR - xL), objBot - objTop);
+
+  // fixed left jaw (ink) at mm 0
+  ctx.fillStyle = ink;
+  ctx.fillRect(xL - 22, beamBot, 22, objBot - beamBot);
+  // sliding right jaw (ink) at mm `open`
+  ctx.fillRect(xR, beamBot, 22, objBot - beamBot);
+
+  // the gap dimension, labelled with the true opening
+  const dy = objTop + (objBot - objTop) / 2;
+  ctx.strokeStyle = mark; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(xL, dy); ctx.lineTo(xR, dy); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText(open.toFixed(2) + ' mm', (xL + xR) / 2, dy - 12);
+}
+
+// --- the main scale: whole-mm ticks, numbered every 5 -------------------
+function drawMainScale() {
+  const ink = css('--ink'), faint = css('--faint');
+
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(xOfMM(0), MAIN_Y); ctx.lineTo(xOfMM(MAIN_MAX), MAIN_Y); ctx.stroke();
+
+  ctx.font = '18px "Courier New", monospace';
+  for (let mm = 0; mm <= MAIN_MAX; mm++) {
+    const x = xOfMM(mm);
+    const big = (mm % 5 === 0);
+    const len = big ? 26 : 14;
+    ctx.strokeStyle = ink; ctx.lineWidth = big ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(x, MAIN_Y); ctx.lineTo(x, MAIN_Y - len); ctx.stroke();
+    if (big) {
+      ctx.fillStyle = faint; ctx.textAlign = 'center';
+      ctx.fillText(String(mm), x, MAIN_Y - len - 10);
+    }
+  }
+  ctx.fillStyle = faint; ctx.font = '20px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('main scale (mm)', xOfMM(0), MAIN_Y - 58);
+}
+
+// --- the vernier scale: N divisions spanning (N-1) main mm --------------
+// slid so its zero sits at `open`. each division is (N-1)/N mm wide. the one
+// line that coincides with a main-scale integer line is drawn in --mark and
+// its match on the main scale is dotted up to meet it — that pairing IS the
+// reading.
+function drawVernierScale() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        pick = css('--pick');
+
+  const { m, i } = coincidence();
+  const span = N - 1;                 // main mm the whole vernier covers
+  const divW = span / N;              // one vernier division, in mm
+  const x0 = xOfMM(open);             // the vernier zero
+
+  // a light body plate under the vernier ticks
+  ctx.fillStyle = pick;
+  ctx.fillRect(x0 - 6, VERN_Y - 4, span * MM + 12, 46);
+
+  ctx.font = '16px "Courier New", monospace';
+  for (let k = 0; k <= N; k++) {
+    const mm = open + k * divW;
+    const x = xOfMM(mm);
+    const hit = (k === i);            // the coinciding line
+    ctx.strokeStyle = hit ? mark : ink;
+    ctx.lineWidth = hit ? 3 : 1;
+    const len = hit ? 40 : 26;
+    ctx.beginPath(); ctx.moveTo(x, VERN_Y); ctx.lineTo(x, VERN_Y + len); ctx.stroke();
+    // number 0 and the coinciding index
+    if (k === 0 || k === N || hit) {
+      ctx.fillStyle = hit ? mark : faint; ctx.textAlign = 'center';
+      ctx.fillText(String(k), x, VERN_Y + len + 20);
+    }
+  }
+
+  // dotted riser joining the coinciding vernier line up to its main line
+  const xHit = xOfMM(open + i * divW);
+  ctx.strokeStyle = mark; ctx.lineWidth = 1; ctx.setLineDash([5, 5]);
+  ctx.beginPath(); ctx.moveTo(xHit, MAIN_Y); ctx.lineTo(xHit, VERN_Y + 40); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // mark the main-scale integer line just left of the vernier zero (the m read)
+  const xm = xOfMM(m);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('m = ' + m, xm, MAIN_Y + 28);
+
+  ctx.fillStyle = faint; ctx.font = '20px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('vernier  (N = ' + N + ' divisions span ' + span + ' mm)', x0, VERN_Y + 82);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawJaws();
+  drawMainScale();
+  drawVernierScale();
+}
+
+// --- the read: main + coinciding index × least count --------------------
+function updateReadout() {
+  const { m, i } = coincidence();
+  const lc = leastCount();
+  const rd = reading();
+  const frac = i * lc;
+
+  readout.innerHTML =
+    'main reading <b>' + m + ' mm</b> &nbsp;·&nbsp; '
+    + 'least count <b>' + lc.toFixed(2) + ' mm</b>  (1/' + N + ')'
+    + '<br>vernier <b>' + i + ' × ' + lc.toFixed(2) + ' = ' + frac.toFixed(2) + ' mm</b>'
+    + '<br>total reading <b>' + rd.toFixed(2) + ' mm</b> &nbsp;·&nbsp; '
+    + 'true opening <b>' + open.toFixed(2) + ' mm</b>'
+    + '<br><span id="coincide">line ' + i + ' coincides &mdash; that coincidence is the reading</span>';
+}
+
+function refresh() {
+  openV.textContent = open.toFixed(2);
+  draw();
+  updateReadout();
+}
+
+// slider moves the jaw opening live; the vernier slides and the coincidence
+// jumps to whichever line now lines up.
+openEl.oninput = () => { open = parseFloat(openEl.value); refresh(); };
+
+function setN(n) {
+  N = n;
+  bN10.classList.toggle('on', n === 10);
+  bN20.classList.toggle('on', n === 20);
+  bN50.classList.toggle('on', n === 50);
+  refresh();
+}
+bN10.onclick = () => setN(10);
+bN20.onclick = () => setN(20);
+bN50.onclick = () => setN(50);
+
+// --- the live loop: geometry is slider-driven, a rAF keeps it painted -----
+function frame() {
+  draw();
+  requestAnimationFrame(frame);
+}
+
+setN(10);
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vanishing</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --rail: #9a9484;
+    --horizon: #5b6b74;
+    --railb: #7d8a6a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5.5rem; text-align: right; }
+  .row span.val { width: 11rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  button { font-family: 'Courier New', monospace; font-size: .74rem; color: #6d6653; background: none; border: 1px solid var(--faint); border-radius: 2px; padding: .2rem .6rem; cursor: pointer; }
+  button:hover { color: var(--ink); border-color: var(--ink); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>vanishing</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">set A</span><input type="range" id="angA" min="-70" max="70" value="0"><span class="val" id="angAV"></span></div>
+    <div class="row"><span class="name">set B</span><input type="range" id="angB" min="-70" max="70" value="40"><span class="val" id="angBV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span><button id="reset">reset</button></div>
+  </div>
+  <canvas id="cv" width="900" height="600"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two families of <b>parallel</b> rails run across one ground plane. each family &mdash; every rail in it heading the same direction &mdash; converges to a single <b>vanishing point</b>. drag <b>set A</b> or <b>set B</b> to swing a family's direction; its vanishing point slides along the <b>horizon</b> and no further. same direction, one point. the horizon is where the plane's parallels-at-infinity all land: the image of the line at infinity.</div>
+
+<script>
+'use strict';
+
+// --- pinhole model -------------------------------------------------
+// eye at origin, looking down +z into the screen; ground plane below at
+// height h. a ground direction at plane-angle a (radians, 0 = straight
+// away) has direction vector (sin a, 0, cos a). as a ground line in that
+// direction runs to infinity, its image lands at the point where that
+// direction vector projects: x = f * (sin a / cos a) = f * tan a, and
+// y = 0 in eye-space => the HORIZON. so:
+//   vanishing-x = VPX + f * tan(a)
+//   vanishing-y = HORY            (same for every ground direction)
+// every direction's VP sits on one horizon line = image of the line at
+// infinity. two rails sharing direction a share the one VP; swing a and
+// the VP slides along the horizon, reaching the edge only as a -> ±90.
+
+const W = 900, H = 600;
+const VPX = 450;         // image centre x (principal point)
+const HORY = 220;        // horizon line y — image of the plane at infinity
+const F = 430;           // focal length in px — sets how fast tan spreads
+const GROUNDX = 460;     // half-span of rail feet along the plane's near edge
+const FEETY = 560;       // y where the family's rails are anchored (near band)
+const NRAILS = 7;        // rails per family (all parallel, one direction)
+
+// where a ground direction's vanishing point lands on the horizon
+function vpx(aDeg) { return VPX + F * Math.tan(aDeg * Math.PI / 180); }
+
+let angA = 0, angB = 40;   // family directions in degrees (0 = straight away)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const aEl = document.getElementById('angA'), aV = document.getElementById('angAV');
+const bEl = document.getElementById('angB'), bV = document.getElementById('angBV');
+const resetEl = document.getElementById('reset');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+// draw one family of parallel rails: NRAILS lines fanned from evenly
+// spaced feet along the near band, EACH aiming at the same vanishing pt.
+function family(aDeg, colour, feetColour) {
+  const vx = vpx(aDeg);
+  // clamp the drawn VP to the canvas so the point stays visible; the
+  // maths point can run off, the horizon line reminds you where it lives.
+  const vxDraw = Math.max(-2000, Math.min(W + 2000, vx));
+
+  ctx.strokeStyle = colour; ctx.lineWidth = 1.5;
+  for (let i = 0; i < NRAILS; i++) {
+    const t = NRAILS === 1 ? 0.5 : i / (NRAILS - 1);
+    const fx = VPX - GROUNDX + t * 2 * GROUNDX;   // foot x along near band
+    line(fx, FEETY, vxDraw, HORY);                 // rail -> shared VP
+    // foot ticks so the near, spread-out ends read as truly parallel-set
+    ctx.save();
+    ctx.strokeStyle = feetColour; ctx.lineWidth = 3;
+    line(fx, FEETY, fx, FEETY + 8);
+    ctx.restore();
+  }
+  return vx;
+}
+
+// the vanishing-point marker sitting on the horizon
+function vpMark(vx, colour, label) {
+  const vxDraw = Math.max(14, Math.min(W - 14, vx));
+  const off = (vx < 0 || vx > W);
+  ctx.fillStyle = colour;
+  ctx.beginPath(); ctx.arc(vxDraw, HORY, 5, 0, Math.PI * 2); ctx.fill();
+  if (off) {
+    // arrowhead: the true VP is off-frame, still on this same horizon
+    ctx.beginPath();
+    const dir = vx < 0 ? -1 : 1;
+    ctx.moveTo(vxDraw + dir * 12, HORY - 6);
+    ctx.lineTo(vxDraw + dir * 20, HORY);
+    ctx.lineTo(vxDraw + dir * 12, HORY + 6);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.font = '12px "Courier New", monospace';
+  ctx.fillText(label, vxDraw - 6, HORY - 12);
+}
+
+function draw() {
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, W, H);
+
+  // the horizon line — image of the plane's line at infinity
+  ctx.strokeStyle = css('--horizon'); ctx.lineWidth = 2; ctx.setLineDash([2, 4]);
+  line(0, HORY, W, HORY);
+  ctx.setLineDash([]);
+
+  // the two families, then their vanishing points on top
+  const vxA = family(angA, css('--rail'), css('--mark'));
+  const vxB = family(angB, css('--railb'), css('--railb'));
+  vpMark(vxA, css('--mark'), 'A');
+  vpMark(vxB, css('--railb'), 'B');
+
+  const onFrameA = vxA >= 0 && vxA <= W;
+  const onFrameB = vxB >= 0 && vxB <= W;
+  readout.innerHTML =
+    'set A dir <b>' + angA + '°</b> → vanishing point at x=<b>' + Math.round(vxA) + '</b>'
+    + (onFrameA ? '' : ' (off-frame, on the horizon)') + ' &nbsp;|&nbsp; '
+    + 'set B dir <b>' + angB + '°</b> → x=<b>' + Math.round(vxB) + '</b>'
+    + (onFrameB ? '' : ' (off-frame, on the horizon)')
+    + '<br>both points sit on the one horizon &mdash; the image of the plane’s line at infinity.';
+}
+
+function refresh() {
+  aV.textContent = angA + '°  (vp x=' + Math.round(vpx(angA)) + ')';
+  bV.textContent = angB + '°  (vp x=' + Math.round(vpx(angB)) + ')';
+  draw();
+}
+
+aEl.oninput = () => { angA = +aEl.value; refresh(); };
+bEl.oninput = () => { angB = +bEl.value; refresh(); };
+resetEl.onclick = () => {
+  angA = 0; angB = 40;
+  aEl.value = 0; bEl.value = 40;
+  refresh();
+};
+refresh();
+</script>
+</body>
+</html>

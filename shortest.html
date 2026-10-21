@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shortest</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .5rem; margin-bottom: .8rem; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .sep { width: .8rem; }
+  .note { font-family: 'Courier New', monospace; font-size: .74rem; color: #6d6653; margin-bottom: 1.1rem; text-align: center; }
+  canvas { width: min(860px, 96vw); height: auto; display: block; cursor: pointer; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #len { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>shortest</h1>
+  <div class="controls">
+    <button id="mode-edge" class="on">remove an edge</button>
+    <button id="mode-node">remove a node</button>
+    <button id="mode-start">set start</button>
+    <button id="mode-goal">set goal</button>
+    <span class="sep"></span>
+    <button id="knock">knock out the best edge</button>
+    <button id="reset">reset</button>
+  </div>
+  <div class="note" id="mode-note"></div>
+  <canvas id="cv" width="1640" height="980"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the highlighted path is the <b>shortest</b> way from <b>start</b> to <b>goal</b> &mdash; not the shortest first step, but the least total length over the whole route. Dijkstra finds it by relaxing every edge: it grows a frontier outward from start, always settling the nearest unsettled node next, so once a node is settled its distance is final. remove a node or an edge on the best route and it must <b>re-route</b> &mdash; the next-best detour, always longer, never shorter. cut too much and start and goal fall into separate pieces: <b>no path</b>. reset restores the full graph.</div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- shortest path through a weighted graph -----------------------------
+// a small fixed graph: NODES at fixed positions, EDGES between them. each
+// edge's WEIGHT is the euclidean distance between its two endpoints (so the
+// drawn geometry IS the cost — a longer line costs more). the graph is
+// undirected: an edge a—b can be walked either way at the same weight.
+//
+// the PATH LENGTH of a route is the sum of the weights of the edges it uses.
+// the SHORTEST path from start to goal is the route of least total length.
+// it is a GLOBAL quantity: the greedy "nearest next node" is not it — you can
+// only know a route is shortest by having relaxed every alternative. that is
+// what Dijkstra does below.
+//
+// interaction removes parts of the graph (a node or an edge), or knocks out
+// the single edge the current best route depends on. after any change we
+// recompute from scratch and the highlighted path RE-ROUTES to the new
+// shortest route — always longer than or equal to the old one, since a
+// smaller graph can only cost more (or disconnect entirely → no path).
+
+// fixed node layout in canvas coords (12 nodes). positions chosen so several
+// distinct routes of similar length exist — so a re-route is visible.
+const NODES = [
+  { id: 0,  x: 170,  y: 500, label: 'A' },
+  { id: 1,  x: 370,  y: 250, label: 'B' },
+  { id: 2,  x: 390,  y: 730, label: 'C' },
+  { id: 3,  x: 620,  y: 430, label: 'D' },
+  { id: 4,  x: 640,  y: 130, label: 'E' },
+  { id: 5,  x: 660,  y: 800, label: 'F' },
+  { id: 6,  x: 900,  y: 250, label: 'G' },
+  { id: 7,  x: 920,  y: 620, label: 'H' },
+  { id: 8,  x: 1150, y: 400, label: 'I' },
+  { id: 9,  x: 1180, y: 150, label: 'J' },
+  { id: 10, x: 1200, y: 760, label: 'K' },
+  { id: 11, x: 1440, y: 500, label: 'L' },
+];
+
+// edges as endpoint id pairs; weight is filled in as the euclidean distance.
+const EDGE_PAIRS = [
+  [0, 1], [0, 2], [1, 2], [1, 3], [1, 4], [2, 3], [2, 5],
+  [3, 4], [3, 5], [3, 6], [3, 7], [4, 6], [5, 7], [5, 10],
+  [6, 7], [6, 8], [6, 9], [7, 8], [7, 10], [8, 9], [8, 10],
+  [8, 11], [9, 11], [10, 11],
+];
+
+function dist(a, b) { return Math.hypot(NODES[a].x - NODES[b].x, NODES[a].y - NODES[b].y); }
+
+// the live graph. each edge carries its endpoints, weight, and an `alive`
+// flag; each node an `alive` flag. removal flips the flag — the geometry is
+// never mutated, so reset just turns everything back on.
+const EDGES = EDGE_PAIRS.map(([a, b], i) => ({ id: i, a, b, w: dist(a, b), alive: true }));
+const nodeAlive = NODES.map(() => true);
+
+let start = 0;    // node id A
+let goal = 11;    // node id L
+let mode = 'edge';  // 'edge' | 'node' | 'start' | 'goal' — what a click does
+
+// --- Dijkstra's algorithm ------------------------------------------------
+// shortest path from `start` over the CURRENT graph (respecting alive flags).
+// returns { dist: [...], prev: [...], pathNodes, pathEdges, length } where
+// length is Infinity and pathNodes empty when goal is unreachable.
+//
+// the relaxation: dist[start] = 0, all others = ∞. repeatedly pick the
+// UNSETTLED node u with the smallest tentative dist (the nearest frontier
+// node), settle it, and for each alive edge u—v RELAX it:
+//     if dist[u] + w(u,v) < dist[v]:  dist[v] = dist[u] + w(u,v); prev[v] = u
+// settling nearest-first is what makes a settled distance final: any later
+// route to u would have to pass through a node at least as far as u, so it
+// cannot beat the distance we already have. non-negative weights (distances
+// are ≥ 0) are what guarantee that. the frontier here is a plain linear scan
+// for the minimum — O(V²), correct and plenty for 12 nodes; a real heap would
+// change the speed, not the answer.
+function dijkstra() {
+  const n = NODES.length;
+  const D = new Array(n).fill(Infinity);
+  const prev = new Array(n).fill(-1);
+  const settled = new Array(n).fill(false);
+
+  // a dead start (or goal) node has no route.
+  if (!nodeAlive[start] || !nodeAlive[goal]) {
+    return { D, prev, pathNodes: [], pathEdges: [], length: Infinity };
+  }
+  D[start] = 0;
+
+  // build an adjacency list from the alive edges (skip any edge touching a
+  // removed node). undirected: each alive edge relaxes in both directions.
+  const adj = Array.from({ length: n }, () => []);
+  for (const e of EDGES) {
+    if (!e.alive || !nodeAlive[e.a] || !nodeAlive[e.b]) continue;
+    adj[e.a].push({ to: e.b, w: e.w });
+    adj[e.b].push({ to: e.a, w: e.w });
+  }
+
+  for (let iter = 0; iter < n; iter++) {
+    // pick the nearest unsettled node — the frontier minimum.
+    let u = -1, best = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (!settled[i] && nodeAlive[i] && D[i] < best) { best = D[i]; u = i; }
+    }
+    if (u === -1) break;          // remaining nodes are unreachable — done.
+    settled[u] = true;
+    if (u === goal) break;        // goal settled → its distance is final.
+    // relax every edge out of u.
+    for (const { to, w } of adj[u]) {
+      if (settled[to]) continue;
+      const nd = D[u] + w;
+      if (nd < D[to]) { D[to] = nd; prev[to] = u; }
+    }
+  }
+
+  // walk prev[] back from goal to recover the node sequence (if reachable).
+  const length = D[goal];
+  if (!isFinite(length)) {
+    return { D, prev, pathNodes: [], pathEdges: [], length: Infinity };
+  }
+  const pathNodes = [];
+  for (let v = goal; v !== -1; v = prev[v]) pathNodes.push(v);
+  pathNodes.reverse();
+
+  // the edge ids the path walks — for highlighting + for "knock out the best
+  // edge" (which removes one of these).
+  const pathEdges = [];
+  for (let i = 0; i + 1 < pathNodes.length; i++) {
+    const a = pathNodes[i], b = pathNodes[i + 1];
+    const e = EDGES.find(e => e.alive &&
+      ((e.a === a && e.b === b) || (e.a === b && e.b === a)));
+    if (e) pathEdges.push(e.id);
+  }
+  return { D, prev, pathNodes, pathEdges, length };
+}
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+const modeNote = document.getElementById('mode-note');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const MODE_TEXT = {
+  edge:  'click a line to remove that edge',
+  node:  'click a node to remove it (and all its edges) — start and goal cannot be removed',
+  start: 'click a node to make it the start',
+  goal:  'click a node to make it the goal',
+};
+
+let sol = dijkstra();
+
+// --- drawing ------------------------------------------------------------
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'), shade = css('--shade'), pick = css('--pick');
+  ctx.clearRect(0, 0, W, H);
+
+  const onPath = new Set(sol.pathEdges);
+
+  // edges first (under the nodes). removed edges are not drawn at all; live
+  // edges are --faint; the shortest-path edges are --mark and thicker.
+  for (const e of EDGES) {
+    if (!e.alive || !nodeAlive[e.a] || !nodeAlive[e.b]) continue;
+    const A = NODES[e.a], B = NODES[e.b];
+    const hot = onPath.has(e.id);
+    ctx.strokeStyle = hot ? mark : faint;
+    ctx.lineWidth = hot ? 6 : 2;
+    ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
+
+    // weight at the edge midpoint — the cost of walking this edge.
+    const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+    ctx.fillStyle = hot ? mark : '#6d6653';
+    ctx.font = (hot ? '20px' : '17px') + ' "Courier New", monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    // a small paper pad behind the number so the line does not cut it.
+    const label = Math.round(e.w).toString();
+    const pad = ctx.measureText(label).width / 2 + 4;
+    ctx.fillStyle = css('--paper');
+    ctx.fillRect(mx - pad, my - 11, pad * 2, 22);
+    ctx.fillStyle = hot ? mark : '#6d6653';
+    ctx.fillText(label, mx, my);
+  }
+
+  // nodes. removed nodes are drawn hollow + --faint (a ghost of where they
+  // were); live nodes filled --ink; start and goal filled --mark and larger.
+  ctx.textBaseline = 'middle';
+  for (const nd of NODES) {
+    const dead = !nodeAlive[nd.id];
+    const isEnd = nd.id === start || nd.id === goal;
+    const onP = sol.pathNodes.includes(nd.id);
+    const r = isEnd ? 18 : 13;
+
+    if (dead) {
+      ctx.strokeStyle = faint; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(nd.x, nd.y, r, 0, TAU); ctx.stroke();
+    } else {
+      ctx.fillStyle = isEnd ? mark : (onP ? ink : ink);
+      ctx.beginPath(); ctx.arc(nd.x, nd.y, r, 0, TAU); ctx.fill();
+      // a --pick ring on path nodes so the route reads through the nodes too.
+      if (onP && !isEnd) {
+        ctx.strokeStyle = mark; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(nd.x, nd.y, r + 4, 0, TAU); ctx.stroke();
+      }
+    }
+
+    // label inside the node (or greyed for a dead one).
+    ctx.fillStyle = dead ? faint : css('--paper');
+    ctx.font = '18px Georgia'; ctx.textAlign = 'center';
+    ctx.fillText(nd.label, nd.x, nd.y + 1);
+
+    // start / goal tags above.
+    if (nd.id === start) { ctx.fillStyle = mark; ctx.font = '18px Georgia'; ctx.fillText('start', nd.x, nd.y - r - 14); }
+    if (nd.id === goal)  { ctx.fillStyle = mark; ctx.font = '18px Georgia'; ctx.fillText('goal',  nd.x, nd.y - r - 14); }
+  }
+
+  updateReadout();
+}
+
+function updateReadout() {
+  const reachable = isFinite(sol.length);
+  if (reachable) {
+    const route = sol.pathNodes.map(i => NODES[i].label).join(' → ');
+    readout.innerHTML =
+      'shortest path  <b>' + route + '</b>'
+      + '<br>total length  <span id="len"><b>' + Math.round(sol.length) + '</b></span>'
+      + ' &nbsp;·&nbsp; ' + (sol.pathNodes.length - 1) + ' edges'
+      + '<br>Dijkstra relaxed the whole graph — this is the least total length, not the shortest first step'
+      + '<br><b>' + MODE_TEXT[mode] + '</b>';
+  } else {
+    readout.innerHTML =
+      'shortest path  <span id="len"><b>no path</b></span>'
+      + '<br>start and goal are in separate pieces of the graph — nothing connects them'
+      + '<br><b>' + MODE_TEXT[mode] + '</b>';
+  }
+}
+
+function recompute() { sol = dijkstra(); draw(); }
+
+// --- interaction --------------------------------------------------------
+function pointer(ev) {
+  const r = cv.getBoundingClientRect();
+  return [(ev.clientX - r.left) / r.width * cv.width, (ev.clientY - r.top) / r.height * cv.height];
+}
+
+// nearest node to a click, within a hit radius.
+function nodeAt(sx, sy) {
+  let best = -1, bd = 34;
+  for (const nd of NODES) {
+    const d = Math.hypot(sx - nd.x, sy - nd.y);
+    if (d < bd) { bd = d; best = nd.id; }
+  }
+  return best;
+}
+
+// nearest ALIVE edge to a click, by distance from the click to the segment.
+function edgeAt(sx, sy) {
+  let best = -1, bd = 16;
+  for (const e of EDGES) {
+    if (!e.alive || !nodeAlive[e.a] || !nodeAlive[e.b]) continue;
+    const A = NODES[e.a], B = NODES[e.b];
+    const vx = B.x - A.x, vy = B.y - A.y;
+    const L2 = vx * vx + vy * vy || 1;
+    let t = ((sx - A.x) * vx + (sy - A.y) * vy) / L2;
+    t = Math.max(0, Math.min(1, t));
+    const px = A.x + t * vx, py = A.y + t * vy;
+    const d = Math.hypot(sx - px, sy - py);
+    if (d < bd) { bd = d; best = e.id; }
+  }
+  return best;
+}
+
+cv.addEventListener('pointerdown', (ev) => {
+  const [sx, sy] = pointer(ev);
+
+  if (mode === 'node') {
+    const nid = nodeAt(sx, sy);
+    if (nid !== -1 && nid !== start && nid !== goal) { nodeAlive[nid] = false; recompute(); }
+    return;
+  }
+  if (mode === 'start') {
+    const nid = nodeAt(sx, sy);
+    if (nid !== -1 && nodeAlive[nid] && nid !== goal) { start = nid; recompute(); }
+    return;
+  }
+  if (mode === 'goal') {
+    const nid = nodeAt(sx, sy);
+    if (nid !== -1 && nodeAlive[nid] && nid !== start) { goal = nid; recompute(); }
+    return;
+  }
+  // edge mode: hit an edge to remove it. fall back to a node hit only if no
+  // edge was near, so clicks near a node don't accidentally cut an edge.
+  const eid = edgeAt(sx, sy);
+  if (eid !== -1) { EDGES[eid].alive = false; recompute(); }
+});
+
+// knock out the best edge: remove one edge the current shortest route uses,
+// forcing the re-route. we drop the HEAVIEST edge on the path — the biggest
+// single cost — so the detour is the most visible. no path → nothing to knock.
+document.getElementById('knock').onclick = () => {
+  if (!sol.pathEdges.length) return;
+  let target = sol.pathEdges[0], hw = -1;
+  for (const id of sol.pathEdges) {
+    if (EDGES[id].w > hw) { hw = EDGES[id].w; target = id; }
+  }
+  EDGES[target].alive = false;
+  recompute();
+};
+
+document.getElementById('reset').onclick = () => {
+  for (const e of EDGES) e.alive = true;
+  for (let i = 0; i < nodeAlive.length; i++) nodeAlive[i] = true;
+  recompute();
+};
+
+// mode buttons.
+const modeBtns = [['mode-edge', 'edge'], ['mode-node', 'node'], ['mode-start', 'start'], ['mode-goal', 'goal']];
+for (const [id, key] of modeBtns) {
+  document.getElementById(id).onclick = () => {
+    mode = key;
+    for (const [j] of modeBtns) document.getElementById(j).classList.toggle('on', j === id);
+    updateReadout();
+  };
+}
+
+recompute();
+</script>
+</body>
+</html>

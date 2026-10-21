@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spirit level</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>spirit level</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">tilt &alpha;</span><input type="range" id="tilt" min="-300" max="300" value="0" step="1"><span class="val" id="tiltV"></span></div>
+    <div class="row"><span class="name">sensitivity R</span><input type="range" id="sens" min="40" max="240" value="120" step="1"><span class="val" id="sensV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">level it</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a sealed glass vial is <b>curved</b> in a broad arc and nearly full of fluid, with one small <b>bubble</b>. lighter than the fluid, the bubble floats to the <b>highest</b> point of the arc. level the vial and the high point is the centre &mdash; bubble between the graduations. <b>tilt</b> it by &alpha; and the high point shifts, so the bubble slides toward the raised end by <b>x = R&middot;&alpha;</b>: a flatter vial (bigger radius R) moves the bubble more per degree, a more sensitive level.<span class="cite">the spirit (bubble) level &middot; Melchisedech Th&eacute;venot ~1661 &middot; the bubble rises to the high point, x = R&middot;tilt &middot; field: statics / leveling</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- spirit (bubble) level ----------------------------------------------
+// a sealed glass vial ground to a broad arc of radius R, nearly full of
+// fluid, holding one small bubble. the bubble is lighter than the fluid so
+// it floats to the HIGHEST point of the arc. the vial rests on a surface
+// tilted by α (the angle being tested). tilting rotates the arc, so its
+// highest point — where the bubble sits — moves along the vial:
+//   x = R·α    (small-angle, measured along the vial from centre)
+// x is 0 exactly when α is 0: bubble centred (between the two graduations)
+// iff the surface is level. a longer radius R spreads a given tilt into a
+// larger bubble move — a more sensitive level. VERIFY: the bubble sits at
+// the arc's high point and its displacement is x = R·α EXACTLY (linear in
+// tilt, scaled by radius), with x = 0 ⇔ α = 0. the drawn bubble offset and
+// the readout x both come from this one expression — that is the check.
+// (the bubble is clamped inside the vial ends for the drawing, but the
+// readout x = R·α is reported un-clamped so the invariant stays exact.)
+
+// tilt slider is α×100 in degrees; sens slider is R directly (arc radius,
+// arbitrary vial-length units).
+let alphaDeg = 0;    // tilt α in degrees
+let R = 120;         // sensitivity = vial radius (larger = flatter = more sensitive)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const tiltEl = document.getElementById('tilt'), tiltV = document.getElementById('tiltV');
+const sensEl = document.getElementById('sens'), sensV = document.getElementById('sensV');
+const readout = document.getElementById('readout').firstElementChild;
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const PAD = 30;
+
+// the vial half-length (from centre to either sealed end), in the same
+// vial-length units as R and x, so the clamp reads directly against x.
+const VIAL_HALF = 140;
+
+// α in radians, and the exact along-vial displacement of the high point.
+function alphaRad() { return alphaDeg * Math.PI / 180; }
+function bubbleX() { return R * alphaRad(); }        // x = R·α, exact, un-clamped
+
+// --- layout of the drawn scene ------------------------------------------
+// top band: the beam/surface being tested, tilted by α, carrying the vial.
+// bottom band: a big close-up of the curved vial, its fluid, the bubble at
+// the high point, and the two centre graduation lines.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.40);
+const VIAL_TOP = SCENE_TOP + SCENE_H + 90;
+const VIAL_H = H - VIAL_TOP - 50;
+
+// --- top band: the beam being tested, tilted by α -----------------------
+// a level surface drawn as a horizontal reference, the tested beam laid on
+// it rotated by α about its centre, with a small vial riding on the beam.
+// when α = 0 the beam sits flush on the reference — that IS level.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const cx = Math.round(W * 0.5);
+  const cy = SCENE_TOP + Math.round(SCENE_H * 0.6);
+  const half = Math.round(W * 0.30);
+  const a = alphaRad();
+  const level = Math.abs(alphaDeg) < 0.005;
+
+  // the reference — a faint horizontal ground line the tilt is measured from
+  ctx.strokeStyle = faint; ctx.lineWidth = 2; ctx.setLineDash([8, 8]);
+  ctx.beginPath(); ctx.moveTo(cx - half - 40, cy); ctx.lineTo(cx + half + 40, cy); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('true horizontal', cx - half - 40, cy - 14);
+
+  // the tested beam — a filled bar rotated by α about its centre
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(a);
+  ctx.fillStyle = shade; ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  const bh = 34;
+  ctx.beginPath(); ctx.rect(-half, -bh, half * 2, bh); ctx.fill(); ctx.stroke();
+
+  // the vial riding on top of the beam, drawn small here (the close-up is
+  // below). a faint arc + a mark dot for the bubble at its high point.
+  const vx = 0, vy = -bh - 40, vw = 200, arc = 26;
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(vx - vw / 2, vy + arc);
+  ctx.quadraticCurveTo(vx, vy - arc, vx + vw / 2, vy + arc);
+  ctx.stroke();
+  // in the beam's own frame the high point is offset by x along the vial;
+  // clamp into the little vial for this thumbnail.
+  const xThumb = Math.max(-vw / 2 + 16, Math.min(vw / 2 - 16, -bubbleX() * (vw / 2) / VIAL_HALF));
+  const yThumb = vy - arc + arc * (xThumb / (vw / 2)) * (xThumb / (vw / 2));
+  ctx.fillStyle = level ? mark : ink;
+  ctx.beginPath(); ctx.arc(xThumb, yThumb - 8, 10, 0, TAU); ctx.fill();
+  ctx.restore();
+
+  // the beam end-caps back in world space, and the tilt angle arc/label
+  ctx.fillStyle = ink; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('beam under test', cx - half, cy + 60);
+
+  // the tilt readout near the pivot, coloured mark when off-level
+  ctx.fillStyle = level ? faint : mark; ctx.font = '22px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(level ? 'α = 0°  (level)' : ('α = ' + alphaDeg.toFixed(2) + '°'), cx, cy + 100);
+}
+
+// --- bottom band: the curved vial close-up ------------------------------
+// a broad arc (radius R, drawn to scale in the band), nearly full of fluid,
+// one bubble at the arc's HIGH point. two faint centre graduation lines
+// bracket the level position. rotating the vial by α slides the high point
+// along it by x = R·α; the bubble follows, clamped inside the sealed ends.
+function drawVial() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const cx = Math.round(W * 0.5);
+  const baseY = VIAL_TOP + Math.round(VIAL_H * 0.5);
+  const level = Math.abs(alphaDeg) < 0.005;
+
+  // frame + caption
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD + 20, VIAL_TOP, W - 2 * (PAD + 20), VIAL_H);
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('the curved vial — the bubble floats to the high point', PAD + 32, VIAL_TOP - 14);
+
+  // the vial spans a fixed screen width; the arc's sagitta (curve depth)
+  // scales INVERSELY with R — a bigger radius draws a flatter arc, which
+  // is exactly why it is more sensitive (same tilt, the high point walks
+  // further along a flatter arc).
+  const vialW = Math.round((W - 2 * (PAD + 20)) * 0.78);
+  const halfW = vialW / 2;
+  // sagitta in pixels: a flat vial (large R) → shallow curve. tuned so the
+  // 40..240 R range reads as a visibly changing curvature.
+  const sag = Math.round(2600 / R) + 6;
+  const bore = 44;                              // glass bore half-height
+
+  // map a vial-length coordinate s (units, |s| ≤ VIAL_HALF) to screen x
+  const sx = s => cx + (s / VIAL_HALF) * halfW;
+  // the arc's screen y at a given screen offset dx from centre (parabolic
+  // approximation of the shallow circular arc — high at the centre)
+  const arcY = dx => baseY - sag * (1 - (dx / halfW) * (dx / halfW));
+
+  // the outer glass — two arcs (top and bottom of the bore) joined at ends
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath();
+  for (let dx = -halfW; dx <= halfW; dx += 4) {
+    const x = cx + dx, y = arcY(dx) - bore;
+    dx === -halfW ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  for (let dx = halfW; dx >= -halfW; dx -= 4) {
+    const x = cx + dx, y = arcY(dx) + bore;
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  // fluid fill
+  ctx.fillStyle = shade; ctx.fill();
+  ctx.stroke();
+
+  // the two centre graduation lines — the level window, bracketing s = 0
+  const gGap = 26;   // screen half-gap between the two graduations
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  for (const gx of [cx - gGap, cx + gGap]) {
+    const dx = gx - cx;
+    ctx.beginPath();
+    ctx.moveTo(gx, arcY(dx) - bore - 12);
+    ctx.lineTo(gx, arcY(dx) + bore + 12);
+    ctx.stroke();
+  }
+
+  // the bubble at the vial's HIGH point, offset along the vial by x = R·α.
+  // clamp the DRAWN position inside the sealed ends; the readout keeps the
+  // exact un-clamped x. positive α raises the (screen) right end, so the
+  // high point — and the bubble — moves to the right (toward the raised end).
+  const xRaw = bubbleX();                                 // exact, un-clamped
+  const margin = VIAL_HALF * 0.12;
+  const s = Math.max(-VIAL_HALF + margin, Math.min(VIAL_HALF - margin, xRaw));
+  const bx = sx(s);
+  const by = arcY(bx - cx);
+  const br = 30;
+  // the bubble — an open ring on the fluid, mark-coloured when centred/level
+  ctx.fillStyle = pick;
+  ctx.beginPath(); ctx.ellipse(bx, by, br, br * 0.7, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = level ? mark : ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.ellipse(bx, by, br, br * 0.7, 0, 0, TAU); ctx.stroke();
+
+  // a tick + label under the bubble showing its along-vial displacement
+  ctx.strokeStyle = level ? mark : ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(bx, by + bore + 20); ctx.lineTo(bx, by + bore + 44); ctx.stroke();
+  ctx.fillStyle = level ? mark : ink; ctx.font = '18px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(level ? 'LEVEL' : ('x = ' + xRaw.toFixed(1)), bx, by + bore + 66);
+
+  // R annotation — the curvature / sensitivity
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('radius R = ' + R + '  (flatter = more sensitive)', PAD + 32, VIAL_TOP + VIAL_H - 18);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawVial();
+}
+
+// --- regime read: level vs tilted ---------------------------------------
+function regimeOf() {
+  if (Math.abs(alphaDeg) < 0.005) return 'level — bubble centred between the graduations';
+  return alphaDeg > 0
+    ? 'tilted — bubble rides toward the raised (right) end'
+    : 'tilted — bubble rides toward the raised (left) end';
+}
+
+function updateReadout() {
+  const level = Math.abs(alphaDeg) < 0.005;
+  const x = bubbleX();
+  readout.innerHTML =
+    'tilt α <b>' + alphaDeg.toFixed(2) + '°</b> &nbsp;·&nbsp; '
+    + 'sensitivity R <b>' + R + '</b>'
+    + '<br>displacement <b>x = R·α = ' + x.toFixed(2) + '</b>'
+    + (level ? ' &nbsp;·&nbsp; <b>LEVEL</b>' : '')
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  tiltV.textContent = alphaDeg.toFixed(2) + '°';
+  sensV.textContent = String(R);
+  updateReadout();
+}
+
+// sliders take effect live via the rAF redraw. tilt is α×100 (degrees).
+tiltEl.oninput = () => { alphaDeg = tiltEl.value / 100; refresh(); };
+sensEl.oninput = () => { R = +sensEl.value; refresh(); };
+
+// level it — snap α back to 0 and watch the bubble return to centre.
+bReset.onclick = () => {
+  alphaDeg = 0; tiltEl.value = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: a slider-driven redraw ------------------------------
+function frame() {
+  draw();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the mirror</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .8rem; }
+  .controls { display: flex; gap: .5rem; margin: .2rem 0 .4rem; flex-wrap: wrap; justify-content: center; max-width: 40rem; }
+  button {
+    font-family: 'Courier New', monospace; font-size: .8rem;
+    background: none; border: 1px solid var(--ink); border-radius: 2px;
+    color: var(--ink); padding: .3rem .7rem; cursor: pointer;
+  }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .sep { width: 1rem; }
+  .label { font-family: 'Courier New', monospace; font-size: .7rem; color: #6d6653; align-self: center; letter-spacing: .05em; }
+  canvas { width: min(420px, 90vw); height: auto; display: block; margin: 1rem 0 .4rem; }
+  #verdict { font-family: 'Courier New', monospace; font-size: .95rem; min-height: 1.4rem; text-align: center; }
+  #verdict.yes { color: var(--ink); }
+  #verdict.no { color: var(--mark); }
+  #readout { margin-top: 1.2rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .9rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #count { font-size: 1.4rem; letter-spacing: .1em; color: var(--ink); }
+  .found { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: center; margin-top: .6rem; max-width: 34rem; }
+  .chip { font-family: 'Courier New', monospace; font-size: .72rem; border: 1px solid var(--faint); border-radius: 2px; padding: .12rem .4rem; color: #6d6653; }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>the mirror</h1>
+  <div class="controls">
+    <span class="label">figure</span>
+    <button id="fig-square" class="on">square</button>
+    <button id="fig-triangle">triangle</button>
+    <button id="fig-rect">rectangle</button>
+  </div>
+  <div class="controls" id="moverow"></div>
+  <canvas id="cv" width="440" height="440"></canvas>
+  <div id="verdict">&nbsp;</div>
+  <div id="readout">
+    <div>symmetries found: <span id="count">1</span></div>
+    <div><b id="group"></b></div>
+    <div class="found" id="found"></div>
+  </div>
+  <div class="hint">apply a <b>move</b> to the figure. the moves that leave it landing exactly on itself are its symmetries &mdash; together they form its <b>symmetry group</b> (it contains the identity, and every move's undo). a square has 8, an equilateral triangle 6, a plain rectangle 4. switch the figure and watch the group change size.</div>
+
+<script>
+'use strict';
+
+const CX = 220, CY = 220, R = 150;   // canvas centre and reach
+
+// each figure is a list of vertices (unit-ish coords, canvas pixels from centre).
+// square + triangle inscribed in radius R; rectangle is deliberately non-square.
+const FIGURES = {
+  square:   { verts: corners(4, -Math.PI / 4), name: 'square',   group: 'D4 (dihedral, order 8)', total: 8 },
+  triangle: { verts: corners(3, -Math.PI / 2), name: 'triangle', group: 'D3 (dihedral, order 6)', total: 6 },
+  rect:     { verts: rect(200, 110),           name: 'rectangle',group: 'D2 (order 4)',           total: 4 },
+};
+
+// n corners on the circle of radius R, starting at angle a0
+function corners(n, a0) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = a0 + i * 2 * Math.PI / n;
+    out.push([R * Math.cos(a), R * Math.sin(a)]);
+  }
+  return out;
+}
+function rect(w, h) {
+  return [[-w/2,-h/2],[w/2,-h/2],[w/2,h/2],[-w/2,h/2]];
+}
+
+function rotM(t) { const c=Math.cos(t), s=Math.sin(t); return [c,-s, s,c]; }
+// reflection across a line at angle t through the origin
+function refM(t) { const c=Math.cos(2*t), s=Math.sin(2*t); return [c, s, s, -c]; }
+function apply(m, p) { return [m[0]*p[0]+m[1]*p[1], m[2]*p[0]+m[3]*p[1]]; }
+
+// each figure gets its OWN moves: only its true symmetries plus one deliberate
+// non-symmetry so the "not a symmetry" verdict stays reachable. reflection axes
+// are DERIVED from the figure's own drawn vertices — for a regular polygon a
+// mirror axis runs through a vertex and the opposite edge's midpoint, which is the
+// same line as the vertex angle through the centre. so axis angle = vertex angle.
+const deg = t => t * 180 / Math.PI;
+
+// unique mirror-axis angles of a regular polygon, read off its actual vertices.
+// a line at angle a is the same line as a+PI, so fold into [0,PI) and dedupe.
+function polyAxes(verts) {
+  const seen = [];
+  for (const [x,y] of verts) {
+    let a = Math.atan2(y, x);
+    a = ((a % Math.PI) + Math.PI) % Math.PI;          // fold to [0, PI)
+    if (!seen.some(b => Math.abs(a-b) < 1e-6 || Math.abs(a-b-Math.PI) < 1e-6)) seen.push(a);
+  }
+  return seen;
+}
+
+// build the per-figure move table. keys are stable within a figure ('r120','m0'…);
+// `bad` marks the seeded non-symmetry so it never counts toward the group.
+function movesFor(key) {
+  const verts = FIGURES[key].verts;
+  if (key === 'square') {
+    return {
+      r90:  { label: 'rot 90°',  m: rotM(Math.PI/2) },
+      r180: { label: 'rot 180°', m: rotM(Math.PI)   },
+      r270: { label: 'rot 270°', m: rotM(3*Math.PI/2) },
+      mH:   { label: 'flip &mdash;', m: refM(0),          axis: 0 },          // horizontal
+      mA:   { label: 'flip &sol;',   m: refM(Math.PI/4),  axis: Math.PI/4 },  // anti-diagonal
+      mV:   { label: 'flip |',       m: refM(Math.PI/2),  axis: Math.PI/2 },  // vertical
+      mD:   { label: 'flip &bsol;',  m: refM(-Math.PI/4), axis: -Math.PI/4 }, // main diagonal
+    };
+  }
+  if (key === 'triangle') {
+    const ax = polyAxes(verts);                 // three axes, derived from vertices
+    const out = {
+      r120: { label: 'rot 120°', m: rotM(2*Math.PI/3) },
+      r240: { label: 'rot 240°', m: rotM(4*Math.PI/3) },
+    };
+    ax.forEach((a, i) => {
+      out['m'+i] = { label: 'flip ' + Math.round(deg(a)) + '°', m: refM(a), axis: a };
+    });
+    // a 90° turn is NOT a triangle symmetry — kept so the "no" verdict is reachable
+    out.r90 = { label: 'rot 90°', m: rotM(Math.PI/2), bad: true };
+    return out;
+  }
+  // rectangle: D2 — half turn + the two edge-parallel mirror lines
+  return {
+    r180: { label: 'rot 180°', m: rotM(Math.PI) },
+    mH:   { label: 'flip &mdash;', m: refM(0),         axis: 0 },        // across horizontal
+    mV:   { label: 'flip |',       m: refM(Math.PI/2), axis: Math.PI/2 }, // across vertical
+    r90:  { label: 'rot 90°',  m: rotM(Math.PI/2), bad: true }, // NOT a symmetry
+  };
+}
+
+let figKey = 'square';
+let found = new Set(['id']);        // the identity is always a symmetry
+let anim = null;                    // {from, to, t0} while a move animates
+let current = null;                 // vertices as drawn right now
+let moves = {};                     // the current figure's own move table
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const verdict = document.getElementById('verdict');
+const countEl = document.getElementById('count');
+const groupEl = document.getElementById('group');
+const foundEl = document.getElementById('found');
+const moveRow = document.getElementById('moverow');
+
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// invariance test: transform every vertex, then check the transformed SET equals
+// the original SET (a symmetry may relabel corners). match each source vertex to
+// some original within an eyeballed pixel tolerance.
+const TOL = 1.0;   // pixels — figures are exact, so tolerance only absorbs float dust
+function landsOnItself(m, verts) {
+  const moved = verts.map(p => apply(m, p));
+  const used = new Array(verts.length).fill(false);
+  for (const p of moved) {
+    let hit = -1;
+    for (let i = 0; i < verts.length; i++) {
+      if (used[i]) continue;
+      if (Math.hypot(p[0]-verts[i][0], p[1]-verts[i][1]) <= TOL) { hit = i; break; }
+    }
+    if (hit < 0) return false;
+    used[hit] = true;
+  }
+  return true;
+}
+
+// separate a figure's moves into turns and flips for a two-group button row.
+function isFlip(key){ return key[0] === 'm'; }
+
+function buildMoveRow() {
+  moveRow.innerHTML = '';
+  const keys = Object.keys(moves);
+  const addLabel = txt => {
+    const s = document.createElement('span'); s.className = 'label'; s.textContent = txt; moveRow.appendChild(s);
+  };
+  const addSep = () => { const s = document.createElement('span'); s.className = 'sep'; moveRow.appendChild(s); };
+  const addBtn = (html, onclick) => {
+    const b = document.createElement('button'); b.innerHTML = html; b.onclick = onclick; moveRow.appendChild(b);
+  };
+  const turns = keys.filter(k => !isFlip(k));
+  const flips = keys.filter(isFlip);
+  addLabel('turn');
+  for (const k of turns) addBtn(moves[k].label, () => doMove(k));
+  addSep();
+  addLabel('flip');
+  for (const k of flips) addBtn(moves[k].label, () => doMove(k));
+  addSep();
+  addBtn('reset', () => setFigure(figKey));
+}
+
+function setFigure(key) {
+  figKey = key;
+  found = new Set(['id']);
+  anim = null;
+  moves = movesFor(key);
+  current = FIGURES[key].verts.map(p => p.slice());
+  buildMoveRow();
+  for (const k of ['square','triangle','rect'])
+    document.getElementById('fig-'+k).classList.toggle('on', k===key);
+  verdict.textContent = ' ';
+  verdict.className = '';
+  refresh();
+}
+
+function doMove(key) {
+  if (anim) return;                          // let one move settle first
+  const fig = FIGURES[figKey];
+  const ok = landsOnItself(moves[key].m, fig.verts);
+  // animate from wherever the figure sits now to the move applied to the CANONICAL
+  // figure. the target is always the transform of the true figure (so the marked
+  // corner lands in its real home); starting from `current` keeps chained moves
+  // smooth after a symmetry has settled off-canonical.
+  const start = current.map(p => p.slice());
+  const target = fig.verts.map(p => apply(moves[key].m, p));
+  anim = { from: start, to: target, t0: performance.now(), key, ok, phase: 'go' };
+  requestAnimationFrame(step);
+}
+
+function step(now) {
+  if (!anim) return;
+  const dur = 520;
+  let u = (now - anim.t0) / dur;
+  if (u >= 1) u = 1;
+  const e = u<0.5 ? 2*u*u : 1-Math.pow(-2*u+2,2)/2;   // ease in-out
+  current = anim.from.map((p,i) => [
+    p[0] + (anim.to[i][0]-p[0]) * e,
+    p[1] + (anim.to[i][1]-p[1]) * e,
+  ]);
+  draw();
+  if (u < 1) { requestAnimationFrame(step); return; }
+
+  const { key, ok, phase, to } = anim;
+
+  // ─── the "go" leg just finished ───
+  if (phase === 'go') {
+    if (ok) {
+      // SYMMETRY: settle in the transformed pose and STAY. the outline coincides
+      // with the original but the marked corner sits in its new home — that IS the
+      // visible proof the rotation/reflection happened. no snap-back.
+      anim = null;
+      current = to.map(p => p.slice());        // stay in the transformed pose
+      found.add(key);
+      verdict.textContent = moves[key].label.replace(/<[^>]+>/g,'') + ' → lands on itself — a symmetry';
+      verdict.className = 'yes';
+      draw();
+      refresh();
+      return;
+    }
+    // NOT A SYMMETRY: it's now sitting displaced, plainly off the original outline.
+    // hold it there, name it, then start the "back" leg so the return reads as a
+    // rejection (the figure crawls back home) rather than a settled pose.
+    verdict.textContent = moves[key].label.replace(/<[^>]+>/g,'') + ' → does not land on itself — not a symmetry';
+    verdict.className = 'no';
+    draw();
+    refresh();
+    setTimeout(() => {
+      if (anim) return;                      // a new move already took over
+      anim = { from: current.map(p=>p.slice()),
+               to: FIGURES[figKey].verts.map(p=>p.slice()),
+               t0: performance.now(), key, ok, phase: 'back' };
+      requestAnimationFrame(step);
+    }, 750);
+    return;
+  }
+
+  // ─── the "back" leg finished (rejected move returning home) ───
+  anim = null;
+  current = FIGURES[figKey].verts.map(p => p.slice());
+  draw();
+  refresh();
+}
+
+function draw() {
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0,0,cv.width,cv.height);
+
+  // faint axes through the centre — this figure's OWN mirror lines you can flip
+  // across (the reflection moves it actually offers, not a fixed square set).
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1; ctx.setLineDash([4,5]);
+  const axes = Object.keys(moves).filter(isFlip).map(k => moves[k].axis);
+  for (const t of axes) {
+    ctx.beginPath();
+    ctx.moveTo(CX + R*1.25*Math.cos(t), CY + R*1.25*Math.sin(t));
+    ctx.lineTo(CX - R*1.25*Math.cos(t), CY - R*1.25*Math.sin(t));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // fixed ghost of the canonical figure — the outline every move is judged against.
+  // a symmetry's live outline lands exactly on this (only the marked corner shows it
+  // travelled); a non-symmetry lands visibly OFF it. the reference is always present.
+  const g = FIGURES[figKey].verts;
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1.5; ctx.setLineDash([3,4]);
+  ctx.beginPath();
+  ctx.moveTo(CX+g[0][0], CY+g[0][1]);
+  for (let i=1;i<g.length;i++) ctx.lineTo(CX+g[i][0], CY+g[i][1]);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the figure. one corner marked so a move that "lands on itself" still shows
+  // it moved — the shape returns, the marked corner may sit somewhere new.
+  const v = current;
+  ctx.beginPath();
+  ctx.moveTo(CX+v[0][0], CY+v[0][1]);
+  for (let i=1;i<v.length;i++) ctx.lineTo(CX+v[i][0], CY+v[i][1]);
+  ctx.closePath();
+  ctx.fillStyle = css('--shade');
+  ctx.fill();
+  ctx.strokeStyle = css('--ink'); ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // marked corner (vertex 0) — the token that tracks where the move sent things
+  ctx.beginPath();
+  ctx.arc(CX+v[0][0], CY+v[0][1], 6, 0, 2*Math.PI);
+  ctx.fillStyle = css('--mark');
+  ctx.fill();
+}
+
+function refresh() {
+  const fig = FIGURES[figKey];
+  countEl.textContent = found.size;
+  groupEl.innerHTML = found.size === fig.total
+    ? 'the whole group is found &mdash; <b>' + fig.group + '</b>'
+    : 'the symmetries form <b>' + fig.group + '</b> &mdash; ' + (fig.total - found.size) + ' still to find';
+  foundEl.innerHTML = '';
+  // identity first, then this figure's own found moves in its move-table order.
+  const order = ['id', ...Object.keys(moves)];
+  for (const k of order) {
+    if (!found.has(k)) continue;
+    const c = document.createElement('span');
+    c.className = 'chip';
+    c.textContent = k === 'id' ? 'identity' : moves[k].label.replace(/<[^>]+>/g,'');
+    foundEl.appendChild(c);
+  }
+  draw();
+}
+
+for (const k of ['square','triangle','rect'])
+  document.getElementById('fig-'+k).onclick = () => setFigure(k);
+// the move buttons are (re)built per figure by buildMoveRow(); nothing static to wire.
+
+setFigure('square');
+</script>
+</body>
+</html>

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>line motion</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --line: #3a4750;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 3.5rem; text-align: right; }
+  .row span.val { width: 13rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(660px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>line motion</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">cue</span><input type="range" id="cue" min="0" max="100" value="100"><span class="val" id="cueV"></span></div>
+    <div class="row"><span class="name">side</span><input type="range" id="side" min="0" max="100" value="0"><span class="val" id="sideV"></span></div>
+  </div>
+  <canvas id="cv" width="700" height="280"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the whole line snaps into view at once, every part together. but a small dot flashes at one end a heartbeat before it &mdash; and that pull of attention makes the line seem to shoot out from the cued end, drawn like a stroke of ink. fade the <b>cue</b> to nothing and the line just appears, whole, no motion; slide the <b>side</b> to move the cue and watch the stroke change ends.</div>
+
+<script>
+'use strict';
+
+const X0 = 160, X1 = 540, CY = 140, LW = 12;
+const T = 1150, CUE_MS = 140, LINE_MS = 720;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const cEl = document.getElementById('cue'), cV = document.getElementById('cueV');
+const sEl = document.getElementById('side'), sV = document.getElementById('sideV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let cue = 1;    // 0 => no cue, line appears whole (no motion)
+let side = 0;   // 0 => cue at left, 1 => cue at right
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function draw(ts) {
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, 700, 280);
+
+  const cueX = side < 0.5 ? X0 : X1;
+  const t = ts % T;
+
+  // cue flash first (only if cue on)
+  if (cue > 0.02 && t < CUE_MS) {
+    ctx.save();
+    ctx.globalAlpha = cue;
+    ctx.fillStyle = css('--mark');
+    ctx.beginPath(); ctx.arc(cueX, CY, 15, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // then the whole line, all at once
+  if (t >= CUE_MS && t < CUE_MS + LINE_MS) {
+    ctx.strokeStyle = css('--line'); ctx.lineWidth = LW; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(X0, CY); ctx.lineTo(X1, CY); ctx.stroke();
+  }
+
+  requestAnimationFrame(draw);
+}
+
+function refresh() {
+  cV.textContent = cue < 0.02 ? 'off — appears whole' : Math.round(cue * 100) + '%';
+  sV.textContent = side < 0.5 ? 'cue left' : 'cue right';
+  readout.innerHTML = cue < 0.02
+    ? 'no cue &mdash; the line just appears, whole, all at once.'
+    : 'cued at the ' + (side < 0.5 ? 'left' : 'right') + ' &mdash; the line seems to shoot from that end, though it is all there at once.';
+}
+
+cEl.oninput = () => { cue = +cEl.value / 100; refresh(); };
+sEl.oninput = () => { side = +sEl.value / 100; refresh(); };
+refresh();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

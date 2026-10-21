@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aliasing</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --true: #4a6670;   /* what really turns */
+    --seen: #b8603a;   /* what the strobe lets you see */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .8rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 8rem; text-align: right; }
+  .row span.val { width: 6rem; }
+  input[type=range] { accent-color: var(--ink); width: min(380px, 72vw); }
+  .controls { display: flex; gap: .5rem; margin-bottom: 1.2rem; justify-content: center; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  canvas { width: min(760px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; }
+  .true { color: var(--true); }
+  .seen { color: var(--seen); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 37rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>aliasing</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">wheel turns</span><input type="range" id="rate" min="-2000" max="2000" value="1200"><span class="val" id="rateV"></span></div>
+    <div class="row"><span class="name">snapshots / sec</span><input type="range" id="fs" min="100" max="4000" value="1000"><span class="val" id="fsV"></span></div>
+    <div class="row"><span class="name">step</span><input type="range" id="step" min="0" max="200" value="60"><span class="val" id="stepV"></span></div>
+  </div>
+  <div class="controls"><button id="spin">spin</button></div>
+  <canvas id="cv" width="1400" height="700"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the strobe only sees the wheel at each snapshot. sample too slowly and the spoke seems to crawl <span class="seen">backward</span> or freeze &mdash; though it really turns <span class="true">forward</span>. that phantom is aliasing: below two snapshots per turn, the fast truth folds into a slow lie. step through the snapshots by hand, or spin it.</div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+let rate = 12;   // wheel: revolutions per second (can be negative)
+let fs = 10;     // snapshots per second
+let step = 60;   // current snapshot index
+let spinning = false, raf = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rateEl = document.getElementById('rate'), rateV = document.getElementById('rateV');
+const fsEl = document.getElementById('fs'), fsV = document.getElementById('fsV');
+const stepEl = document.getElementById('step'), stepV = document.getElementById('stepV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// angle (radians, clockwise-positive from top) of the spoke at snapshot k
+function angleAt(k) { return (rate * (k / fs)) * TAU; }
+
+function spoke(cx, cy, r, ang, color, width, alpha) {
+  ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + r * Math.sin(ang), cy - r * Math.cos(ang));
+  ctx.stroke();
+  // hub dot at the rim
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(cx + r * Math.sin(ang), cy - r * Math.cos(ang), width * 1.6, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), cTrue = css('--true'), cSeen = css('--seen');
+  ctx.clearRect(0, 0, W, H);
+
+  const cx = W / 2, cy = H / 2 + 10, r = Math.min(W, H) / 2 - 70;
+
+  // rim
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
+
+  // ghost trail: the last several sampled spoke positions (the strobe's frozen views)
+  const trail = 5;
+  for (let j = trail; j >= 1; j--) {
+    const k = step - j;
+    if (k < 0) continue;
+    spoke(cx, cy, r, angleAt(k), cSeen, 3, 0.13 + 0.10 * (trail - j) / trail);
+  }
+  // the current snapshot — what the strobe shows you now
+  spoke(cx, cy, r, angleAt(step), cSeen, 5, 1);
+  // where the wheel TRULY points at this instant (same time as the current snapshot)
+  spoke(cx, cy, r * 0.66, angleAt(step), cTrue, 2.5, 0.9);
+
+  // aliased (apparent) rate: fold true rate into [-fs/2, fs/2]
+  const apparent = rate - fs * Math.round(rate / fs);
+  const nyquist = fs / 2;
+  const under = Math.abs(rate) > nyquist;
+  const sign = apparent > 0.05 ? 'forward' : (apparent < -0.05 ? 'backward' : 'frozen');
+  const fmt = v => (v >= 0 ? '+' : '') + v.toFixed(1);
+
+  readout.innerHTML =
+    '<span class="true">really +' + Math.abs(rate).toFixed(1) + ' turns/s</span> &nbsp;·&nbsp; '
+    + fs.toFixed(0) + ' snapshots/s &nbsp;·&nbsp; '
+    + '<span class="seen">you see ' + fmt(apparent) + ' turns/s (' + sign + ')</span>'
+    + '<br><b>' + (under
+        ? 'below Nyquist (' + nyquist.toFixed(1) + '/s) — the truth is folded into a lie'
+        : 'above Nyquist — the strobe keeps up, what you see is true') + '</b>';
+}
+
+function refresh() {
+  rateV.textContent = rate.toFixed(1) + '/s';
+  fsV.textContent = fs.toFixed(0) + '/s';
+  stepV.textContent = '#' + step;
+  draw();
+}
+
+rateEl.oninput = () => { rate = rateEl.value / 100; refresh(); };
+fsEl.oninput = () => { fs = fsEl.value / 100; refresh(); };
+stepEl.oninput = () => { step = +stepEl.value; refresh(); };
+
+const spinBtn = document.getElementById('spin');
+spinBtn.onclick = () => {
+  spinning = !spinning;
+  spinBtn.classList.toggle('on', spinning);
+  if (spinning) {
+    let acc = step, last = performance.now();
+    const go = (now) => {
+      if (!spinning) return;
+      acc += (now - last) / 1000 * fs;   // advance snapshots at the sample rate
+      last = now;
+      step = Math.round(acc) % 201;
+      stepEl.value = step;
+      refresh();
+      raf = requestAnimationFrame(go);
+    };
+    raf = requestAnimationFrame(go);
+  } else cancelAnimationFrame(raf);
+};
+
+refresh();
+</script>
+</body>
+</html>

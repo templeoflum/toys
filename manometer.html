@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>manometer</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>manometer</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">&Delta;P applied</span><input type="range" id="press" min="0" max="6000" value="1500" step="10"><span class="val" id="pressV"></span></div>
+    <div class="row"><span class="name">fluid</span>
+      <span class="modes">
+        <button id="bWater">water</button>
+        <button id="bMerc">mercury</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">zero it</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a U-shaped tube holds a <b>fluid</b>, both arms open. press harder on the <b>left</b> arm and its column sinks by &delta; while the right rises by the same &delta; &mdash; the fluid is conserved, what leaves one arm enters the other. the two levels split by <b>&Delta;h = 2&delta;</b>, and that height difference weighs exactly the pressure difference driving it: <b>&Delta;P = &rho;g&middot;&Delta;h</b>. the column's weight balances the push, so the height <b>reads</b> the pressure straight off the scale. dense mercury (&rho; 13.6&times; water) splits far less for the same &Delta;P &mdash; a shorter, stiffer column.<span class="cite">the U-tube manometer &middot; fluid statics &middot; &Delta;P = &rho;g&Delta;h, the column weight balances the pressure &middot; field: fluid statics / pressure measurement</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the U-tube manometer -----------------------------------------------
+// a U-shaped tube holds a fluid, both arms open. a pressure difference ΔP is
+// applied across the two arms (here: extra pressure on the LEFT). the fluid
+// is pushed DOWN in the high-pressure arm and UP in the other by the same
+// amount δ — the fluid is conserved, what leaves the left arm enters the
+// right. the two surfaces then differ in height by Δh = 2δ, and that column
+// difference weighs exactly the applied pressure difference:
+//   ΔP = ρ·g·Δh          ⇒    Δh = ΔP / (ρ·g)
+// this is a BALANCE / direct-reading instrument: the fluid's weight per area
+// balances the pressure, so the height difference reads the pressure straight
+// off the scale. with g = 9.81 m/s².
+// VERIFY (load-bearing): at ΔP = 1500 Pa, ρ = 1000 kg/m³ (water),
+//   Δh = 1500 / (1000·9.81) = 0.1529 m ≈ 153 mm  (each arm moves δ ≈ 76 mm).
+// the same ΔP in mercury (ρ = 13595) gives Δh = 1500/(13595·9.81) ≈ 0.0112 m
+//   ≈ 11.2 mm — 13.6× shorter, exactly the density ratio. the drawn split and
+// the readout Δh must both land on ΔP/(ρg) — that is the check. conservation
+// is drawn EXACTLY: left drops by δ = Δh/2, right rises by the same δ.
+const G = 9.81;                 // m/s²
+
+// the two fluids, by density (kg/m³). mercury is 13.595× water — the same ΔP
+// splits its column that many times less.
+const FLUIDS = {
+  water:   { rho:  1000, label: 'water' },
+  mercury: { rho: 13595, label: 'mercury' },
+};
+
+let dP = 1500;                  // applied pressure difference ΔP, pascals
+let fluid = 'water';            // 'water' | 'mercury'
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const pressEl = document.getElementById('press'), pressV = document.getElementById('pressV');
+const readout = document.getElementById('readout').firstElementChild;
+const bWater = document.getElementById('bWater');
+const bMerc = document.getElementById('bMerc');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+function rho() { return FLUIDS[fluid].rho; }
+
+// the balancing height difference in metres: Δh = ΔP / (ρ·g). the invariant.
+function deltaH() { return dP / (rho() * G); }
+// each arm moves by half of it — left down by δ, right up by δ.
+function delta() { return deltaH() / 2; }
+
+// --- the animated split: levels ease toward their balanced offset -------
+// hDrawn tracks the true balanced Δh so a slider move shows the columns
+// travelling to their new balance rather than snapping.
+let hDrawn = deltaH();
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// the U-tube is centred; two vertical arms joined by a bend at the bottom.
+const CX = Math.round(W * 0.46);       // centre between the two arms
+const ARM_GAP = 340;                    // centre-to-centre of the two arms
+const BORE = 96;                        // tube bore width
+const ARM_L = CX - ARM_GAP / 2;         // left arm centre x
+const ARM_R = CX + ARM_GAP / 2;         // right arm centre x
+const TUBE_TOP = 110;                   // open tops of both arms
+const BEND_Y = H - 190;                 // the U's bend centreline
+const REST_Y = 470;                     // the fluid rest level (ΔP = 0, both equal)
+
+// full-scale Δh we ever plot: water at max ΔP is the tallest split, mapped so
+// half of it (δ) fits between the rest level and the arm tops with margin.
+const H_PLOT = 6000 / (FLUIDS.water.rho * G);   // ≈ 0.611 m of water full scale
+// pixels per metre of column, sized so δ_max = H_PLOT/2 spans the arm above
+// the rest level with headroom. everything vertical scales through this.
+const PX_PER_M = (REST_Y - TUBE_TOP - 40) / (H_PLOT / 2);
+
+// map a signed height offset (metres, + = up) about the rest level to a y.
+function yOfOffset(dm) { return REST_Y - dm * PX_PER_M; }
+
+// --- the scene: U-tube, fluid in both arms, the split, the scale --------
+// the left arm carries the applied ΔP (an arrow pressing down its mouth). its
+// surface sits δ BELOW rest; the right sits δ ABOVE. the gap between them is
+// Δh, bracketed by the scale on the right. fluid fills both arms and the bend.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const d = hDrawn / 2;                     // each arm's drawn offset (metres)
+  const yL = yOfOffset(-d);                 // left surface: down by δ
+  const yR = yOfOffset(+d);                 // right surface: up by δ
+  const leftL = ARM_L - BORE / 2, leftR = ARM_L + BORE / 2;
+  const rightL = ARM_R - BORE / 2, rightR = ARM_R + BORE / 2;
+
+  // --- the fluid body: both arms below their surfaces + the bottom bend ---
+  ctx.fillStyle = shade;
+  // left arm column, from its surface down to the bend
+  ctx.fillRect(leftL, yL, BORE, BEND_Y - yL);
+  // right arm column
+  ctx.fillRect(rightL, yR, BORE, BEND_Y - yR);
+  // the connecting bend across the bottom
+  ctx.fillRect(leftL, BEND_Y - BORE / 2, rightR - leftL, BORE);
+  // meniscus bands at each surface
+  ctx.fillStyle = pick;
+  ctx.fillRect(leftL, yL, BORE, 20);
+  ctx.fillRect(rightL, yR, BORE, 20);
+
+  // --- the U-tube outline: two arms joined by a rounded bend -------------
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath();
+  // outer wall: down the left-outer, across under the bend, up the right-outer
+  ctx.moveTo(leftL, TUBE_TOP);
+  ctx.lineTo(leftL, BEND_Y - BORE / 2);
+  ctx.arc(leftL + BORE / 2, BEND_Y - BORE / 2, BORE / 2, Math.PI, Math.PI / 2, true);
+  ctx.lineTo(rightR - BORE / 2, BEND_Y);
+  ctx.arc(rightR - BORE / 2, BEND_Y - BORE / 2, BORE / 2, Math.PI / 2, 0, true);
+  ctx.lineTo(rightR, TUBE_TOP);
+  ctx.stroke();
+  // inner wall of each arm (down to just above the bend)
+  ctx.beginPath();
+  ctx.moveTo(leftR, TUBE_TOP); ctx.lineTo(leftR, BEND_Y - BORE / 2 - 4);
+  ctx.moveTo(rightL, TUBE_TOP); ctx.lineTo(rightL, BEND_Y - BORE / 2 - 4);
+  ctx.stroke();
+
+  // the two surface lines
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(leftL, yL); ctx.lineTo(leftR, yL); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(rightL, yR); ctx.lineTo(rightR, yR); ctx.stroke();
+
+  // the faint rest-level reference across both arms (where ΔP = 0 would sit)
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5; ctx.setLineDash([8, 8]);
+  ctx.beginPath(); ctx.moveTo(leftL - 30, REST_Y); ctx.lineTo(rightR + 30, REST_Y); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('rest level', leftL - 40, REST_Y + 6);
+
+  // --- the applied pressure on the left arm: a rank of down arrows -------
+  ctx.strokeStyle = mark; ctx.fillStyle = mark; ctx.lineWidth = 4;
+  const pushTop = TUBE_TOP - 66;
+  for (let ax = leftL + 18; ax <= leftR - 18; ax += 30) {
+    arrow(ax, pushTop, ax, TUBE_TOP - 10);
+  }
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('ΔP', ARM_L, pushTop - 14);
+  // the right arm mouth, open to reference (atmosphere)
+  ctx.fillStyle = faint; ctx.textAlign = 'center';
+  ctx.fillText('open', ARM_R, TUBE_TOP - 26);
+
+  // --- the graduated scale beside the right arm (mm) --------------------
+  // ticks every 20 mm up the right of the tube; a --mark bracket spans the two
+  // surface levels so Δh is read straight off the scale.
+  const scaleX = rightR + 60;
+  const scaleTopY = yOfOffset(H_PLOT / 2), scaleBotY = yOfOffset(-H_PLOT / 2);
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(scaleX, scaleTopY); ctx.lineTo(scaleX, scaleBotY); ctx.stroke();
+  ctx.font = '17px "Courier New", monospace';
+  const halfMM = (H_PLOT / 2) * 1000;
+  for (let mm = -Math.floor(halfMM / 20) * 20; mm <= halfMM; mm += 20) {
+    const ty = yOfOffset(mm / 1000);
+    const major = (mm % 100 === 0);
+    ctx.strokeStyle = faint; ctx.lineWidth = major ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(scaleX, ty); ctx.lineTo(scaleX + (major ? 24 : 13), ty); ctx.stroke();
+    if (major) {
+      ctx.fillStyle = faint; ctx.textAlign = 'left';
+      ctx.fillText(mm + '', scaleX + 30, ty + 6);
+    }
+  }
+
+  // --- the Δh bracket: from the low (left) level to the high (right) -----
+  // drawn against the scale so the split reads directly. the two surface y's
+  // map onto the scale line at their offsets ±δ about rest.
+  const bx = scaleX + 96;
+  const yLo = yOfOffset(-d), yHi = yOfOffset(+d);
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(bx, yLo); ctx.lineTo(bx, yHi);            // the vertical span
+  ctx.moveTo(bx - 12, yLo); ctx.lineTo(bx + 12, yLo);  // low cap
+  ctx.moveTo(bx - 12, yHi); ctx.lineTo(bx + 12, yHi);  // high cap
+  ctx.stroke();
+  // tie-lines from each surface to its cap
+  ctx.strokeStyle = mark; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
+  ctx.beginPath();
+  ctx.moveTo(rightR, yR); ctx.lineTo(bx, yHi);
+  ctx.moveTo(leftL, yL); ctx.lineTo(bx, yLo);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  const hmm = hDrawn * 1000;
+  const offScale = hDrawn > H_PLOT;
+  ctx.fillText('Δh = ' + hmm.toFixed(1) + ' mm' + (offScale ? '  (off scale)' : ''),
+               bx + 22, (yLo + yHi) / 2 + 7);
+
+  // a quiet fluid label at the top
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('fluid: ' + FLUIDS[fluid].label + '  (ρ = ' + rho() + ' kg/m³)', PAD + 6, 46);
+}
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  arrowHead(x1, y1, Math.cos(a), Math.sin(a));
+}
+function arrowHead(x, y, dx, dy) {
+  const s = 12, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+}
+
+// --- regime read: rising / falling / balanced ---------------------------
+function regimeOf() {
+  const target = deltaH();
+  const d = target - hDrawn;
+  if (dP < 0.5) return 'zeroed — no pressure difference, both arms level';
+  if (Math.abs(d) < 0.0005) return 'balanced — the column weight equals the pressure difference';
+  return d > 0 ? 'splitting — pressure exceeds the current column weight'
+               : 'settling — column weight exceeds the pressure';
+}
+
+function updateReadout() {
+  const h = deltaH();                // the true balanced Δh (invariant)
+  const r = rho();
+  const dlt = delta();               // per-arm move δ = Δh/2
+  readout.innerHTML =
+    'applied ΔP <b>' + dP.toLocaleString('en-US') + ' Pa</b> &nbsp;·&nbsp; '
+    + 'fluid <b>' + FLUIDS[fluid].label + '</b> &nbsp;·&nbsp; '
+    + 'density ρ <b>' + r + ' kg/m³</b>'
+    + '<br>Δh = ΔP/(ρg) = ' + dP.toLocaleString('en-US') + ' / ('
+    + r + '·' + G + ') = <b>' + h.toFixed(4) + ' m</b> = <b>' + (h * 1000).toFixed(1) + ' mm</b>'
+    + '<br>each arm moves δ = Δh/2 = <b>' + (dlt * 1000).toFixed(1) + ' mm</b> '
+    + '(left down, right up — fluid conserved)'
+    + '<br>higher ΔP → wider split &nbsp;·&nbsp; mercury splits 13.6× less than water (same ΔP)'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  pressV.textContent = dP;
+  updateReadout();
+}
+
+// slider changes take effect live — the balanced Δh jumps and the drawn
+// columns ease toward it. moving ΔP widens/narrows the split; the readout
+// Δh always reads the exact ΔP/(ρg).
+pressEl.oninput = () => { dP = +pressEl.value; refresh(); };
+
+function setFluid(f) {
+  fluid = f;
+  bWater.classList.toggle('on', f === 'water');
+  bMerc.classList.toggle('on', f === 'mercury');
+  refresh();
+}
+bWater.onclick = () => setFluid('water');
+bMerc.onclick = () => setFluid('mercury');
+
+// zero it — ΔP back to 0 (both arms level), water, split snapped closed;
+// watch the ease from there on the next move.
+bReset.onclick = () => {
+  dP = 0;
+  pressEl.value = 0;
+  fluid = 'water';
+  hDrawn = deltaH();
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  setFluid('water');
+};
+
+// --- the live loop: ease the drawn split toward its balanced Δh ----------
+// hDrawn approaches deltaH() with a simple first-order relax, so a slider move
+// shows the columns travelling to their new balance. the readout always
+// reports the exact invariant Δh, not the eased draw value.
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;         // guard against tab-switch jumps
+  const target = deltaH();
+  hDrawn += (target - hDrawn) * Math.min(1, dt * 6);
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+setFluid('water');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

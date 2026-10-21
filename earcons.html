@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>earcons</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --field: #d9d5ca;   /* the neutral field the grid sits on */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  .btns { display: flex; gap: .6rem; flex-wrap: wrap; justify-content: center; }
+  button { font-family: 'Courier New', monospace; font-size: .78rem; color: var(--ink); background: transparent;
+           border: 1px solid var(--faint); border-radius: 3px; padding: .35rem .8rem; cursor: pointer; margin-bottom: 1.1rem; }
+  button:hover { border-color: var(--mark); color: var(--mark); }
+  button:disabled { opacity: .45; cursor: default; }
+  button:disabled:hover { border-color: var(--faint); color: var(--ink); }
+  canvas { width: min(560px, 92vw); height: auto; display: block; border: 1px solid var(--faint); background: var(--field); }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>earcons</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">urgency</span><input type="range" id="urgency" min="0" max="100" step="1" value="35"><span class="val" id="urgencyV"></span></div>
+    <div class="row"><span class="name">weight</span><input type="range" id="weight" min="0" max="100" step="1" value="50"><span class="val" id="weightV"></span></div>
+  </div>
+  <div class="btns">
+    <button id="fam">play the family</button>
+    <button id="ico">play the icons</button>
+    <button id="ab">A/B one event</button>
+  </div>
+  <canvas id="cv" width="1120" height="800"></canvas>
+  <div id="readout"><span>click a cell &mdash; headphones help. two species, six floor-events.</span></div>
+  <div class="hint">six things the floor says &mdash; a memo lands, a word is asked, a signature is asked, a sign lands, a fix confirms, the alarm &mdash; each sounded two ways. the top row is blattner's earcons (1989): short musical motives that combine, transform, and inherit &mdash; rhythm first, register and loudness carry urgency; learn the family once and new members read free, like words. the bottom row is gaver's auditory icons (1986): caricatures of everyday events &mdash; a slide, a knock, a scratch, a stamp &mdash; meaning heard the way the world is heard, almost for free, though abstract states strain the metaphor. drag urgency to transform the whole family; drag weight to feel the icons' physics. this palette is the dispatch's notification design happening mock-first &mdash; what sounds right here gets signed, then wired. concurrent sounds obey the masking toy's law: what shares a band, hides.</div>
+
+<script>
+'use strict';
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const readout = document.getElementById('readout').firstElementChild;
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// the grid: 6 columns of floor-events x 2 rows of species
+const EVENTS = ['memo','word-ask','sign-ask','signed','fixed','ALARM'];
+const CW = 165, CH = 160, ML = 100, GT = 222;      // cell size, left label zone, grid top
+const PADX = 16, INW = CW - 2*PADX;                // sketch pad inside a cell
+const TFS = 1500, PXMS = INW/TFS;                  // one shared timebase: 1500 ms across every cell
+const STSC = 3.4;                                  // sketch pixels per semitone
+
+let u = 35, w = 50;                                // raw slider values
+let lastCol = 0;                                   // the column A/B replays (default: memo)
+let touring = false, flash = null, flashTok = 0;
+let actx = null, master = null, noiseBuf = null;
+
+// ---- recipes -------------------------------------------------------------
+
+// earcons: one motive stock, transformed family-wide by urgency
+function earconNotes(col){
+  const uf = u/100, g = 140 - 70*uf;               // inter-note gap: 140 ms -> 70 ms
+  const R = Math.round(12*uf);                     // register shift: +0 -> +12 semitones
+  const ev = []; let t = 0;
+  const push = (st,dur,gap)=>{ ev.push({t, st, dur}); t += dur + (gap===undefined ? g : gap); };
+  if (col===3){                                    // signed: M inverted, settling tail
+    push(4,90); push(2,90); push(0,220); push(-5,300);
+  } else if (col===5){                             // ALARM: M compressed x3, up an octave
+    for (let rep=0; rep<3; rep++){ push(12,55,30); push(14,55,30); push(16,55, rep<2 ? 110 : 0); }
+  } else {
+    push(0,90); push(2,90); push(4,220);           // the motive M: short-short-long
+    if (col===1) push(7,180);                      // word-ask: rising tail, a question mark
+    if (col===2){ push(7,180); push(12,180); }     // sign-ask: the ask leaning harder
+    if (col===4){ ev.push({t, st:0, dur:260}); push(4,260); }  // fixed: major-third dyad
+  }
+  const last = ev[ev.length-1], total = last.t + last.dur;
+  ev.forEach(e => e.st += R);
+  return { ev, total, type: col===5 ? 'sawtooth' : 'triangle', pk: col===5 ? 1.5 : 1 };
+}
+
+// icons: weight lowers resonances and stretches decays; urgency brightens cutoffs
+function iconDur(col){
+  const dm = 1 + w/100;
+  return [120*dm+80, 70+230*dm, 300*dm+80, 330*dm+40, 120+190*dm, 700*dm+350][col];
+}
+
+// schematic amplitude envelope for the icon sketches (t in ms)
+function iconEnv(col, t, dm){
+  let e = 0, T, tau;
+  switch(col){
+    case 0:                                        // paper-slide
+      T = 120*dm;
+      if (t>=0 && t<=T) e = t<5 ? t/5 : 1-(t-5)/(T-5);
+      break;
+    case 1: {                                      // knock-knock
+      tau = 55*dm;
+      const b = tt => tt<0 ? 0 : Math.min(1, tt/3)*Math.exp(-tt/tau);
+      e = Math.min(1, Math.max(b(t), b(t-70)));
+      break; }
+    case 2:                                        // pen-scratch, fluttered
+      T = 300*dm;
+      if (t>=0 && t<T)
+        e = Math.min(1, t/8)*(1-0.45*t/T)*(0.55+0.45*Math.sin(2*Math.PI*28*t/1000));
+      break;
+    case 3: {                                      // stamp
+      tau = 80*dm;
+      if (t>=0) e = Math.max(Math.min(1, t/4)*Math.exp(-t/tau), t<25 ? 0.5*(1-t/25) : 0);
+      break; }
+    case 4: {                                      // click-clunk
+      tau = 45*dm;
+      const tc = t-120;
+      e = Math.max((t>=0 && t<5) ? 0.85 : 0,
+                   tc<0 ? 0 : Math.min(1, tc/3)*0.8*Math.exp(-tc/tau));
+      break; }
+    case 5:                                        // bell-klaxon, 6 hz tremolo
+      T = 700*dm;
+      if (t>=0){
+        if (t<15) e = 0.85*t/15;
+        else if (t<T) e = 0.85*(0.62+0.38*Math.sin(2*Math.PI*6*(t-15)/1000 + Math.PI/2));
+        else e = 0.527*Math.exp(-(t-T)/90);
+      }
+      break;
+  }
+  return e < 0.02 ? 0 : e;
+}
+
+// ---- audio ---------------------------------------------------------------
+
+function ac(){                                     // audio exists only after the first click
+  if (!actx){
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    master = actx.createGain();
+    master.gain.value = 0.8; master.connect(actx.destination);
+    const len = Math.floor(actx.sampleRate*1.5);
+    noiseBuf = actx.createBuffer(1, len, actx.sampleRate);
+    const ch = noiseBuf.getChannelData(0);
+    for (let i=0;i<len;i++) ch[i] = Math.random()*2 - 1;
+  }
+  if (actx.state === 'suspended') actx.resume();
+  return actx;
+}
+
+function tone(at, st, durMs, type, peak){          // one note: soft 8 ms attack, quick release
+  const o = actx.createOscillator(); o.type = type;
+  o.frequency.value = 440*Math.pow(2, st/12);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, at);
+  g.gain.linearRampToValueAtTime(peak, at+0.008);
+  const end = at + durMs/1000;
+  g.gain.setValueAtTime(peak, end);
+  g.gain.setTargetAtTime(0, end, 0.035);
+  o.connect(g); g.connect(master);
+  o.start(at); o.stop(end+0.3);
+}
+
+function nsrc(t0, len){ const s = actx.createBufferSource(); s.buffer = noiseBuf; s.loop = true; s.start(t0); s.stop(t0+len); return s; }
+function bq(type, f, Q){ const b = actx.createBiquadFilter(); b.type = type; b.frequency.value = f; if (Q!==undefined) b.Q.value = Q; return b; }
+function gEnv(t0, peak, att){ const g = actx.createGain(); g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(peak, t0+att); return g; }
+function wire(...ns){ for (let i=0;i<ns.length-1;i++) ns[i].connect(ns[i+1]); ns[ns.length-1].connect(master); }
+
+function playEarcon(col){
+  const { ev, total, type, pk } = earconNotes(col);
+  const peak = 0.2*(0.65+0.55*u/100)*pk;           // urgency scales dynamics too
+  const t0 = actx.currentTime + 0.03;
+  ev.forEach(n => tone(t0 + n.t/1000, n.st, n.dur, type, peak));
+  return total + 180;
+}
+
+function playIcon(col){
+  const wf = w/100, uf = u/100;
+  const den = 1+wf, dm = 1+wf;                     // weight: resonances down, decays long
+  const bf = 1+0.8*uf, gI = 0.85+0.25*uf;          // urgency: cutoffs up, gain slightly
+  const t0 = actx.currentTime + 0.03;
+  switch(col){
+    case 0: {                                      // paper-slide: noise through a falling lowpass
+      const T = 0.12*dm;
+      const s = nsrc(t0, T+0.2), lp = bq('lowpass', 3000*bf/den);
+      lp.frequency.setValueAtTime(3000*bf/den, t0);
+      lp.frequency.linearRampToValueAtTime(800*bf/den, t0+T);
+      const g = gEnv(t0, 0.55*gI, 0.005);
+      g.gain.linearRampToValueAtTime(0, t0+T);
+      wire(s, lp, g); break; }
+    case 1: {                                      // knock-knock: two damped thumps, 70 ms apart
+      for (const dt of [0, 0.07]){
+        const tt = t0+dt;
+        const s = nsrc(tt, 0.1), bp = bq('bandpass', 180/den, 8);
+        const g = gEnv(tt, 2.4*gI, 0.002);
+        g.gain.setTargetAtTime(0, tt+0.006, 0.02*dm);
+        wire(s, bp, g);
+        const o = actx.createOscillator(); o.type = 'sine'; o.frequency.value = 140/den;
+        const og = gEnv(tt, 0.5*gI, 0.003);
+        og.gain.setTargetAtTime(0, tt+0.006, 0.045*dm);
+        o.connect(og); og.connect(master); o.start(tt); o.stop(tt+0.45*dm);
+      } break; }
+    case 2: {                                      // pen-scratch: banded noise fluttered at 28 hz
+      const T = 0.3*dm;
+      const s = nsrc(t0, T+0.15), bp = bq('bandpass', 2500/den, 3);
+      const g = gEnv(t0, 0.6*gI, 0.008);
+      g.gain.setTargetAtTime(0, t0+T, 0.02);
+      const lfo = actx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 28;
+      const lg = actx.createGain(); lg.gain.value = 0.27*gI;
+      lg.gain.setTargetAtTime(0, t0+T, 0.02);
+      lfo.connect(lg); lg.connect(g.gain); lfo.start(t0); lfo.stop(t0+T+0.2);
+      wire(s, bp, g); break; }
+    case 3: {                                      // stamp: one heavy thud
+      const o = actx.createOscillator(); o.type = 'sine'; o.frequency.value = 90/den;
+      const og = gEnv(t0, 0.9*gI, 0.004);
+      og.gain.setTargetAtTime(0, t0+0.006, 0.08*dm);
+      o.connect(og); og.connect(master); o.start(t0); o.stop(t0+0.6*dm);
+      const s = nsrc(t0, 0.05), lp = bq('lowpass', 1400*bf/den);
+      const g = gEnv(t0, 0.5*gI, 0.002);
+      g.gain.setTargetAtTime(0, t0+0.004, 0.01);
+      wire(s, lp, g); break; }
+    case 4: {                                      // click-clunk: a mechanism engaging
+      const s = nsrc(t0, 0.02), hp = bq('highpass', 4000*bf);
+      const g = gEnv(t0, 0.7*gI, 0.001);
+      g.gain.linearRampToValueAtTime(0, t0+0.005);
+      wire(s, hp, g);
+      const t1 = t0+0.12;
+      const o = actx.createOscillator(); o.type = 'square'; o.frequency.value = 220/den;
+      const lp2 = bq('lowpass', 1200*bf/den);
+      const og = gEnv(t1, 0.5*gI, 0.003);
+      og.gain.setTargetAtTime(0, t1+0.005, 0.045*dm);
+      o.connect(lp2); lp2.connect(og); og.connect(master); o.start(t1); o.stop(t1+0.5*dm);
+      break; }
+    case 5: {                                      // bell-klaxon: two inharmonic partials, tremolo
+      const T = 0.7*dm;
+      const saw = actx.createOscillator(); saw.type = 'sawtooth'; saw.frequency.value = 520/den;
+      const lp = bq('lowpass', 3500*bf/den);
+      const sg = actx.createGain(); sg.gain.value = 0.55;
+      const sin = actx.createOscillator(); sin.type = 'sine'; sin.frequency.value = 690/den;
+      const ng = actx.createGain(); ng.gain.value = 0.45;
+      const tg = actx.createGain(); tg.gain.value = 0.62;
+      const lfo = actx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 6;
+      const lg = actx.createGain(); lg.gain.value = 0.24;
+      const eg = gEnv(t0, 0.5*gI, 0.015);
+      eg.gain.setTargetAtTime(0, t0+T, 0.09);
+      saw.connect(lp); lp.connect(sg); sg.connect(tg);
+      sin.connect(ng); ng.connect(tg);
+      lfo.connect(lg); lg.connect(tg.gain);
+      tg.connect(eg); eg.connect(master);
+      const stop = t0+T+0.6;
+      saw.start(t0); sin.start(t0); lfo.start(t0);
+      saw.stop(stop); sin.stop(stop); lfo.stop(stop);
+      break; }
+  }
+  return iconDur(col);
+}
+
+// ---- drawing -------------------------------------------------------------
+
+function earconSketch(c, x, y){                    // notes on a line: spacing = rhythm, height = register
+  const { ev } = earconNotes(c);
+  const x0 = x+PADX, by = y+112;
+  ctx.strokeStyle = css('--faint'); ctx.globalAlpha = 0.9; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x0, by); ctx.lineTo(x+CW-PADX, by); ctx.stroke();
+  ctx.globalAlpha = 0.85; ctx.strokeStyle = css('--ink'); ctx.fillStyle = css('--ink');
+  for (const n of ev){
+    const nx = x0 + n.t*PXMS, ny = by - n.st*STSC;
+    if (n.dur > 100){                              // long note: a dash
+      ctx.lineWidth = 7; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(nx+3, ny); ctx.lineTo(nx + n.dur*PXMS - 3, ny); ctx.stroke();
+    } else {                                       // short note: a dot
+      ctx.beginPath(); ctx.arc(nx + n.dur*PXMS/2, ny, n.dur<=60 ? 3 : 4.5, 0, Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1; ctx.lineCap = 'butt';
+}
+
+function iconSketch(c, x, y){                      // the envelope: attack and decay, mirrored
+  const dm = 1 + w/100;
+  const x0 = x+PADX, mid = y+82, hh = 46, msppx = TFS/INW;
+  ctx.strokeStyle = css('--faint'); ctx.globalAlpha = 0.9; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x0, mid); ctx.lineTo(x+CW-PADX, mid); ctx.stroke();
+  ctx.globalAlpha = 1;
+  const e = [];
+  for (let px=0; px<=INW; px++){                   // subsample so 2 ms spikes survive the timebase
+    let m = 0;
+    for (let s=0; s<4; s++) m = Math.max(m, iconEnv(c, (px + s*0.25)*msppx, dm));
+    e.push(m);
+  }
+  ctx.beginPath();
+  ctx.moveTo(x0, mid - e[0]*hh);
+  for (let px=1; px<=INW; px++) ctx.lineTo(x0+px, mid - e[px]*hh);
+  for (let px=INW; px>=0; px--) ctx.lineTo(x0+px, mid + e[px]*hh);
+  ctx.closePath();
+  ctx.fillStyle = css('--ink'); ctx.globalAlpha = 0.4; ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function drawFrame(){
+  ctx.fillStyle = css('--field'); ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle = '#6d6653'; ctx.font = '17px "Courier New", monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('six things the floor says · two ways to say them — click a cell to hear it', 20, 36);
+
+  // column headers: the six floor-events
+  ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+  for (let c=0; c<6; c++) ctx.fillText(EVENTS[c], ML + c*CW + CW/2, GT-18);
+
+  // row labels, stacked at the left edge
+  ctx.font = '13px "Courier New", monospace'; ctx.textAlign = 'right';
+  const labels = [['earcons','learned,','musical'], ['icons','everyday,','borrowed']];
+  for (let r=0; r<2; r++){
+    const cy = GT + r*CH + CH/2;
+    ctx.fillStyle = css('--ink'); ctx.fillText(labels[r][0], ML-14, cy-14);
+    ctx.fillStyle = '#6d6653';
+    ctx.fillText(labels[r][1], ML-14, cy+4);
+    ctx.fillText(labels[r][2], ML-14, cy+22);
+  }
+
+  // the cells
+  for (let r=0; r<2; r++) for (let c=0; c<6; c++){
+    const cx = ML + c*CW, cy = GT + r*CH;
+    if (flash && flash.r===r && flash.c===c){      // the clicked cell flashes while it sounds
+      ctx.fillStyle = css('--mark'); ctx.globalAlpha = 0.25;
+      ctx.fillRect(cx+1, cy+1, CW-2, CH-2); ctx.globalAlpha = 1;
+    }
+    ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+    ctx.strokeRect(cx, cy, CW, CH);
+    if (r===0) earconSketch(c, cx, cy); else iconSketch(c, cx, cy);
+  }
+
+  ctx.fillStyle = '#6d6653'; ctx.font = '15px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('top row sketch — notes on a line: spacing is rhythm, height is register', ML + 3*CW, 600);
+  ctx.fillText('bottom row sketch — the envelope: how the sound strikes and dies', ML + 3*CW, 628);
+}
+
+// ---- interaction ---------------------------------------------------------
+
+function flashCell(r, c){
+  flash = { r, c };
+  const tok = ++flashTok;
+  drawFrame();
+  setTimeout(()=>{ if (flashTok===tok){ flash = null; drawFrame(); } }, 200);
+}
+
+function playCell(r, c){                           // play + flash + readout; returns duration ms
+  const dur = r===0 ? playEarcon(c) : playIcon(c);
+  flashCell(r, c);
+  readout.innerHTML = r===0
+    ? '<b>'+EVENTS[c]+'</b> as <b>earcon</b> &mdash; carried by rhythm &amp; register (a learned word)'
+    : '<b>'+EVENTS[c]+'</b> as <b>icon</b> &mdash; carried by material &amp; force (heard like the world)';
+  return dur;
+}
+
+cv.addEventListener('click', e=>{
+  if (touring) return;
+  const rc = cv.getBoundingClientRect();
+  const mx = (e.clientX-rc.left)*(W/rc.width), my = (e.clientY-rc.top)*(H/rc.height);
+  if (mx < ML || my < GT) return;
+  const c = Math.floor((mx-ML)/CW), r = Math.floor((my-GT)/CH);
+  if (c<0 || c>5 || r<0 || r>1) return;
+  ac();
+  lastCol = c;
+  playCell(r, c);
+});
+
+const famBtn = document.getElementById('fam');
+const icoBtn = document.getElementById('ico');
+const abBtn  = document.getElementById('ab');
+function setBtns(on){ [famBtn, icoBtn, abBtn].forEach(b => b.disabled = !on); }
+
+function tourRow(row){                             // left-to-right, 350 ms apart; locked while touring
+  if (touring) return;
+  touring = true; setBtns(false); ac();
+  let i = 0, lastDur = 0;
+  const step = ()=>{
+    lastDur = playCell(row, i); i++;
+    if (i < 6) setTimeout(step, 350);
+    else setTimeout(()=>{
+      touring = false; setBtns(true);
+      if (row===0) readout.innerHTML =
+        'one motive stock, six meanings &mdash; that\'s inheritance: learn the family, read new members free.';
+    }, lastDur + 250);
+  };
+  step();
+}
+
+famBtn.addEventListener('click', ()=> tourRow(0));
+icoBtn.addEventListener('click', ()=> tourRow(1));
+
+abBtn.addEventListener('click', ()=>{              // the last-clicked column, both species back to back
+  if (touring) return;
+  touring = true; setBtns(false); ac();
+  const d1 = playCell(0, lastCol);
+  setTimeout(()=>{
+    const d2 = playCell(1, lastCol);
+    setTimeout(()=>{ touring = false; setBtns(true); }, d2 + 250);
+  }, d1 + 250);
+});
+
+function bind(id, vid, fn, fmt){ const e=document.getElementById(id), v=document.getElementById(vid);
+  const upd = ()=>{ fn(+e.value); v.textContent = fmt(e.value); }; e.oninput = upd; upd(); }
+bind('urgency','urgencyV', v=>{ u=v; drawFrame(); },
+     v=>v+' · +'+Math.round(12*v/100)+' st');
+bind('weight','weightV', v=>{ w=v; drawFrame(); },
+     v=>v+' · ×'+(1+v/100).toFixed(2));
+
+drawFrame();
+</script>
+</body>
+</html>

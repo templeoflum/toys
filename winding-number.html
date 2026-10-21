@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>winding number</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --loop: #4a6670;
+    --peg: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .5rem; margin-bottom: .8rem; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .sep { width: 1rem; }
+  .row { display: flex; align-items: center; gap: .5rem; margin-bottom: 1.2rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  input[type=range] { accent-color: var(--ink); width: min(340px, 70vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; cursor: grab; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--peg); font-size: 1.15rem; }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>winding number</h1>
+  <div class="controls">
+    <button id="s-round" class="on">round</button>
+    <button id="s-star">star</button>
+    <button id="s-squiggle">squiggle</button>
+    <button id="s-double">double loop</button>
+  </div>
+  <div class="row"><span>deform</span><input type="range" id="wob" min="0" max="100" value="0"></div>
+  <canvas id="cv" width="1640" height="800"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">drag the <b style="color:var(--peg)">peg</b>. the winding number counts how many times the loop circles it &mdash; and it is a whole number no stretching can change: switch the shape, crank <b>deform</b>, wobble it into a mess, the count holds. the only way to move it is to drag the peg across the loop&rsquo;s edge. the dial on the right shows why: it traces the <i>direction</i> from peg to loop, and that arrow wraps the dial exactly that many times.</div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+const N = 300;
+
+let shape = 'round';
+let wob = 0;
+let peg = [0, 0];   // in loop-space units (centered)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const wobEl = document.getElementById('wob');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// loop in centered unit-ish coords; returns array of [x,y]
+function loopPoints() {
+  const pts = [];
+  const w = wob / 100;
+  for (let i = 0; i < N; i++) {
+    const th = (i / N) * TAU;
+    let x, y;
+    if (shape === 'double') {
+      const r = 0.35 + 1.0 * Math.cos(th);           // limaçon: inner loop → winds twice
+      x = r * Math.cos(th); y = r * Math.sin(th);
+    } else {
+      let r = 1;
+      if (shape === 'star') r = 1 + 0.30 * Math.sin(6 * th);
+      else if (shape === 'squiggle') r = 1 + 0.18 * Math.sin(9 * th) + 0.09 * Math.sin(4 * th + 1);
+      r *= 1 + w * 0.35 * Math.sin(7 * th + 0.6);     // deform
+      x = r * Math.cos(th); y = r * Math.sin(th);
+    }
+    pts.push([x, y]);
+  }
+  return pts;
+}
+
+// winding number of the loop around Q: sum of signed subtended angles / 2π
+function winding(pts, Q) {
+  let tot = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const ax = a[0] - Q[0], ay = a[1] - Q[1], bx = b[0] - Q[0], by = b[1] - Q[1];
+    tot += Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
+  }
+  return Math.round(tot / TAU);
+}
+
+// view transform for the loop pane (left)
+const SCALE = 210;
+function LX() { return cv.width * 0.30; }
+function LY() { return cv.height * 0.5; }
+function toScreen(p) { return [LX() + p[0] * SCALE, LY() + p[1] * SCALE]; }
+function fromScreen(sx, sy) { return [(sx - LX()) / SCALE, (sy - LY()) / SCALE]; }
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), loopC = css('--loop'), pegC = css('--peg'), shade = css('--shade');
+  ctx.clearRect(0, 0, W, H);
+
+  const pts = loopPoints();
+  const n = winding(pts, peg);
+
+  // faint spokes peg → loop (a few), tinted by angle, to show the wrapping
+  const P = toScreen(peg);
+  ctx.lineWidth = 1;
+  for (let i = 0; i < pts.length; i += 12) {
+    const S = toScreen(pts[i]);
+    ctx.strokeStyle = shade;
+    ctx.beginPath(); ctx.moveTo(P[0], P[1]); ctx.lineTo(S[0], S[1]); ctx.stroke();
+  }
+
+  // the loop
+  ctx.strokeStyle = loopC; ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  pts.forEach((p, i) => { const s = toScreen(p); i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]); });
+  ctx.closePath(); ctx.stroke();
+
+  // the peg
+  ctx.fillStyle = pegC;
+  ctx.beginPath(); ctx.arc(P[0], P[1], 8, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('peg', P[0], P[1] - 16);
+
+  // ---- the direction dial (right) ----
+  const DX = W * 0.76, DY = H * 0.5, DR = Math.min(W * 0.19, H * 0.4);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(DX, DY, DR, 0, TAU); ctx.stroke();
+  // center dot (the origin the arrow wraps)
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(DX, DY, 3, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('direction from peg to loop', DX, DY - DR - 18);
+  // trace the unit direction peg→loop around the dial
+  ctx.strokeStyle = pegC; ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i <= pts.length; i++) {
+    const p = pts[i % pts.length];
+    const dx = p[0] - peg[0], dy = p[1] - peg[1];
+    const L = Math.hypot(dx, dy) || 1;
+    const x = DX + (dx / L) * DR, y = DY + (dy / L) * DR;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+
+  const word = n === 0 ? 'the loop does not circle the peg'
+    : Math.abs(n) === 1 ? 'the loop circles the peg once'
+    : 'the loop circles the peg ' + Math.abs(n) + ' times';
+  readout.innerHTML = 'winding number <b>' + n + '</b> &mdash; ' + word
+    + (n !== 0 ? ' · the arrow wraps the dial ' + Math.abs(n) + '×' : ' · the arrow never encloses the dial&rsquo;s centre');
+}
+
+// drag the peg
+let dragging = false;
+function pointer(ev) {
+  const r = cv.getBoundingClientRect();
+  return [(ev.clientX - r.left) / r.width * cv.width, (ev.clientY - r.top) / r.height * cv.height];
+}
+cv.addEventListener('pointerdown', (ev) => {
+  const [sx, sy] = pointer(ev);
+  const P = toScreen(peg);
+  if (Math.hypot(sx - P[0], sy - P[1]) < 60 || sx < cv.width * 0.55) {
+    dragging = true; cv.setPointerCapture(ev.pointerId);
+    peg = fromScreen(sx, sy); draw();
+  }
+});
+cv.addEventListener('pointermove', (ev) => {
+  if (!dragging) return;
+  const [sx, sy] = pointer(ev);
+  peg = fromScreen(Math.min(sx, cv.width * 0.55), sy);
+  draw();
+});
+cv.addEventListener('pointerup', () => { dragging = false; });
+
+for (const [id, key] of [['s-round', 'round'], ['s-star', 'star'], ['s-squiggle', 'squiggle'], ['s-double', 'double']]) {
+  document.getElementById(id).onclick = () => {
+    shape = key;
+    for (const j of ['s-round', 's-star', 's-squiggle', 's-double'])
+      document.getElementById(j).classList.toggle('on', j === id);
+    draw();
+  };
+}
+wobEl.oninput = () => { wob = +wobEl.value; draw(); };
+draw();
+</script>
+</body>
+</html>

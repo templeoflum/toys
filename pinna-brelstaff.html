@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pinna-brelstaff</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --field: #cfcabd;   /* the field the tiles sit on */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4rem; text-align: right; }
+  .row span.val { width: 8rem; }
+  input[type=range] { accent-color: var(--ink); width: min(380px, 72vw); }
+  button { font-family: 'Courier New', monospace; font-size: .78rem; color: var(--ink); background: transparent;
+           border: 1px solid var(--faint); border-radius: 3px; padding: .35rem .8rem; cursor: pointer; margin-bottom: 1.1rem; }
+  button:hover { border-color: var(--mark); color: var(--mark); }
+  button.on { border-color: var(--mark); color: var(--mark); }
+  canvas { width: min(560px, 92vw); height: auto; display: block; border: 1px solid var(--faint); background: var(--field); }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>pinna&ndash;brelstaff</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">zoom</span><input type="range" id="zoom" min="0" max="100" step="1" value="60"><span class="val" id="zoomV"></span></div>
+    <div class="row"><span class="name">tilt</span><input type="range" id="tilt" min="0" max="45" step="1" value="24"><span class="val" id="tiltV"></span></div>
+    <div class="row"><span class="name">tiles</span><input type="range" id="dens" min="16" max="44" step="2" value="30"><span class="val" id="densV"></span></div>
+  </div>
+  <button id="spin">real rotation: off</button>
+  <canvas id="cv" width="1120" height="800"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">rest your eyes on the mark at the centre. the rings are dead still &mdash; only the whole pattern gently breathes in and out. yet the two rings seem to <b>rotate in opposite directions</b>. it is the slant of each little tile that hijacks your motion detectors as the pattern scales. set <b>tilt</b> to zero and, with the same zoom, the turning stops &mdash; the motion lived only in the slant.</div>
+
+<script>
+'use strict';
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height, cx = W/2, cy = H/2, base = Math.min(W,H);
+const readout = document.getElementById('readout').firstElementChild;
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+let zoomAmp = 0.60, tilt = 24*Math.PI/180, dens = 30, realSpin = false;
+
+function bind(id, vid, fn, fmt){ const e=document.getElementById(id), v=document.getElementById(vid);
+  const upd = ()=>{ fn(+e.value); v.textContent = fmt(e.value); }; e.oninput = upd; upd(); }
+bind('zoom','zoomV', x=>zoomAmp=x/100, x=>x+'%');
+bind('tilt','tiltV', x=>tilt=x*Math.PI/180, x=>x+'°');
+bind('dens','densV', x=>dens=x, x=>x+' tiles');
+document.getElementById('spin').addEventListener('click', function(){ realSpin=!realSpin;
+  this.textContent='real rotation: '+(realSpin?'on':'off'); this.classList.toggle('on',realSpin); });
+
+function draw(now){
+  const t = now/1000;
+  const scale = 1 + zoomAmp*0.15*Math.sin(t*1.35);
+  const spin = realSpin ? t*0.22 : 0;
+
+  ctx.fillStyle = css('--field'); ctx.fillRect(0,0,W,H);
+  const rings = [ {rad: base*0.22, n: Math.round(dens*0.7), sign:+1},
+                  {rad: base*0.37, n: dens, sign:-1} ];
+  const tileR = base*0.028;
+  const BLACK = css('--ink'), WHITE = css('--paper');
+
+  rings.forEach(function(rg){
+    for (let i=0;i<rg.n;i++){
+      const a = (i/rg.n)*Math.PI*2 + spin*rg.sign;
+      const r = rg.rad*scale;
+      const x = cx+Math.cos(a)*r, y = cy+Math.sin(a)*r;
+      const orient = a + Math.PI/2 + tilt*rg.sign;
+      ctx.save(); ctx.translate(x,y); ctx.rotate(orient);
+      const dark = (i%2===0);
+      ctx.fillStyle = dark ? BLACK : WHITE;
+      ctx.fillRect(-tileR,-tileR,tileR*2,tileR*2);
+      ctx.strokeStyle = dark ? WHITE : BLACK; ctx.lineWidth = 1.5;
+      ctx.strokeRect(-tileR,-tileR,tileR*2,tileR*2);
+      ctx.restore();
+    }
+  });
+  ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx-8,cy); ctx.lineTo(cx+8,cy); ctx.moveTo(cx,cy-8); ctx.lineTo(cx,cy+8); ctx.stroke();
+
+  readout.innerHTML = realSpin
+    ? 'that turn is <b>real</b> rotation, for comparison &mdash; switch it off and the illusion takes over.'
+    : tilt < 0.02 ? 'tilt is <b>zero</b> &mdash; the rings only zoom, and the false rotation is gone.'
+                  : 'hold the centre &mdash; the rings seem to <b>counter-rotate</b>, though only the scale is moving.';
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

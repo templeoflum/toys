@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>delboeuf</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --disk: #5b6b74;
+    --ring: #c9bfa6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 10rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>delbœuf</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">rings</span><input type="range" id="rings" min="0" max="100" value="100"><span class="val" id="ringsV"></span></div>
+    <div class="row"><span class="name">match</span><input type="range" id="match" min="0" max="100" value="0"><span class="val" id="matchV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="520"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two slate disks are exactly the same size. the left one wears a snug ring and swells to fill it; the right wears a far ring and shrinks away inside it &mdash; the same disk, judged against the gap around it. fade the <b>rings</b> to nothing and the disks are plainly equal; raise <b>match</b> to lay an identical outline over each.</div>
+
+<script>
+'use strict';
+
+const LC = { x: 300, y: 265 }, RC = { x: 700, y: 265 };  // group centres
+const RDISK = 52;                    // central disk radius — SAME for both
+const RSNUG = RDISK + 14;            // left: outer ring hugs the disk
+const RFAR  = RDISK + 78;            // right: outer ring stands far off
+
+let rings = 1;    // 0 => rings gone, disks bare and plainly equal
+let match = 0;    // proof outline fades in
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rEl = document.getElementById('rings'), rV = document.getElementById('ringsV');
+const mEl = document.getElementById('match'), mV = document.getElementById('matchV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function disk(x, y, r, fill) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); }
+function ring(x, y, r, w) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.lineWidth = w; ctx.stroke(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // the outer rings — the only thing that differs between the two
+  if (rings > 0.005) {
+    ctx.save();
+    ctx.globalAlpha = rings;
+    ctx.strokeStyle = css('--ring');
+    ring(LC.x, LC.y, RSNUG, 4);
+    ring(RC.x, RC.y, RFAR, 4);
+    ctx.restore();
+  }
+
+  // the two identical inner disks
+  disk(LC.x, LC.y, RDISK, css('--disk'));
+  disk(RC.x, RC.y, RDISK, css('--disk'));
+
+  // proof: an identical dashed outline at RDISK over each — same radius, so they match
+  if (match > 0) {
+    ctx.save();
+    ctx.globalAlpha = match;
+    ctx.strokeStyle = css('--mark'); ctx.setLineDash([6, 5]);
+    ring(LC.x, LC.y, RDISK + 5, 2.5);
+    ring(RC.x, RC.y, RDISK + 5, 2.5);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = rings < 0.02
+    ? 'no rings &mdash; two bare disks, both radius <b>' + RDISK + '</b>, plainly equal.'
+    : match > 0.98
+      ? 'the two outlines are the same size &mdash; both disks are radius <b>' + RDISK + '</b>.'
+      : 'both inner disks are radius <b>' + RDISK + '</b>. only the ring around them differs.';
+}
+
+function refresh() {
+  rV.textContent = rings < 0.02 ? 'none' : Math.round(rings * 100) + '%';
+  mV.textContent = match > 0.98 ? 'outlines on' : match > 0 ? 'rising' : 'off';
+  draw();
+}
+
+rEl.oninput = () => { rings = +rEl.value / 100; refresh(); };
+mEl.oninput = () => { match = +mEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

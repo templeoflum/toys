@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>resonance</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>resonance</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">drive &omega;</span><input type="range" id="drv" min="10" max="360" value="100" step="1"><span class="val" id="drvV"></span></div>
+    <div class="row"><span class="name">damping c</span><input type="range" id="dmp" min="4" max="120" value="30" step="1"><span class="val" id="dmpV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">push a <b>swing</b> steadily and it settles into a swing of its own, matching your beat. push it at its <b>natural frequency</b> &omega;<sub>0</sub> = &radic;(k/m) &mdash; the rate it wants to swing on its own &mdash; and every push adds to the last: the motion <b>builds</b>. push off the beat and your pushes fight the swing, so it stays small. the steady swing size is <b>A(&omega;) = F<sub>0</sub> / &radic;((k &minus; m&omega;&sup2;)&sup2; + (c&omega;)&sup2;)</b>, and it <b>peaks sharply</b> right around &omega;<sub>0</sub>. that peak is <b>resonance</b>. weaker <b>damping c</b> makes the peak <b>taller and narrower</b> &mdash; less to bleed the built-up motion away.<span class="cite">the driven damped harmonic oscillator &middot; m&middot;x&Prime; + c&middot;x&prime; + k&middot;x = F&#8320;cos(&omega;t) &middot; A(&omega;) peaks at resonance, &omega;&#8320; = &radic;(k/m) &middot; field: driven oscillation</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the driven damped harmonic oscillator ------------------------------
+// a mass m on a spring k, with damping c, pushed by a steady drive of
+// amplitude F0 at angular frequency ω:
+//   m·x'' + c·x' + k·x = F0·cos(ω t)
+// the mass has a natural frequency ω0 = √(k/m) — the rate it swings on its
+// own with no drive. drive it and it settles (after transients die) into a
+// steady sinusoid AT the drive frequency ω, with amplitude
+//   A(ω) = F0 / √( (k − m·ω²)² + (c·ω)² )
+// this A(ω) is the whole story: it PEAKS sharply near ω0 (resonance — the
+// pushes land in step and the motion builds), and falls off away from it
+// (the pushes fight the swing). lower damping c → a taller, narrower peak.
+//
+// VERIFY (load-bearing): A(ω) = F0 / √((k − m ω²)² + (c ω)²) EXACTLY.
+//   · the response curve is this A evaluated across ω — the marked ω dot on
+//     the curve reads A(ω) at the live drive; the swinging mass shows the
+//     SAME A as its steady amplitude. one amp() call feeds curve, dot, swing.
+//   · lower c → the peak near ω0 rises and narrows; raise c → it flattens.
+//   · at ω ≪ ω0, A → F0/k (spring wins); at ω ≫ ω0, A → 0 (mass can't keep up).
+//
+// HONEST NOTE (a factor the readout states): the amplitude peak is NOT exactly
+// at ω0 for nonzero damping — it sits slightly BELOW, at the resonance freq
+//   ω_r = √(ω0² − c²/(2 m²))   (real only while c² < 2 m k).
+// we mark BOTH: ω0 (the natural freq, √(k/m)) and the true amplitude peak
+// (found by scanning A over ω). they coincide only in the c→0 limit. the
+// readout labels which is which rather than pretending peak = ω0.
+
+// fixed plant. m, k, F0 chosen so ω0 = √(k/m) = 1 and A stays O(1) at defaults,
+// letting the slider ranges read as multiples of ω0 (ω ≈ 1 is on resonance).
+const M = 1.0;    // mass m
+const K = 1.0;    // spring stiffness k  → ω0 = √(k/m) = 1
+const F0 = 1.0;   // steady drive amplitude F0
+
+// live knobs. ω is the drive frequency (slider/100 → 0.10..3.60, ω0 = 1 mid-ish).
+// c is the damping (slider/100 → 0.04..1.20). ω and c are the only inputs.
+let omega = 1.00;   // drive angular frequency ω
+let c = 0.30;       // damping coefficient c
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const drvEl = document.getElementById('drv'), drvV = document.getElementById('drvV');
+const dmpEl = document.getElementById('dmp'), dmpV = document.getElementById('dmpV');
+const readout = document.getElementById('readout').firstElementChild;
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const PAD = 30;
+
+// --- the physics: the two load-bearing formulas -------------------------
+// ω0 = √(k/m), the natural frequency — the ONE source everything marks against.
+function omega0() { return Math.sqrt(K / M); }
+
+// the steady-state amplitude at drive frequency w. this is A(ω), exact.
+// coded straight from A = F0 / √((k − m w²)² + (c w)²), no rearrangement.
+function amp(w) {
+  const re = K - M * w * w;      // k − m·ω²   (stiffness vs inertia term)
+  const im = c * w;              // c·ω        (damping term)
+  return F0 / Math.sqrt(re * re + im * im);
+}
+
+// the true amplitude peak: A(ω) maxes slightly BELOW ω0 for c > 0, at
+// ω_r = √(ω0² − c²/(2m²)) while that's real; otherwise the peak is at ω = 0.
+// rather than lean on the closed form we SCAN A over the plotted ω range and
+// take the max — so the marked peak is exactly the curve's own high point,
+// and it agrees with ω_r to the scan resolution. returns {w, A}.
+const W_MIN = 0.10, W_MAX = 3.60;   // plotted ω range (matches the slider)
+function peak() {
+  let bw = W_MIN, bA = amp(W_MIN);
+  const N = 2000;
+  for (let i = 1; i <= N; i++) {
+    const w = W_MIN + (W_MAX - W_MIN) * i / N;
+    const a = amp(w);
+    if (a > bA) { bA = a; bw = w; }
+  }
+  return { w: bw, A: bA };
+}
+
+// --- layout of the drawn scene ------------------------------------------
+// top band: the driven swing — a pivot, an arm, and the mass swinging at its
+// steady amplitude A(ω). a faint reach arc marks ±A; the drive beat ticks
+// alongside so on-beat vs off-beat reads.
+// bottom band: the response curve A(ω) across the range, with the ω0 line,
+// the true peak, and a live dot at the current drive ω.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.44);
+const CURVE_TOP = SCENE_TOP + SCENE_H + 40;
+const CURVE_H = H - CURVE_TOP - 70;
+
+// sim-time drives the steady swing phase θ(t) = A·sin(ω t); sliders never reset
+// it, so retuning ω or c is a live change to an ongoing driven swing.
+let simT = 0;
+
+// map an amplitude A(ω) to a drawn swing half-angle. the curve's own peak sets
+// the full-scale angle so the tallest reachable swing fills the arc — a pure
+// display scaling (multiplies every A equally), never the physics. the SAME
+// scaling feeds the swing angle and the curve height, so the mass's reach and
+// the marked curve point line up.
+const SWING_MAX = 52 * Math.PI / 180;   // widest drawn swing half-angle
+function ampScaleRef() { return peak().A; }   // full-scale = the response peak
+function swingAngle() {
+  const A = amp(omega);
+  const frac = Math.min(1, A / ampScaleRef());
+  return SWING_MAX * frac;
+}
+
+// --- top band: the driven swing -----------------------------------------
+function drawSwing() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const px = Math.round(W * 0.5);
+  const py = SCENE_TOP + 30;             // pivot near the top, arm hangs down
+  const L = SCENE_H - 90;                // arm length
+  const Amax = swingAngle();             // the steady swing half-angle
+  const th = Amax * Math.sin(TAU * omega * simT / 6);   // live swing (6: eye-pace)
+
+  // the reach arc — how wide the steady swing gets (±A). widens on resonance,
+  // shrinks off it. dashed, faint.
+  ctx.strokeStyle = shade; ctx.lineWidth = 2; ctx.setLineDash([4, 10]);
+  ctx.beginPath();
+  ctx.arc(px, py, L + 30, Math.PI / 2 - Amax, Math.PI / 2 + Amax);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // the rest (θ=0) reference straight down
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 8]);
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, py + L + 46); ctx.stroke();
+  ctx.setLineDash([]);
+  // the ±A end ticks
+  for (const s of [-1, 1]) {
+    const a = Math.PI / 2 + s * Amax;
+    ctx.strokeStyle = faint; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(px + Math.cos(a) * (L + 18), py + Math.sin(a) * (L + 18));
+    ctx.lineTo(px + Math.cos(a) * (L + 42), py + Math.sin(a) * (L + 42));
+    ctx.stroke();
+  }
+
+  // the arm + mass, swung by θ from straight-down.
+  const a = Math.PI / 2 + th;
+  const mx = px + Math.cos(a) * L, my = py + Math.sin(a) * L;
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(mx, my); ctx.stroke();
+  // the pivot hub
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(px, py, 10, 0, TAU); ctx.fill();
+  // the mass — a bob, marked
+  ctx.fillStyle = mark; ctx.beginPath(); ctx.arc(mx, my, 26, 0, TAU); ctx.fill();
+
+  // the DRIVE beat — a small marker that swings by the drive phase alone (fixed
+  // reference amplitude), sitting on the arc, so you can read on-beat (marker
+  // and mass move together) vs off-beat (they drift apart). the drive: F0·cos.
+  const drivePh = Math.cos(TAU * omega * simT / 6);   // the raw drive, ±1
+  const da = Math.PI / 2 + (18 * Math.PI / 180) * drivePh;
+  const dx = px + Math.cos(da) * (L + 30), dy = py + Math.sin(da) * (L + 30);
+  ctx.fillStyle = faint;
+  ctx.beginPath(); ctx.arc(dx, dy, 8, 0, TAU); ctx.fill();
+
+  // labels
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('driven swing  (m·x″ + c·x′ + k·x = F₀cos ω t)', PAD + 6, SCENE_TOP + 4);
+  ctx.fillText('drive F₀cos ω t', dx + 16, dy + 6);
+  ctx.textAlign = 'center'; ctx.fillStyle = faint;
+  ctx.fillText('rest', px, py + L + 66);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = mark; ctx.font = '20px "Courier New", monospace';
+  ctx.fillText('steady A(ω) = ' + amp(omega).toFixed(3), px + 40, py + 10);
+}
+
+// --- bottom band: the response curve A(ω) -------------------------------
+// A plotted across the ω range: the tall narrow (or low broad) peak near ω0,
+// the ω0 line, the true amplitude peak, and the live drive dot on the curve.
+function drawCurve() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const x0 = PAD + 90, x1 = W - PAD - 30;         // plot box in x (ω axis)
+  const yTop = CURVE_TOP + 10, yBot = CURVE_TOP + CURVE_H;
+  const plotW = x1 - x0, plotH = yBot - yTop;
+
+  // y full-scale = the current peak amplitude, so the curve fills the box and
+  // you SEE it grow/narrow as damping drops. same ampScaleRef the swing uses.
+  const Aref = ampScaleRef();
+  const wToX = w => x0 + (w - W_MIN) / (W_MAX - W_MIN) * plotW;
+  const aToY = A => yBot - Math.min(1, A / Aref) * plotH * 0.94;
+
+  // axes
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x0, yTop); ctx.lineTo(x0, yBot); ctx.lineTo(x1, yBot);
+  ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  // ω ticks at whole multiples of ω0 (= 1 here), labelled in ω0-units
+  const w0 = omega0();
+  for (let k = 0; k <= 3; k++) {
+    const w = k * w0;
+    if (w < W_MIN || w > W_MAX) continue;
+    const xt = wToX(w);
+    ctx.strokeStyle = faint; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(xt, yBot); ctx.lineTo(xt, yBot + 8); ctx.stroke();
+    ctx.fillText(k === 0 ? '0' : (k === 1 ? 'ω₀' : k + 'ω₀'), xt, yBot + 28);
+  }
+  ctx.textAlign = 'right';
+  ctx.fillText('A', x0 - 12, yTop + 10);
+  ctx.textAlign = 'left';
+  ctx.fillText('drive frequency  ω  →', x0 + 10, yBot + 46);
+
+  // the ω0 line — the natural frequency, √(k/m). a vertical --shade guide.
+  ctx.strokeStyle = shade; ctx.lineWidth = 2; ctx.setLineDash([5, 7]);
+  ctx.beginPath(); ctx.moveTo(wToX(w0), yTop); ctx.lineTo(wToX(w0), yBot); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('ω₀ = √(k/m)', wToX(w0), yTop - 2);
+
+  // the curve itself — A(ω) sampled across the box.
+  ctx.strokeStyle = ink; ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  const N = 600;
+  for (let i = 0; i <= N; i++) {
+    const w = W_MIN + (W_MAX - W_MIN) * i / N;
+    const x = wToX(w), y = aToY(amp(w));
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // the TRUE amplitude peak — the curve's own high point (scanned). marked with
+  // a --mark ring, honestly labelled as slightly below ω0 when damping bites.
+  const pk = peak();
+  const pxk = wToX(pk.w), pyk = aToY(pk.A);
+  ctx.strokeStyle = mark; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(pxk, pyk, 9, 0, TAU); ctx.stroke();
+  ctx.setLineDash([3, 5]);
+  ctx.beginPath(); ctx.moveTo(pxk, pyk); ctx.lineTo(pxk, yBot); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = mark; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+  const near = Math.abs(pk.w - w0) < 0.02;
+  ctx.fillText(near ? 'peak ≈ ω₀' : 'peak (just below ω₀)', pxk, pyk - 16);
+
+  // the LIVE drive dot — the current ω, sitting on the curve at A(ω). this is
+  // the same A the swinging mass shows: the dot's height IS the swing's reach.
+  const lx = wToX(omega), ly = aToY(amp(omega));
+  ctx.fillStyle = mark; ctx.beginPath(); ctx.arc(lx, ly, 11, 0, TAU); ctx.fill();
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([2, 5]);
+  ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx, yBot); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = ink; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('ω', lx, yBot + 28);
+
+  // a quiet damping label — the knob that sets the peak's shape.
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('response A(ω) = F₀ / √((k − m·ω²)² + (c·ω)²)   ·   damping c = ' + c.toFixed(2),
+               x0, yTop - 24);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawSwing();
+  drawCurve();
+}
+
+// --- regime read: on the beat or off it ---------------------------------
+// how close the drive sits to the response peak, in ω0-units. near the peak the
+// swing is near full (resonance builds); far off, the drive fights the swing.
+function regimeOf() {
+  const pk = peak();
+  const A = amp(omega), frac = A / pk.A;
+  if (frac > 0.9)  return 'near resonance — drive matches the natural beat, the swing builds toward the peak';
+  if (frac > 0.4)  return 'off the beat — some build, but the pushes partly fight the swing';
+  if (omega < omega0()) return 'well below ω₀ — slow pushes, the spring just follows (A → F₀/k)';
+  return 'well above ω₀ — fast pushes, the mass can’t keep up (A → 0)';
+}
+
+function updateReadout() {
+  const w0 = omega0();
+  const pk = peak();
+  const A = amp(omega);
+  // A computed straight from the formula alongside the same amp() the curve and
+  // swing use — one source, so they cannot disagree.
+  const re = K - M * omega * omega, im = c * omega;
+  const Aformula = F0 / Math.sqrt(re * re + im * im);
+
+  readout.innerHTML =
+    'drive ω <b>' + omega.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'natural ω₀ = √(k/m) <b>' + w0.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'damping c <b>' + c.toFixed(2) + '</b>'
+    + '<br>A(ω) = F₀/√((k−mω²)²+(cω)²) = <b>' + Aformula.toFixed(3) + '</b> &nbsp;·&nbsp; '
+    + 'peak A <b>' + pk.A.toFixed(3) + '</b> at ω <b>' + pk.w.toFixed(2) + '</b>'
+    + '<br>peak sits <b>' + (pk.w < w0 - 0.005 ? 'just below ω₀' : 'at ω₀ (c→0)')
+    + '</b> — lower c → taller, narrower peak'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  drvV.textContent = omega.toFixed(2);
+  dmpV.textContent = c.toFixed(2);
+  updateReadout();
+}
+
+// sliders take effect live and do NOT reset the swing. ω retunes the drive (the
+// live dot slides along the curve, the swing reach follows A(ω)); c reshapes the
+// peak (tall+narrow when small, low+broad when large). ω = slider/100, c = slider/100.
+drvEl.oninput = () => { omega = drvEl.value / 100; refresh(); };
+dmpEl.oninput = () => { c = dmpEl.value / 100; refresh(); };
+
+// reset — drive back onto resonance-ish, damping to mid, phase to zero.
+bReset.onclick = () => {
+  omega = 1.00; c = 0.30; simT = 0;
+  drvEl.value = 100; dmpEl.value = 30;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: advance sim-time, redraw ----------------------------
+// the steady swing phase is analytic — θ = A·sin(ω t) — so the loop advances t
+// and repaints. A(ω) is the exact steady-state amplitude; the loop shows the
+// mass already settled at it (transients are not drawn — this is the response,
+// not the ring-up). ω sets the beat, A(ω) sets the reach.
+let last = performance.now();
+function frame(now) {
+  let elapsed = (now - last) / 1000;
+  last = now;
+  if (elapsed > 0.25) elapsed = 0.25;   // guard tab-switch jumps
+  simT += elapsed;
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+omega = 1.00;
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

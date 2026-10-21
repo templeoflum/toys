@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>drag</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>drag</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">push F</span><input type="range" id="push" min="20" max="800" value="300" step="5"><span class="val" id="pushV"></span></div>
+    <div class="row"><span class="name">drag</span><input type="range" id="drag" min="10" max="400" value="100" step="5"><span class="val" id="dragV"></span></div>
+    <div class="row"><span class="name">medium</span>
+      <span class="modes">
+        <button id="bAir">air (v&sup2;)</button>
+        <button id="bFluid">fluid (v)</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a steady <b>push</b> meets a <b>drag</b> that grows with speed, so the object can only speed up until the two balance &mdash; then it holds a <b>terminal</b> velocity, a ceiling no extra time can beat. in air the drag grows as speed <b>squared</b>, so the ceiling rises only as the <b>square root</b> of the push: quadruple the push and the speed merely doubles.<span class="cite">drag &amp; terminal velocity &middot; Stokes 1851 (linear) &middot; Newton (quadratic, v&sup2;)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- drag & terminal velocity -------------------------------------------
+// an object of mass m=1 pushed by a constant force F against a drag that
+// grows with speed. 1-D speed v ≥ 0. per sub-step dt:
+//   Fdrag = c*v*v   (air, quadratic)   OR   b*v   (fluid, linear)
+//   accel = (F - Fdrag) / m
+//   v    += accel*dt
+// the object approaches its terminal velocity asymptotically (first-order,
+// no ringing): where push and drag balance, accel → 0 and v holds.
+//   air   (Fdrag = c·v²):  v_term = √(F/c)
+//   fluid (Fdrag = b·v ):  v_term = F/b
+// one drag knob feeds c (air) or b (fluid). VERIFY: the numeric integral
+// must land on these analytic values — that is the load-bearing check.
+const MASS = 1.0;
+
+// sliders scaled by 100 so the steps read finely.
+let F = 3.0;         // push force
+let k = 1.0;         // drag coefficient (c in air, b in fluid)
+let mode = 'air';    // 'air' (quadratic) | 'fluid' (linear)
+
+let v = 0;           // current speed, ≥ 0
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const pushEl = document.getElementById('push'), pushV = document.getElementById('pushV');
+const dragEl = document.getElementById('drag'), dragV = document.getElementById('dragV');
+const readout = document.getElementById('readout').firstElementChild;
+const bAir = document.getElementById('bAir');
+const bFluid = document.getElementById('bFluid');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// the analytic terminal velocity for the live F, k, mode.
+function vTerm() {
+  if (k <= 0) return Infinity;
+  return mode === 'air' ? Math.sqrt(F / k) : F / k;
+}
+// the live drag force at speed s under the current mode.
+function dragForce(s) {
+  return mode === 'air' ? k * s * s : k * s;
+}
+
+// --- the scrolling trace buffer -----------------------------------------
+// a rolling record of (simT, v, vterm) over the last WINDOW seconds. newest
+// at the right, like feedback's timeline. vterm stored per-sample so the
+// ceiling the trace was climbing toward is preserved through slider moves.
+let simT = 0;
+const WINDOW = 10;           // visible trace span (seconds)
+let trace = [];             // {t, v, vt} samples
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function stepSim(dt) {
+  simT += dt;
+  const accel = (F - dragForce(v)) / MASS;
+  v += accel * dt;
+  // a pure push + drag never reverses the object; guard v ≥ 0.
+  if (v < 0) v = 0;
+  if (!isFinite(v)) v = 0;
+
+  trace.push({ t: simT, v: v, vt: vTerm() });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the moving object + force balance. bottom band: the v(t) trace.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.34);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 100;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// plotted speed ceiling — the top of the trace band, and the clamp for a
+// runaway v_term when drag → 0. the trace climbs toward this if the true
+// ceiling sits above it.
+const V_PLOT = 12;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a speed in [0..V_PLOT] to a y in the plot band (up = faster)
+function yOfVal(val) {
+  const frac = Math.max(0, Math.min(1, val / V_PLOT));
+  return PLOT_TOP + PLOT_H - frac * PLOT_H;
+}
+
+// --- top band: the moving object + the force balance --------------------
+// a fixed object with a speed streak whose length ∝ v, the medium streaking
+// past behind it. two opposing arrows read the balance: push F (--ink, one
+// way, constant) and drag Fdrag (--mark, opposing, growing with v). when the
+// drag arrow matches the push, that visual equality IS terminal velocity.
+let streakPhase = 0;
+function drawScene(dt) {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const cy = SCENE_TOP + Math.round(SCENE_H * 0.42);
+  const objX = Math.round(W * 0.44);
+  const objR = 26;
+  const vt = vTerm();
+  // fraction of terminal reached — drives arrow lengths and streak speed.
+  const frac = (isFinite(vt) && vt > 0) ? Math.min(1, v / vt) : 0;
+
+  // the medium streaking past behind the object (moves faster as v rises)
+  streakPhase = (streakPhase + v * dt * 60) % 90;
+  ctx.strokeStyle = shade; ctx.lineWidth = 3;
+  const laneTop = SCENE_TOP + 12, laneBot = SCENE_TOP + SCENE_H - 12;
+  for (let x = PAD - (streakPhase % 90); x < W - PAD; x += 90) {
+    const len = 20 + v * 6;
+    for (let ly = laneTop + 24; ly < laneBot; ly += 46) {
+      ctx.beginPath(); ctx.moveTo(x, ly); ctx.lineTo(x - Math.min(len, 60), ly); ctx.stroke();
+    }
+  }
+
+  // the object — a filled ink ball, fixed in the frame
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(objX, cy, objR, 0, TAU); ctx.fill();
+
+  // the speed streak trailing behind it, length ∝ v
+  const streakLen = Math.min(v * 26, objX - PAD - 60);
+  if (streakLen > 2) {
+    ctx.strokeStyle = ink; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(objX - objR, cy); ctx.lineTo(objX - objR - streakLen, cy); ctx.stroke();
+  }
+
+  // the force-balance arrows, drawn on the object. a fixed reference length
+  // maps to the full push; the drag arrow is that length scaled by frac, so
+  // it grows toward the push arrow and matches it at terminal.
+  const REF = 220;
+  const ay = cy - objR - 44;
+  // push F — constant, pointing forward (right), --ink
+  ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineWidth = 4;
+  arrow(objX + objR, ay, objX + objR + REF, ay);
+  ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('push F', objX + objR + REF + 12, ay + 7);
+  // drag Fdrag — opposing (left), --mark, length ∝ current drag / push
+  const dLen = REF * frac;
+  ctx.strokeStyle = mark; ctx.fillStyle = mark; ctx.lineWidth = 4;
+  if (dLen > 3) arrow(objX - objR, ay, objX - objR - dLen, ay);
+  ctx.textAlign = 'right';
+  ctx.fillText('drag', objX - objR - dLen - 12, ay + 7);
+
+  // a speed gauge under the object with a --faint tick at v_term
+  const gy = cy + objR + 56, gL = PAD + 40, gR = W - PAD - 40, gW = gR - gL;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(gL, gy); ctx.lineTo(gR, gy); ctx.stroke();
+  const gFrac = s => Math.max(0, Math.min(1, s / V_PLOT));
+  // v_term tick (faint) — the ceiling; clamped into the gauge if huge
+  const tx = gL + gFrac(vt) * gW;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(tx, gy - 18); ctx.lineTo(tx, gy + 18); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('v_term', tx, gy - 26);
+  // current speed marker (ink dot chasing the tick)
+  const vx = gL + gFrac(v) * gW;
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(vx, gy, 9, 0, TAU); ctx.fill();
+  ctx.fillStyle = ink; ctx.textAlign = 'center'; ctx.fillText('v', vx, gy + 34);
+
+  // a quiet label
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText(mode === 'air' ? 'medium: air  (Fdrag = c·v²)' : 'medium: fluid  (Fdrag = b·v)',
+               PAD + 6, SCENE_TOP + 4);
+}
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  arrowHead(x1, y1, Math.cos(a), Math.sin(a));
+}
+function arrowHead(x, y, dx, dy) {
+  const s = 14, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+// --- bottom band: v(t) approaching the terminal ceiling -----------------
+// v(t) scrolling right-to-left, newest at the right. v_term drawn as a
+// faint dashed horizontal CEILING (live, from F & drag). the ink trace rises
+// from 0 and flattens onto the ceiling — the classic approach. it never
+// crosses. moving F or drag jumps the ceiling and the trace re-approaches.
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('speed v over the last ' + WINDOW + 's — rising toward the ceiling', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the live terminal-velocity ceiling (clamped into the plot when huge)
+  const vt = vTerm();
+  const cY = yOfVal(vt);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, cY); ctx.lineTo(PLOT_RIGHT, cY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  const vtTxt = isFinite(vt) ? ('v_term = ' + vt.toFixed(2) + (vt > V_PLOT ? '  (above plot)' : '')) : 'v_term → ∞';
+  ctx.fillText(vtTxt, PLOT_LEFT + 6, cY + (vt > V_PLOT ? 22 : -8));
+
+  // the speed trace itself
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.beginPath();
+  let startpen = true;
+  for (const p of trace) {
+    const x = xOfTime(p.t), y = yOfVal(p.v);
+    startpen ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    startpen = false;
+  }
+  ctx.stroke();
+
+  // the live head dot at the right edge
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = ink;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfVal(p.v), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw(dt) {
+  ctx.clearRect(0, 0, W, H);
+  drawScene(dt);
+  drawTrace();
+}
+
+// --- regime read: accelerating vs terminal ------------------------------
+function regimeOf() {
+  const vt = vTerm();
+  const frac = (isFinite(vt) && vt > 0) ? v / vt : 0;
+  if (frac > 0.97) return 'terminal — drag balances the push, speed holds';
+  return 'accelerating — drag still below the push';
+}
+
+function updateReadout() {
+  const vt = vTerm();
+  const pct = (isFinite(vt) && vt > 0) ? (100 * v / vt) : 0;
+  const vtTxt = isFinite(vt) ? vt.toFixed(2) : '∞';
+  const law = mode === 'air'
+    ? 'v_term = √(F/drag)  —  ×4 the push only doubles the speed'
+    : 'v_term = F/drag';
+
+  readout.innerHTML =
+    'medium <b>' + (mode === 'air' ? 'air (v²)' : 'fluid (v)') + '</b> &nbsp;·&nbsp; '
+    + 'push F <b>' + F.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'drag <b>' + k.toFixed(2) + '</b>'
+    + '<br>speed v <b>' + v.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'terminal v_term <b>' + vtTxt + '</b> &nbsp;·&nbsp; '
+    + '% of terminal <b>' + pct.toFixed(0) + '%</b>'
+    + '<br>' + law
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  pushV.textContent = F.toFixed(2);
+  dragV.textContent = k.toFixed(2);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset v. the ceiling jumps
+// and the trace re-approaches from wherever v currently sits.
+pushEl.oninput = () => { F = pushEl.value / 100; refresh(); };
+dragEl.oninput = () => { k = dragEl.value / 100; refresh(); };
+
+function setMode(m) {
+  mode = m;
+  bAir.classList.toggle('on', m === 'air');
+  bFluid.classList.toggle('on', m === 'fluid');
+  refresh();
+}
+bAir.onclick = () => setMode('air');
+bFluid.onclick = () => setMode('fluid');
+
+// reset — v back to rest, clear the trace, watch the approach from zero.
+bReset.onclick = () => {
+  v = 0;
+  trace.length = 0; simT = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: small fixed sub-steps for a stable integration -------
+// SLICE small so accel·dt stays well below 1 even at high F/drag — the
+// approach is a clean asymptote (first-order, no ringing) only if dt is small.
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const dtFrame = elapsed;   // for the streak/scene animation
+  const SLICE = 0.005;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw(dtFrame);
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+setMode('air');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

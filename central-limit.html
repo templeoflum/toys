@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>central-limit</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;   /* the limiting bell — the overlaid normal */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 4rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .controls { display: flex; gap: .5rem; margin-bottom: .8rem; justify-content: center; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #readout .bell { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+  .hint b { font-style: normal; color: #6d6653; }
+</style>
+</head>
+<body>
+  <h1>central-limit</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">draws N</span><input type="range" id="nn" min="1" max="50" value="1" step="1"><span class="val" id="nnV"></span></div>
+  </div>
+  <div class="controls">
+    <span class="modes">
+      <button id="mUnif">uniform</button>
+      <button id="mExp">exponential</button>
+      <button id="mBim">bimodal</button>
+    </span>
+    <button id="run">run</button>
+    <button id="burst">+2000</button>
+    <button id="reset">reset</button>
+  </div>
+  <canvas id="cv" width="1720" height="900"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">pick a <b>source</b> shape &mdash; flat, skewed, or two spikes, none of them a bell. now draw <b>N</b> values from it and keep their <b>average</b>; that one average is a single sample. do this many times and stack the sample-means into a histogram. at <b>N=1</b> the histogram is just the source's own lopsided shape. as N grows the pile <b>narrows and rounds into a bell</b> &mdash; the <span style="color:var(--mark);font-style:normal">normal curve</span> &mdash; no matter which source you chose. the centre sits at the source mean &mu;; the spread is &sigma;/&radic;N, so it tightens like <b>1/&radic;N</b>: to halve the width you need <b>four times</b> the draws. that averaging-goes-bell is the whole idea.<span class="cite">the central limit theorem &middot; mean of N i.i.d. draws &rarr; Normal(&mu;, &sigma;&sup2;/N) &middot; spread &prop; 1/&radic;N &middot; field: probability</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the central limit theorem, drawn ------------------------------------
+// take a fixed SOURCE distribution with mean μ and variance σ². draw N values
+// x_1 … x_N independently from it and average them:  x̄ = (x_1+…+x_N)/N. that
+// average x̄ is ONE sample. repeat to collect many sample-means and histogram
+// them. the CLT says: whatever the source's shape, as N grows the distribution
+// of x̄ approaches a normal (Gaussian) bell with
+//   mean(x̄) = μ            (the average is unbiased — centre never moves)
+//   var(x̄)  = σ² / N        (variance of a mean of N independents shrinks 1/N)
+//   sd(x̄)   = σ / √N        (so the spread narrows like 1/√N)
+// at N=1 a "sample-mean" is just one raw draw, so the histogram is the source's
+// OWN shape — deliberately non-bell here (skewed / spiky) so the emergence of
+// the bell as N climbs is striking.
+//
+// VERIFY (load-bearing): the overlaid --mark curve is the limiting normal with
+// EXACTLY those parameters — μ (the source mean, known in closed form for each
+// source) and variance σ²/N (source variance / N). it is NOT fitted to the
+// samples; it is the theorem's prediction. the histogram is area-normalized to
+// a density so the two live on the same vertical scale and can be compared by
+// eye — a good match is the CLT holding, a poor match (small N, skewed source)
+// is the finite-N departure the theorem only removes in the limit.
+
+// --- the three sources, each with μ and σ² known in closed form ----------
+// draw(): one raw sample. mean/var: the source's true moments, used to place
+// and scale the limiting normal. all deliberately NON-bell.
+const SOURCES = {
+  // uniform on [0,1): flat. μ = 1/2, σ² = 1/12.
+  uniform: {
+    label: 'uniform [0,1)',
+    draw: () => Math.random(),
+    mean: 0.5,
+    varr: 1 / 12,
+    lo: 0, hi: 1,   // view range of a single draw
+  },
+  // exponential, rate λ=1: skewed, heavy right tail. μ = 1, σ² = 1.
+  // inverse-CDF sample: x = -ln(1-u), u uniform.
+  exponential: {
+    label: 'exponential (λ=1)',
+    draw: () => -Math.log(1 - Math.random()),
+    mean: 1,
+    varr: 1,
+    lo: 0, hi: 6,
+  },
+  // bimodal: two equal spikes at 0 and 1 (fair coin). μ = 1/2, σ² = 1/4.
+  // this is a Bernoulli(1/2); its mean-of-N is Binomial(N,1/2)/N — a textbook
+  // CLT case that visibly fills the valley between the spikes as N grows.
+  bimodal: {
+    label: 'bimodal (two spikes)',
+    draw: () => (Math.random() < 0.5 ? 0 : 1),
+    mean: 0.5,
+    varr: 0.25,
+    lo: 0, hi: 1,
+  },
+};
+
+let srcKey = 'uniform';
+let N = 1;                 // draws averaged per sample-mean (the slider)
+let means = [];           // collected sample-means (each = mean of N draws)
+const BINS = 60;          // histogram resolution
+let bins = new Array(BINS).fill(0);
+let running = false, raf = 0, acc = 0;
+
+const MAX_SAMPLES = 200000;   // cap the pile so the toy stays light
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+const nnEl = document.getElementById('nn'), nnV = document.getElementById('nnV');
+const runBtn = document.getElementById('run');
+const burstBtn = document.getElementById('burst');
+const resetBtn = document.getElementById('reset');
+const mUnif = document.getElementById('mUnif');
+const mExp = document.getElementById('mExp');
+const mBim = document.getElementById('mBim');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the x-axis window for the histogram of MEANS -----------------------
+// the sample-mean lives near μ with spread σ/√N. we frame the axis on μ ± a
+// few source-standard-deviations (σ, N=1) so N=1 shows the whole source shape,
+// and larger N simply concentrates inside that same window — the narrowing is
+// then visible against a FIXED axis, which is the point.
+function meanAxis() {
+  const s = SOURCES[srcKey];
+  const sd = Math.sqrt(s.varr);
+  // frame ±4σ around μ, but never narrower than the raw single-draw range so
+  // the N=1 source shape is fully shown.
+  const half = 4 * sd;
+  let lo = s.mean - half, hi = s.mean + half;
+  lo = Math.min(lo, s.lo); hi = Math.max(hi, s.hi);
+  return { lo, hi };
+}
+
+// --- one sample-mean: average of N independent raw draws ----------------
+// the RNG advances per DRAW (N draws here), and this function is called once
+// per collected sample. behavior is a function of the draw sequence, never of
+// the wall-clock — the run loop below only paces HOW FAST samples arrive.
+function drawMean() {
+  const src = SOURCES[srcKey];
+  let sum = 0;
+  for (let i = 0; i < N; i++) sum += src.draw();
+  return sum / N;
+}
+
+// add exactly one sample-mean into the histogram.
+function addOne() {
+  if (means.length >= MAX_SAMPLES) return;
+  const m = drawMean();
+  means.push(m);
+  const { lo, hi } = meanAxis();
+  let b = Math.floor((m - lo) / (hi - lo) * BINS);
+  if (b < 0) b = 0; else if (b >= BINS) b = BINS - 1;   // clamp the edges into the end bins
+  bins[b]++;
+}
+
+function addMany(k) { for (let i = 0; i < k; i++) addOne(); }
+
+// standard normal density at z. the limiting curve is N(μ, σ²/N); we evaluate
+// it directly from the theorem's parameters — never fitted to the data.
+function normalPdf(x, mu, sd) {
+  const z = (x - mu) / sd;
+  return Math.exp(-0.5 * z * z) / (sd * Math.sqrt(TAU));
+}
+
+// --- plot: histogram of sample-means + the limiting normal --------------
+// x-axis: the value of the sample-mean, over the fixed μ±4σ window. y-axis:
+// probability DENSITY (histogram area-normalized to 1), so the bars and the
+// overlaid normal share a scale. the --mark curve is Normal(μ, σ²/N): the
+// theorem's prediction, drawn on top for comparison.
+function draw() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+  ctx.clearRect(0, 0, W, H);
+
+  const PADL = 90, PADR = 40, PADT = 60, PADB = 70;
+  const x0 = PADL, x1 = W - PADR, y0 = H - PADB, y1 = PADT;
+  const src = SOURCES[srcKey];
+  const { lo, hi } = meanAxis();
+  const binW = (hi - lo) / BINS;
+  const total = means.length;
+
+  const px = v => x0 + (x1 - x0) * (v - lo) / (hi - lo);
+
+  // the limiting normal's parameters: μ (source mean) and sd = σ/√N.
+  const mu = src.mean;
+  const sd = Math.sqrt(src.varr / N);
+
+  // vertical scale: use whichever is taller — the tallest histogram bar
+  // (as a density) or the normal's peak — so both always fit the frame.
+  let maxDensity = 0;
+  if (total > 0) {
+    for (let b = 0; b < BINS; b++) {
+      const d = bins[b] / total / binW;          // bar height as a density
+      if (d > maxDensity) maxDensity = d;
+    }
+  }
+  const normPeak = normalPdf(mu, mu, sd);          // = 1/(sd·√τ)
+  const yMax = Math.max(maxDensity, normPeak) * 1.1 || 1;
+  const py = d => y0 + (y1 - y0) * (d / yMax);
+
+  // frame + axes
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x0, y1); ctx.lineTo(x0, y0); ctx.lineTo(x1, y0);
+  ctx.stroke();
+
+  // x ticks: μ and μ ± σ/√N (the predicted spread), plus the window ends
+  ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+  const xticks = [lo, mu - sd, mu, mu + sd, hi];
+  for (const xv of xticks) {
+    if (xv < lo - 1e-9 || xv > hi + 1e-9) continue;
+    const x = px(xv);
+    ctx.strokeStyle = shade; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, y1); ctx.lineTo(x, y0); ctx.stroke();
+    ctx.fillStyle = faint;
+    ctx.fillText(xv.toFixed(2), x, y0 + 34);
+  }
+  // axis labels
+  ctx.fillStyle = faint; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('sample-mean  x̄  (average of N draws)', (x0 + x1) / 2, y0 + 62);
+  ctx.save();
+  ctx.translate(x0 - 58, (y0 + y1) / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText('density', 0, 0);
+  ctx.restore();
+
+  // the histogram bars — sample-means, area-normalized to a density
+  if (total > 0) {
+    ctx.fillStyle = shade;
+    for (let b = 0; b < BINS; b++) {
+      const d = bins[b] / total / binW;
+      if (d <= 0) continue;
+      const bx0 = px(lo + b * binW), bx1 = px(lo + (b + 1) * binW);
+      const by = py(d);
+      ctx.fillRect(bx0, by, Math.max(1, bx1 - bx0 - 1), y0 - by);
+    }
+    // bar outlines for a crisper read
+    ctx.strokeStyle = faint; ctx.lineWidth = 1;
+    for (let b = 0; b < BINS; b++) {
+      const d = bins[b] / total / binW;
+      if (d <= 0) continue;
+      const bx0 = px(lo + b * binW), bx1 = px(lo + (b + 1) * binW);
+      const by = py(d);
+      ctx.strokeRect(bx0, by, Math.max(1, bx1 - bx0 - 1), y0 - by);
+    }
+  }
+
+  // the limiting normal Normal(μ, σ²/N) — the theorem's prediction, drawn on
+  // top. this is NOT a fit; μ and sd come straight from the source moments.
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath();
+  let first = true;
+  const STEPS = 400;
+  for (let i = 0; i <= STEPS; i++) {
+    const xv = lo + (hi - lo) * i / STEPS;
+    const d = normalPdf(xv, mu, sd);
+    const X = px(xv), Y = py(d);
+    if (first) { ctx.moveTo(X, Y); first = false; } else ctx.lineTo(X, Y);
+  }
+  ctx.stroke();
+
+  // mark μ with a thin vertical, and label the predicted spread σ/√N
+  ctx.strokeStyle = mark; ctx.lineWidth = 1; ctx.setLineDash([4, 6]);
+  ctx.beginPath(); ctx.moveTo(px(mu), py(0)); ctx.lineTo(px(mu), py(normPeak)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = mark; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('Normal( μ = ' + mu.toFixed(3) + ',  σ²/N = ' + (src.varr / N).toFixed(4)
+      + ' )   sd = σ/√N = ' + sd.toFixed(4), x0 + 10, y1 - 22);
+
+  // a quiet caption: what N=1 vs large N looks like
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText(N === 1 ? 'N = 1  —  histogram IS the source shape'
+                       : 'N = ' + N + '  —  narrowing toward the bell', x1 - 6, y1 - 22);
+}
+
+// --- readout: the live counts + the CLT parameters ----------------------
+function updateReadout() {
+  const src = SOURCES[srcKey];
+  const total = means.length;
+  const mu = src.mean;
+  const sdN = Math.sqrt(src.varr / N);       // predicted sd of the mean = σ/√N
+  const sd1 = Math.sqrt(src.varr);           // source sd (σ, at N=1)
+
+  // empirical mean + sd of the collected sample-means, for an honest compare
+  let em = 0, ev = 0;
+  if (total > 0) {
+    for (const m of means) em += m;
+    em /= total;
+    for (const m of means) ev += (m - em) * (m - em);
+    ev = total > 1 ? ev / (total - 1) : 0;
+  }
+  const esd = Math.sqrt(ev);
+
+  readout.innerHTML =
+    'source <b>' + src.label + '</b> &nbsp;·&nbsp; '
+    + 'μ <b>' + mu.toFixed(3) + '</b> &nbsp;·&nbsp; '
+    + 'σ² <b>' + src.varr.toFixed(4) + '</b> &nbsp;·&nbsp; '
+    + 'N <b>' + N + '</b> &nbsp;·&nbsp; samples <b>' + total + '</b>'
+    + '<br>predicted (CLT): mean <span class="bell"><b>' + mu.toFixed(3) + '</b></span>'
+    + ' &nbsp;·&nbsp; var = σ²/N <span class="bell"><b>' + (src.varr / N).toFixed(5) + '</b></span>'
+    + ' &nbsp;·&nbsp; sd = σ/√N <span class="bell"><b>' + sdN.toFixed(4) + '</b></span>'
+    + (total > 1
+        ? '<br>measured: mean <b>' + em.toFixed(3) + '</b> &nbsp;·&nbsp; sd <b>' + esd.toFixed(4) + '</b>'
+        : '<br>measured: <b>—</b> (draw some samples)')
+    + '<br>spread vs source: σ/√N = <b>' + sdN.toFixed(4) + '</b> = σ('
+    + sd1.toFixed(4) + ') / √' + N + ' &nbsp;—&nbsp; narrows like 1/√N';
+}
+
+function refresh() { draw(); updateReadout(); }
+
+// --- controls -----------------------------------------------------------
+// changing N or the source starts the pile FRESH: the histogram bins hold
+// means at one particular N, so mixing N's would be meaningless.
+nnEl.oninput = () => { N = +nnEl.value; nnV.textContent = 'N=' + N; doReset(); };
+
+burstBtn.onclick = () => {
+  addMany(2000); refresh();
+  burstBtn.classList.add('on'); setTimeout(() => burstBtn.classList.remove('on'), 100);
+};
+
+// run: accumulate sample-means steadily over time. the CLOCK only paces how
+// fast samples land on screen; each sample's VALUE is a fresh average of N
+// fresh draws, indexed by collection order, never by the timestamp.
+function stopRun() {
+  running = false; runBtn.classList.remove('on');
+  if (raf) cancelAnimationFrame(raf), raf = 0;
+}
+runBtn.onclick = () => {
+  running = !running;
+  runBtn.classList.toggle('on', running);
+  if (running) {
+    let last = performance.now();
+    acc = 0;
+    const go = (now) => {
+      if (!running) return;
+      acc += (now - last) / 1000;
+      last = now;
+      // ~1200 samples/sec, so the bell fills in quickly but visibly
+      const perSec = 1200;
+      let k = Math.floor(acc * perSec);
+      if (k > 0) { acc -= k / perSec; addMany(k); refresh(); }
+      if (means.length >= MAX_SAMPLES) { stopRun(); return; }
+      raf = requestAnimationFrame(go);
+    };
+    raf = requestAnimationFrame(go);
+  } else stopRun();
+};
+
+function setSrc(key) {
+  srcKey = key;
+  mUnif.classList.toggle('on', key === 'uniform');
+  mExp.classList.toggle('on', key === 'exponential');
+  mBim.classList.toggle('on', key === 'bimodal');
+  doReset();
+}
+mUnif.onclick = () => setSrc('uniform');
+mExp.onclick = () => setSrc('exponential');
+mBim.onclick = () => setSrc('bimodal');
+
+// reset — empty the pile, back to an axis with only the limiting curve drawn.
+function doReset() {
+  stopRun();
+  means = [];
+  bins = new Array(BINS).fill(0);
+  acc = 0;
+  refresh();
+}
+resetBtn.onclick = () => {
+  doReset();
+  resetBtn.classList.add('on'); setTimeout(() => resetBtn.classList.remove('on'), 120);
+};
+
+nnV.textContent = 'N=' + N;
+setSrc('uniform');
+refresh();
+</script>
+</body>
+</html>

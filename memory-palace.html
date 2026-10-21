@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memory palace</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --route: #4a6670;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .5rem; margin-bottom: 1.2rem; flex-wrap: wrap; justify-content: center; align-items: center; max-width: 720px; }
+  button { font: inherit; font-size: .82rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .7rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  button:disabled { opacity: .35; cursor: default; }
+  button:disabled:hover { background: none; }
+  .sep { width: 1rem; }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.3rem; text-align: center; font-family: 'Courier New', monospace; font-size: 1rem; color: var(--ink); }
+  #readout .sub { display: block; font-size: .82rem; color: #6d6653; margin-top: .3rem; }
+  .hint { margin-top: 1.4rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>memory palace</h1>
+  <div class="controls">
+    <button id="place">place the list</button>
+    <button id="walk">walk &mdash; recall</button>
+    <button id="hide">hide items</button>
+    <span class="sep"></span>
+    <button id="reset">reset</button>
+  </div>
+  <canvas id="cv" width="1640" height="900"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a remembered place gives you a fixed <b style="color:var(--route)">route</b> and a run of <b style="color:var(--mark)">loci</b> &mdash; doorway, hearth, window. <i>place</i> pins each item to the next locus along the walk. the place itself carries the order, so you don&rsquo;t memorise a list &mdash; you just <i>walk</i> it, and each item turns up where you left it. <b>hide items</b>, then walk to recall them in order.</div>
+
+<script>
+'use strict';
+
+// the loci: numbered stations of a remembered place, in walked order.
+// coords in canvas units. the route is the polyline threading them in this order.
+const LOCI = [
+  { name: 'door',    x: 180,  y: 720 },
+  { name: 'hall',    x: 360,  y: 470 },
+  { name: 'hearth',  x: 610,  y: 320 },
+  { name: 'stair',   x: 560,  y: 640 },
+  { name: 'landing', x: 830,  y: 700 },
+  { name: 'window',  x: 1010, y: 430 },
+  { name: 'shelf',   x: 1240, y: 300 },
+  { name: 'table',   x: 1240, y: 640 },
+  { name: 'garden',  x: 1470, y: 500 },
+];
+
+// placeholder items — nonsense pairs, deliberately unrelated to the loci
+const ITEMS = ['axolotl', 'kettle', 'thunder', 'plum', 'anchor', 'violin', 'ember', 'ladder', 'walrus'];
+
+let placed = 0;    // how many loci carry an item (0..LOCI.length)
+let hidden = false;  // items concealed for the recall test
+let walkT = -1;    // marker position along route, in [0, LOCI.length-1]; -1 = not walking
+let revealed = 0;  // how many loci the walk has reached so far (for reveal-in-sequence)
+let anim = null;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+const bPlace = document.getElementById('place');
+const bWalk = document.getElementById('walk');
+const bHide = document.getElementById('hide');
+const bReset = document.getElementById('reset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// position along the route at parameter t in [0, N-1]: segment i, fraction f
+function routePoint(t) {
+  const i = Math.min(LOCI.length - 2, Math.floor(t));
+  const f = t - i;
+  const a = LOCI[i], b = LOCI[i + 1];
+  return [a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f];
+}
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), routeC = css('--route'), markC = css('--mark'), shade = css('--shade'), paper = css('--paper');
+  ctx.clearRect(0, 0, W, H);
+
+  // the route: a dashed line threading the loci in walked order
+  ctx.strokeStyle = faint; ctx.lineWidth = 2; ctx.setLineDash([4, 8]);
+  ctx.beginPath();
+  LOCI.forEach((L, i) => i ? ctx.lineTo(L.x, L.y) : ctx.moveTo(L.x, L.y));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the walked portion, drawn solid in route colour up to the marker
+  if (walkT >= 0) {
+    ctx.strokeStyle = routeC; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(LOCI[0].x, LOCI[0].y);
+    const full = Math.floor(walkT);
+    for (let i = 1; i <= full; i++) ctx.lineTo(LOCI[i].x, LOCI[i].y);
+    const [mx, my] = routePoint(walkT);
+    ctx.lineTo(mx, my);
+    ctx.stroke();
+  }
+
+  // the loci
+  LOCI.forEach((L, i) => {
+    const carries = i < placed;
+    const reached = walkT >= 0 && i < revealed;
+    const showItem = carries && (!hidden || reached);
+
+    // station disc
+    ctx.fillStyle = paper; ctx.strokeStyle = carries ? markC : faint;
+    ctx.lineWidth = carries ? 3 : 2;
+    ctx.beginPath(); ctx.arc(L.x, L.y, 22, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+    // number of the locus (the order the route imposes)
+    ctx.fillStyle = carries ? markC : faint; ctx.font = '22px Georgia'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), L.x, L.y + 1);
+
+    // locus name, below the disc
+    ctx.fillStyle = faint; ctx.font = '17px Georgia'; ctx.textBaseline = 'top';
+    ctx.fillText(L.name, L.x, L.y + 30);
+
+    // the item bound to this locus, above the disc
+    if (carries) {
+      ctx.textBaseline = 'bottom';
+      if (showItem) {
+        ctx.fillStyle = ink; ctx.font = '24px Georgia';
+        ctx.fillText(ITEMS[i], L.x, L.y - 30);
+      } else {
+        // hidden: a covered slot, to show something is stored here
+        ctx.fillStyle = shade; ctx.strokeStyle = faint; ctx.lineWidth = 1;
+        ctx.fillRect(L.x - 34, L.y - 52, 68, 22);
+        ctx.strokeRect(L.x - 34, L.y - 52, 68, 22);
+        ctx.fillStyle = faint; ctx.font = '15px "Courier New", monospace';
+        ctx.fillText('? ? ?', L.x, L.y - 32);
+      }
+    }
+  });
+
+  // the walking marker
+  if (walkT >= 0) {
+    const [mx, my] = routePoint(walkT);
+    ctx.fillStyle = routeC;
+    ctx.beginPath(); ctx.arc(mx, my, 11, 0, Math.PI * 2); ctx.fill();
+  }
+
+  ctx.textBaseline = 'alphabetic';
+  report();
+}
+
+function report() {
+  let line, sub;
+  if (placed === 0) {
+    line = 'an empty place, one route through it';
+    sub = 'press place to pin the list to the loci in order';
+  } else if (walkT >= 0) {
+    const at = Math.min(LOCI.length - 1, Math.round(walkT));
+    line = 'walking — locus ' + (at + 1) + ' of ' + placed + ' · ' + LOCI[at].name;
+    sub = hidden ? 'recall: each item turns up where the walk reaches it'
+                 : 'the marker follows the route; items pass in order';
+  } else if (hidden) {
+    line = placed + ' items placed, now hidden';
+    sub = 'press walk — the route hands them back in order';
+  } else {
+    line = placed + ' items placed along the route';
+    sub = 'hide the items, then walk to recall — or place adds more';
+  }
+  readout.innerHTML = line + '<span class="sub">' + sub + '</span>';
+}
+
+function syncButtons() {
+  bPlace.disabled = placed >= LOCI.length || walkT >= 0;
+  bWalk.disabled = placed === 0 || walkT >= 0;
+  bHide.disabled = placed === 0 || walkT >= 0;
+  bHide.classList.toggle('on', hidden);
+}
+
+// place: pin the next item to the next locus along the route (one step per press)
+bPlace.onclick = () => {
+  if (placed >= LOCI.length) return;
+  placed++;
+  syncButtons();
+  draw();
+};
+
+// walk: animate the marker along the route, revealing each item as it is reached
+bWalk.onclick = () => {
+  if (placed === 0) return;
+  cancelAnimationFrame(anim);
+  walkT = 0; revealed = 0;
+  syncButtons();
+  const end = placed - 1;          // stop at the last placed locus
+  const speed = 0.022;             // route-units per frame (eyeball-tuned pace)
+  const step = () => {
+    // reveal a locus the moment the marker arrives on it
+    revealed = Math.min(placed, Math.floor(walkT + 0.001) + 1);
+    draw();
+    if (walkT >= end) { walkT = -1; syncButtons(); draw(); return; }
+    walkT = Math.min(end, walkT + speed);
+    anim = requestAnimationFrame(step);
+  };
+  step();
+};
+
+bHide.onclick = () => {
+  if (placed === 0) return;
+  hidden = !hidden;
+  syncButtons();
+  draw();
+};
+
+bReset.onclick = () => {
+  cancelAnimationFrame(anim);
+  placed = 0; hidden = false; walkT = -1; revealed = 0;
+  syncButtons();
+  draw();
+};
+
+syncButtons();
+draw();
+</script>
+</body>
+</html>

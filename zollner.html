@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zollner</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --hatch: #6d6653;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 10rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(620px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>zollner</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">slant</span><input type="range" id="slant" min="0" max="50" value="42"><span class="val" id="slantV"></span></div>
+    <div class="row"><span class="name">density</span><input type="range" id="density" min="0" max="14" value="10"><span class="val" id="densityV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="640"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">every long line is vertical and perfectly parallel to its neighbours. the short cross-strokes lean one way on one line, the other way on the next &mdash; and each line seems to tip toward its own strokes, so the parallels appear to splay apart and together. it is a local tilt, summed by the eye. drop the <b>slant</b> to zero or the <b>density</b> to none, and the lines stand plainly parallel.</div>
+
+<script>
+'use strict';
+
+const NLINE = 8, SPACING = 92, X0 = 96;
+const Y0 = 80, Y1 = 566;
+
+let slant = 42;    // hatch angle from the line, degrees; 0 => no tilt cue
+let density = 10;  // hatches per line; 0 => none
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const slEl = document.getElementById('slant'), slV = document.getElementById('slantV');
+const deEl = document.getElementById('density'), deV = document.getElementById('densityV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  const HLEN = 30;
+  for (let i = 0; i < NLINE; i++) {
+    const x = X0 + i * SPACING;
+    // the hatches — same ink as the lines (integration is what drives the tilt),
+    // alternating slant per line
+    if (density > 0 && slant > 0) {
+      ctx.strokeStyle = css('--ink'); ctx.lineWidth = 3;
+      const dir = (i % 2 === 0) ? 1 : -1;
+      const a = dir * slant * Math.PI / 180;          // from vertical
+      const dx = Math.sin(a) * HLEN, dy = Math.cos(a) * HLEN;
+      for (let k = 1; k <= density; k++) {
+        const y = Y0 + (Y1 - Y0) * k / (density + 1);
+        line(x - dx / 2, y + dy / 2, x + dx / 2, y - dy / 2);
+      }
+    }
+    // the long line — dead vertical, same ink
+    ctx.strokeStyle = css('--ink'); ctx.lineWidth = 3; ctx.lineCap = 'round';
+    line(x, Y0, x, Y1);
+  }
+
+  readout.innerHTML = (slant < 1 || density === 0)
+    ? 'no tilt cue &mdash; the lines stand plainly vertical and parallel.'
+    : 'all ' + NLINE + ' lines are vertical and parallel; the strokes only make them seem to lean.';
+}
+
+function refresh() {
+  slV.textContent = slant < 1 ? 'none' : slant + '°';
+  deV.textContent = density === 0 ? 'none' : density + ' / line';
+  draw();
+}
+
+slEl.oninput = () => { slant = +slEl.value; refresh(); };
+deEl.oninput = () => { density = +deEl.value; refresh(); };
+refresh();
+</script>
+</body>
+</html>

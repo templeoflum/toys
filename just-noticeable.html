@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>just-noticeable</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 11rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  button { font-family: 'Courier New', monospace; font-size: .74rem; color: #6d6653; background: none; border: 1px solid var(--faint); border-radius: 2px; padding: .2rem .7rem; cursor: pointer; }
+  button:hover { color: var(--ink); border-color: var(--ink); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>just noticeable</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">baseline&nbsp;I</span><input type="range" id="base" min="10" max="240" value="60"><span class="val" id="baseV"></span></div>
+    <div class="row"><span class="name">step&nbsp;dI</span><input type="range" id="step" min="0" max="60" value="6"><span class="val" id="stepV"></span></div>
+    <div class="row"><span class="name">plot</span><input type="range" id="plot" min="0" max="100" value="0"><span class="val" id="plotV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="560"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two gray patches: the left is the <b>baseline I</b>, the right is I plus the <b>step dI</b>. raise dI until you can just tell them apart &mdash; that step is the just-noticeable difference. now raise the baseline: the same dI vanishes, and to feel it again you must grow the step. the just-noticeable step is a constant fraction of the baseline, dI = k&middot;I with k = 0.10 &mdash; so equal ratios feel equal, and sensation runs logarithmically. raise the <b>plot</b> to draw the JND line, slope k through the origin. <b>the eye is the judge; the k&middot;I line is only the model's guess at where your eye lands.</b>
+  <br><button id="reset">reset</button></div>
+
+<script>
+'use strict';
+
+// Weber's law: the just-noticeable difference is a constant fraction of the
+// baseline. dI/I = k (Weber fraction); the threshold step is JND = k*I.
+// k is fixed at 0.10 — a plausible mid value; the real threshold is the eye's.
+const K = 0.10;
+
+const PX = 120, PY = 90, PW = 340, PH = 300, GAP = 60;   // two patches
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const baseEl = document.getElementById('base'), baseV = document.getElementById('baseV');
+const stepEl = document.getElementById('step'), stepV = document.getElementById('stepV');
+const plotEl = document.getElementById('plot'), plotV = document.getElementById('plotV');
+const resetB = document.getElementById('reset');
+const readout = document.getElementById('readout').firstElementChild;
+
+let I = 60;      // baseline intensity, 0..255 gray
+let dI = 6;      // absolute step added to the comparison patch
+let plot = 0;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function g(n) { const c = Math.max(0, Math.min(255, Math.round(n))); return 'rgb(' + c + ',' + c + ',' + c + ')'; }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  const jnd = K * I;                 // the model's threshold step for this I
+  const feltAbove = dI >= jnd;       // model call — the eye decides the truth
+
+  // the two patches: reference at I, comparison at I + dI
+  ctx.fillStyle = g(I);   ctx.fillRect(PX, PY, PW, PH);
+  ctx.fillStyle = g(I + dI); ctx.fillRect(PX + PW + GAP, PY, PW, PH);
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+  ctx.strokeRect(PX, PY, PW, PH);
+  ctx.strokeRect(PX + PW + GAP, PY, PW, PH);
+  ctx.fillStyle = css('--faint'); ctx.font = "italic 15px Georgia"; ctx.textAlign = 'center';
+  ctx.fillText('I', PX + PW / 2, PY + PH + 26);
+  ctx.fillText('I + dI', PX + PW + GAP + PW / 2, PY + PH + 26);
+
+  // the proof: the JND line — threshold step vs baseline, slope k through origin
+  if (plot > 0) {
+    ctx.save();
+    ctx.globalAlpha = plot;
+    const ox = PX, oy = 500, aw = PW * 2 + GAP, ah = 120;   // plot axes box
+    const maxI = 255, maxD = K * maxI;                       // line reaches k*255
+    ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + aw, oy); ctx.stroke();          // I axis
+    ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox, oy - ah); ctx.stroke();          // dI axis
+    // JND line: dI = k*I from the origin
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy);
+    ctx.lineTo(ox + aw, oy - (maxD / maxD) * ah);
+    ctx.stroke();
+    // current operating point (I, dI) — on, below, or above the line
+    const px = ox + (I / maxI) * aw;
+    const py = oy - (Math.min(dI, maxD) / maxD) * ah;
+    ctx.fillStyle = feltAbove ? css('--ink') : css('--faint');
+    ctx.beginPath(); ctx.arc(px, py, 5, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = css('--faint'); ctx.font = "italic 14px Georgia"; ctx.textAlign = 'left';
+    ctx.fillText('JND = k·I  (slope k = ' + K.toFixed(2) + ')', ox + 8, oy - ah + 4);
+    ctx.textAlign = 'right';
+    ctx.fillText('baseline I →', ox + aw, oy + 20);
+    ctx.restore();
+  }
+
+  const jndR = jnd.toFixed(1);
+  readout.innerHTML =
+    'I = <b>' + Math.round(I) + '</b>&nbsp;&nbsp;dI = <b>' + dI.toFixed(1) + '</b>'
+    + '&nbsp;&nbsp;JND = k·I = <b>' + jndR + '</b>&nbsp;&nbsp;'
+    + 'dI/I = <b>' + (dI / I).toFixed(3) + '</b>'
+    + '<br>' + (feltAbove
+      ? 'dI is <b>above</b> the JND &mdash; the model expects a felt difference.'
+      : 'dI is <b>below</b> the JND &mdash; the model expects no felt difference.');
+}
+
+function refresh() {
+  baseV.textContent = Math.round(I);
+  stepV.textContent = dI === 0 ? 'none' : dI.toFixed(1);
+  plotV.textContent = plot > 0.5 ? 'line on' : plot > 0 ? 'rising' : 'off';
+  draw();
+}
+
+baseEl.oninput = () => { I = +baseEl.value; refresh(); };
+stepEl.oninput = () => { dI = +stepEl.value; refresh(); };
+plotEl.oninput = () => { plot = +plotEl.value / 100; refresh(); };
+resetB.onclick = () => {
+  I = 60; dI = 6; plot = 0;
+  baseEl.value = 60; stepEl.value = 6; plotEl.value = 0;
+  refresh();
+};
+refresh();
+</script>
+</body>
+</html>

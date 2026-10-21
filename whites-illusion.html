@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>white's illusion</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 11rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>white's illusion</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">grating</span><input type="range" id="grating" min="0" max="100" value="100"><span class="val" id="gratingV"></span></div>
+    <div class="row"><span class="name">bridge</span><input type="range" id="bridge" min="0" max="100" value="0"><span class="val" id="bridgeV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="400"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">both gray bars are the exact same gray. the left one sits in a white stripe, the right one in a black stripe &mdash; and the left reads lighter, though it has more black around it. this runs backwards to plain contrast: the patch takes the lightness of the stripe it lies along, not its surround. fade the <b>grating</b> to a flat field, or raise the <b>bridge</b> to join the two with that same gray.</div>
+
+<script>
+'use strict';
+
+const BX = 150, BW = 45, NB = 16;        // grating: NB bars of width BW
+const BT = 80, BB = 320;
+const CY = 200, PH = 150;                // patch half-height region
+const GRAY = 128;
+const LK = 5, RK = 10;                    // left patch on white bar #5, right on black bar #10
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const gEl = document.getElementById('grating'), gV = document.getElementById('gratingV');
+const bEl = document.getElementById('bridge'), bV = document.getElementById('bridgeV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let grating = 1;   // 0 => flat neutral field, patches plainly equal
+let bridge = 0;    // proof: a band of the same gray joins them
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
+function g2(v) { return 'rgb(' + v + ',' + v + ',' + v + ')'; }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  const black = lerp(186, 12, grating);
+  const white = lerp(186, 244, grating);
+  for (let k = 0; k < NB; k++) {
+    ctx.fillStyle = g2(k % 2 === 0 ? black : white);   // even = black bar, odd = white bar
+    ctx.fillRect(BX + k * BW, BT, BW, BB - BT);
+  }
+
+  // the two identical gray patches, each filling one bar's width
+  ctx.fillStyle = g2(GRAY);
+  ctx.fillRect(BX + LK * BW, CY - PH / 2, BW, PH);      // in a white bar (odd)
+  ctx.fillRect(BX + RK * BW, CY - PH / 2, BW, PH);      // in a black bar (even)
+
+  // proof: a band of the same gray joining the two patches
+  if (bridge > 0) {
+    ctx.save();
+    ctx.globalAlpha = bridge;
+    ctx.fillStyle = g2(GRAY);
+    const x1 = BX + LK * BW, x2 = BX + RK * BW + BW;
+    ctx.fillRect(x1, CY - 20, x2 - x1, 40);
+    ctx.restore();
+  }
+
+  readout.innerHTML = grating < 0.02
+    ? 'flat field &mdash; two bare gray patches, both rgb(128), plainly equal.'
+    : bridge > 0.98
+      ? 'one band of gray joins them &mdash; both patches are rgb(128).'
+      : 'both patches are the same gray, rgb(128) &mdash; the stripe each lies in swings it.';
+}
+
+function refresh() {
+  gV.textContent = grating < 0.02 ? 'flat' : Math.round(grating * 100) + '%';
+  bV.textContent = bridge > 0.98 ? 'band joined' : bridge > 0 ? 'rising' : 'off';
+  draw();
+}
+
+gEl.oninput = () => { grating = +gEl.value / 100; refresh(); };
+bEl.oninput = () => { bridge = +bEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

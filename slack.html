@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>slack</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #state.taut { color: var(--mark); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>slack</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">slack</span><input type="range" id="slack" min="0" max="100" value="55" step="1"><span class="val" id="slackV"></span></div>
+    <div class="row"><span class="name">pull</span><input type="range" id="pull" min="0" max="100" value="0" step="1"><span class="val" id="pullV"></span></div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a cord runs from a <b>pull-handle</b> on the left to a fixed <b>anchor</b> on the right, hanging with <b>slack</b>. as you pull the left end the slack takes up <b>first</b> &mdash; the sag straightens and the anchor feels nothing; only once the slack is fully spent does the line go <b>taut</b> and force transmits to the far end. slack is a buffer: it absorbs the give before force carries through. a tow-rope, a coupling, a safety line.<span class="cite">slack &amp; taut &middot; the give before force transmits &middot; a mechanical buffer (tow-rope, coupling)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- slack vs taut -------------------------------------------------------
+// a cord of fixed material length L spans a left pull-handle and a right
+// fixed anchor, span S apart. when the handle is at rest the cord is longer
+// than the span (L > S), so it hangs with SLACK = L − S and the far anchor
+// feels no force. pulling the handle moves it LEFT, widening the span S it
+// must bridge. that take-up spends the slack first:
+//   span    S      = S0 + pull          (handle pulled left widens the gap)
+//   material L      = S0 + slack0        (fixed cord length, set by the slack knob)
+//   slack           = max(0, L − S)      (the give still left in the line)
+//   far-end force   = 0                  while slack > 0  (INERT — the buffer)
+//                   = k·(S − L)          once S > L        (taut, stretch·stiffness)
+// the delay is the whole point: force stays flat at 0 across the entire
+// slack take-up, then rises only after the slack is spent. VERIFY: Ffar must
+// read exactly 0 until pull ≥ slack0, then climb linearly.
+const K_STRETCH = 60;   // line stiffness once taut — force per unit of overstretch
+
+// sliders are 0..100; scaled to abstract span units below.
+let slack0 = 0.55;      // slack held at rest, as a fraction of the take-up range
+let pull = 0.0;         // how far the left handle is pulled (0..1 of the range)
+
+// the fixed span geometry, in abstract units matched to the drawn scene.
+const SPAN0 = 1.0;      // rest span between handle-home and anchor
+const RANGE = 1.0;      // full pull travel = full slack range (so pull can spend all slack)
+
+// derived line state for the live slack0 / pull.
+function lineState() {
+  const slackRest = slack0 * RANGE;      // give in the line at rest
+  const span = SPAN0 + pull * RANGE;     // pulling the handle left widens the span
+  const material = SPAN0 + slackRest;    // fixed cord length
+  const over = span - material;          // + = overstretched (taut), − = still slack
+  const slackLeft = Math.max(0, -over);  // give remaining
+  const taut = over > 0;
+  const fFar = taut ? K_STRETCH * over : 0;   // INERT while slack remains
+  return { slackRest, span, material, over, slackLeft, taut, fFar };
+}
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const slackEl = document.getElementById('slack'), slackV = document.getElementById('slackV');
+const pullEl = document.getElementById('pull'), pullV = document.getElementById('pullV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the scrolling force trace ------------------------------------------
+// a rolling record of the far-end force Ffar over the last WINDOW seconds.
+// newest at the right, like feedback's timeline. the trace stays pinned to 0
+// (flat on the floor) through the whole slack take-up, then lifts off the
+// moment the line goes taut — the delay drawn as a flat run then a rise.
+let simT = 0;
+const WINDOW = 10;           // visible trace span (seconds)
+let trace = [];             // {t, f, taut} samples
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function stepSim(dt) {
+  simT += dt;
+  const st = lineState();
+  trace.push({ t: simT, f: st.fFar, taut: st.taut });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the handle, cord, anchor. bottom band: the far-end force trace.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.42);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 110;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// force plot vertical span — headroom above the max taut force so the rise
+// after take-up sits comfortably. max overstretch is the full pull range.
+const F_MAX = K_STRETCH * RANGE * 1.1;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a force in [0..F_MAX] to a y in the plot band (up = larger)
+function yOfForce(f) {
+  const frac = Math.max(0, Math.min(1, f / F_MAX));
+  return PLOT_TOP + PLOT_H - frac * PLOT_H;
+}
+
+// --- top band: the handle, cord and anchor ------------------------------
+// the anchor is fixed at the right. the handle sits at the left and slides
+// left as pull rises (widening the span). the cord is drawn between them as
+// a catenary-ish sag: when material length exceeds the span it bellies down,
+// and the sag shrinks to a straight taut line as the slack is spent. the far
+// anchor gets a pull-arrow that only appears once the line goes taut.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const st = lineState();
+  const cy = SCENE_TOP + Math.round(SCENE_H * 0.46);
+
+  // the anchor sits fixed near the right edge; the handle rides left with pull.
+  const anchorX = W - PAD - 120;
+  const handleHome = PAD + 200;                       // handle at rest (pull = 0)
+  const PX_PER_UNIT = (anchorX - handleHome) / SPAN0; // span units → pixels
+  const handleX = handleHome - pull * RANGE * PX_PER_UNIT; // pulled left
+
+  // slack in pixels → sag depth. the belly droops by an amount ∝ the give
+  // still in the line; at take-up (slackLeft → 0) the sag flattens to a
+  // straight line, and any further pull only stretches (no more droop).
+  const slackPx = st.slackLeft * PX_PER_UNIT;
+  const sag = Math.min(SCENE_H * 0.34, slackPx * 0.7);
+
+  // a faint ground/reference line the sag hangs below
+  ctx.strokeStyle = shade; ctx.lineWidth = 2; ctx.setLineDash([4, 8]);
+  ctx.beginPath(); ctx.moveTo(PAD, cy); ctx.lineTo(W - PAD, cy); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the anchor — a fixed post/wall at the right, --ink when taut so the eye
+  // reads it "feeling" the force, --faint while it sits inert in the slack.
+  const postW = 30, postH = 150;
+  ctx.fillStyle = st.taut ? ink : faint;
+  ctx.fillRect(anchorX, cy - postH / 2, postW, postH);
+  // hatching behind the anchor post (a fixed wall)
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5;
+  for (let hy = cy - postH / 2; hy < cy + postH / 2; hy += 18) {
+    ctx.beginPath(); ctx.moveTo(anchorX + postW, hy); ctx.lineTo(anchorX + postW + 20, hy + 18); ctx.stroke();
+  }
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('anchor', anchorX + postW + 26, cy - postH / 2 - 8);
+
+  // the cord — a quadratic belly from the handle to the anchor. the control
+  // point drops by `sag`; taut → sag 0 → a straight line. it warms toward
+  // --mark as the slack is nearly spent, so the eye feels the take-up.
+  const takeFrac = st.slackRest > 0 ? Math.min(1, 1 - st.slackLeft / st.slackRest) : 1;
+  const cordColor = st.taut ? mark : mixToMark(faint, mark, takeFrac);
+  ctx.strokeStyle = cordColor; ctx.lineWidth = st.taut ? 5 : 4;
+  ctx.beginPath();
+  ctx.moveTo(handleX, cy);
+  ctx.quadraticCurveTo((handleX + anchorX) / 2, cy + sag, anchorX, cy);
+  ctx.stroke();
+
+  // the pull-handle — a filled grip at the cord's left end, --ink.
+  const grip = 24;
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(handleX, cy, grip, 0, TAU); ctx.fill();
+  // the steady-pull arrow off the handle's left, length ∝ pull
+  const pullLen = 40 + pull * 90;
+  ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(handleX - grip, cy - 44); ctx.lineTo(handleX - grip - pullLen, cy - 44); ctx.stroke();
+  arrowHead(handleX - grip - pullLen, cy - 44, -1, 0);
+  ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('pull', handleX - grip - 8, cy - 54);
+
+  // the far-end force arrow — pulls the anchor RIGHT, and ONLY appears once
+  // the line is taut. while slack remains the anchor gets no arrow at all:
+  // the buffer eats the pull, the far end feels nothing.
+  if (st.taut) {
+    const fLen = Math.min(160, 20 + st.fFar * 2.2);
+    ctx.strokeStyle = mark; ctx.fillStyle = mark; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(anchorX + postW, cy - 44); ctx.lineTo(anchorX + postW + fLen, cy - 44); ctx.stroke();
+    arrowHead(anchorX + postW + fLen, cy - 44, 1, 0);
+    ctx.textAlign = 'left';
+    ctx.fillText('F far', anchorX + postW + fLen + 8, cy - 54);
+  } else {
+    ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+    ctx.fillText('F far = 0  (inert)', anchorX + postW + 8, cy - 54);
+  }
+
+  // a take-up bar under the scene: fills as the slack is spent, then a
+  // separate --mark segment shows the taut force building past take-up.
+  const barY = SCENE_TOP + 20, barL = PAD + 20, barW = W - 2 * (PAD + 20), barH = 26;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(barL, barY, barW, barH);
+  // slack take-up fills the left portion (0..1 as the give is spent)
+  const upFrac = 0.7;                        // the bar's left 70% = the slack take-up
+  ctx.fillStyle = st.taut ? faint : mixToMark(faint, mark, takeFrac);
+  ctx.fillRect(barL + 1, barY + 1, (barW - 2) * upFrac * takeFrac, barH - 2);
+  // once taut, the remaining 30% fills --mark with the transmitted force
+  if (st.taut) {
+    const fFrac = Math.min(1, st.fFar / (K_STRETCH * RANGE));
+    ctx.fillStyle = mark;
+    ctx.fillRect(barL + 1 + (barW - 2) * upFrac, barY + 1, (barW - 2) * (1 - upFrac) * fFrac, barH - 2);
+  }
+  // the take-up / transmit divider tick
+  ctx.strokeStyle = ink; ctx.lineWidth = 1.5;
+  const divX = barL + (barW) * upFrac;
+  ctx.beginPath(); ctx.moveTo(divX, barY - 6); ctx.lineTo(divX, barY + barH + 6); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('slack take-up', barL, barY - 10);
+  ctx.textAlign = 'center';
+  ctx.fillText('taut', divX, barY - 10);
+  ctx.textAlign = 'right';
+  ctx.fillText('force transmits', barL + barW, barY - 10);
+  ctx.textAlign = 'left';
+}
+
+// a faint→mark colour blend by fraction t (both are hex like #rrggbb)
+function mixToMark(a, b, t) {
+  const pa = hex(a), pb = hex(b);
+  const r = Math.round(pa[0] + (pb[0] - pa[0]) * t);
+  const g = Math.round(pa[1] + (pb[1] - pa[1]) * t);
+  const bl = Math.round(pa[2] + (pb[2] - pa[2]) * t);
+  return 'rgb(' + r + ',' + g + ',' + bl + ')';
+}
+function hex(h) {
+  h = h.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+function arrowHead(x, y, dx, dy) {
+  const s = 12, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+// --- bottom band: the far-end force over time ---------------------------
+// Ffar(t) scrolling right-to-left, newest at the right. it stays flat on the
+// floor (0) through the whole slack take-up — a dead run — then lifts off the
+// instant the line goes taut. a --faint dashed line marks the take-up point
+// (where the slack is spent); the trace hugs 0 up to it, then climbs. more
+// slack → a longer flat run before the rise; zero slack → it rises at once.
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('far-end force over the last ' + WINDOW + 's — flat through the slack, then it lifts', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the zero floor — the inert line the force pins to while slack remains.
+  const zeroY = yOfForce(0);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, zeroY); ctx.lineTo(PLOT_RIGHT, zeroY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('inert floor  F = 0  (slack absorbing)', PLOT_LEFT + 6, zeroY - 8);
+
+  // the force trace — flat on the floor through the slack, rising once taut.
+  // drawn in two colours: --faint while inert, --ink once transmitting, so the
+  // dead run and the live rise read distinctly.
+  ctx.lineWidth = 2;
+  let prev = null;
+  for (const p of trace) {
+    const px = xOfTime(p.t), py = yOfForce(p.f);
+    if (prev) {
+      ctx.strokeStyle = p.taut ? ink : faint;
+      ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(px, py); ctx.stroke();
+    }
+    prev = { x: px, y: py };
+  }
+
+  // the live head dot at the right edge
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = p.taut ? ink : faint;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfForce(p.f), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawTrace();
+}
+
+// --- regime read: is the buffer still eating the pull, or transmitting? --
+function regimeOf() {
+  const st = lineState();
+  if (st.taut) return 'taut — the slack is spent, force transmits to the far end';
+  return 'slack — the give is absorbing the pull, the far end feels nothing';
+}
+
+function updateReadout() {
+  const st = lineState();
+
+  readout.innerHTML =
+    'slack <b>' + st.slackRest.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'pull <b>' + pull.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'slack left <b>' + st.slackLeft.toFixed(2) + '</b>'
+    + '<br>far-end force <b>' + st.fFar.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'overstretch <b>' + (st.taut ? st.over.toFixed(2) : '0.00') + '</b>'
+    + '<br>state <span id="state"' + (st.taut ? ' class="taut"' : '') + '>'
+      + (st.taut ? 'TAUT (transmitting)' : 'SLACK (buffering)') + '</span>'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  const st = lineState();
+  slackV.textContent = st.slackRest.toFixed(2);
+  pullV.textContent = pull.toFixed(2);
+  updateReadout();
+}
+
+// slider changes take effect live — the line re-solves instantly. moving
+// slack re-sets how far the pull must travel before the far end wakes.
+slackEl.oninput = () => { slack0 = slackEl.value / 100; refresh(); };
+pullEl.oninput = () => { pull = pullEl.value / 100; refresh(); };
+
+// --- the live loop -------------------------------------------------------
+// the model is quasi-static (no inertia): the line state is a direct read of
+// slack0 and pull. the loop only advances the scrolling trace clock so the
+// force history streams by; a small fixed slice keeps the trace even.
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const SLICE = 0.02;
+  while (elapsed > 0) {
+    const dt = Math.min(SLICE, elapsed);
+    stepSim(dt);
+    elapsed -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

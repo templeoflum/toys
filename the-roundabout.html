@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the roundabout</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the roundabout</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">input</span><input type="range" id="input" min="0" max="100" value="55" step="1"><span class="val" id="inputV"></span></div>
+    <div class="row"><span class="name">gap</span><input type="range" id="gap" min="6" max="60" value="22" step="1"><span class="val" id="gapV"></span></div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">cars circulate a ring with <b>no signal and no controller</b> &mdash; each entrant decides for itself. an approaching car <b>yields</b>: it waits at the entry until it sees a <b>gap</b> in the circulating stream wide enough to accept, then merges. circulating traffic has priority; the entrant commits only on a gap it judges safe, so no car ever enters into an occupied slot. raise the <b>gap</b> threshold and entrants grow cautious &mdash; safer, but queues build and <b>throughput</b> falls; lower it and they merge aggressively &mdash; higher throughput, tighter margins. smooth continuous coordination, each participant yielding by its own local rule.<span class="cite">the roundabout &middot; yield-based decentralized coordination &middot; gap acceptance vs. throughput</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the roundabout: yield-based flow, no controller --------------------
+// cars circulate a single ring (angle θ in [0,TAU), moving at RING_SPEED
+// rad/s). several APPROACHES feed in from outside; each has a queue of cars
+// waiting at its entry mouth. there is NO central signal and NO controller:
+// each waiting entrant decides LOCALLY whether to merge.
+//   the RULE (yield): circulating traffic has priority. an entrant may commit
+//   only when the GAP around its target ring slot — the angular distance to the
+//   nearest circulating car on either side of the entry point — is at least the
+//   acceptance threshold `gapThresh`. bigger threshold = more cautious.
+// two knobs:
+//   INPUT — arrival rate at the approaches (cars/s, split across approaches).
+//   GAP   — the acceptance threshold (radians of clear ring ahead demanded
+//           before an entrant commits). larger = safer, lower throughput;
+//           smaller = aggressive, higher throughput, tighter margins.
+// each merged car circulates one full turn (plus a little) then exits the
+// ring at the next approach's off-slot — pure decoration for the count; the
+// coordination is entirely in the local yield decision, no lock, no signal.
+//
+// VERIFY (mutual exclusion by yield): a car enters the ring ONLY when the gap
+// it sees — the nearest circulating car on EITHER side of its entry — exceeds
+// the threshold, and the threshold is kept ≥ one car's ring footprint. so the
+// newly-placed car has ≥ CAR_ARC of clear ring on both sides, and since every
+// car circulates at the SAME speed those separations are preserved thereafter.
+// therefore NO two cars ever occupy the same ring position: for every pair the
+// angular separation stays ≥ CAR_ARC at all times. the sim enforces this at the
+// merge (two-sided gap check against live ring occupancy) — the load-bearing
+// invariant; a collision would violate it.
+const N_APPROACH = 4;          // entry mouths spaced evenly around the ring
+const RING_SPEED = 0.9;        // circulating angular speed (rad/s)
+const CAR_ARC = 0.12;          // angular footprint of one car on the ring (rad)
+const RING_R = 200;            // ring radius in canvas units (for the merge gate)
+
+// slider is 0..100; scaled to a total arrival rate below.
+let inputF = 0.55;             // total arrival rate as a fraction of the range
+const IN_MAX = 5.0;            // arrivals/s at full slider (across all approaches)
+
+// gap slider is in hundredths of a radian; the acceptance threshold. clamped
+// at read time to never fall below one car's footprint (see VERIFY).
+let gapThresh = 0.22;          // radians of clear ring demanded before merging
+
+// the circulating cars. each: θ angle on the ring, a source approach, and a
+// remaining arc to travel before it peels off and exits.
+let ring = [];                 // {th, src, left}  left = arc remaining to travel
+
+// per-approach entry angles (where each mouth joins the ring) and queues.
+const entryTh = [];            // filled below — the merge angle for each approach
+let queue = [];                // cars waiting at each approach (fractional model)
+let wait = [];                 // smoothed wait estimate per approach (s)
+
+// a car currently animating its merge (for the drawn "slotting in"). decoration
+// on top of the discrete queue counts — the count is authoritative.
+let merging = [];              // {src, p}  p = 0..1 slide from mouth onto ring
+
+// throughput accounting.
+let totalOut = 0;              // cars that completed and exited (count)
+let thru = 0;                  // smoothed throughput estimate (cars/s)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const inputEl = document.getElementById('input'), inputV = document.getElementById('inputV');
+const gapEl = document.getElementById('gap'), gapV = document.getElementById('gapV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// the effective acceptance threshold — never below one car's footprint, so a
+// merge that passes the gate always drops into genuinely clear ring (VERIFY).
+function effGap() {
+  return Math.max(CAR_ARC * 1.05, gapThresh);
+}
+
+// entry angles: evenly spaced mouths around the ring.
+for (let i = 0; i < N_APPROACH; i++) {
+  entryTh.push((i / N_APPROACH) * TAU);
+  queue.push(0);
+  wait.push(0);
+}
+
+// the GAP an entrant at approach `a` sees: the angular distance to the nearest
+// circulating car on EITHER side of its entry angle (the clear arc in the
+// stream around the slot it would drop into). yielding needs clearance both
+// ways — a car close BEHIND (upstream) would rear-end the merger, one close
+// AHEAD (downstream) leaves no room — so we take the nearest in absolute angle.
+// empty ring → a half-turn of gap (nothing near on either side).
+function gapAt(a) {
+  const th0 = entryTh[a];
+  let best = Math.PI;
+  for (const c of ring) {
+    // signed shortest angular distance, wrapped to [-π, π]; take its magnitude
+    let d = c.th - th0;
+    while (d < -Math.PI) d += TAU;
+    while (d >= Math.PI) d -= TAU;
+    const ad = Math.abs(d);
+    if (ad < best) best = ad;
+  }
+  return best;
+}
+
+// --- the scrolling throughput trace -------------------------------------
+// a rolling record of throughput (cars/s passing through the ring) over the
+// last WINDOW seconds. newest at the right, like feedback's timeline. it
+// climbs as merges flow and sags when a high gap threshold makes entrants
+// cautious and the approaches queue.
+let simT = 0;
+const WINDOW = 14;             // visible trace span (seconds)
+let trace = [];                // {t, thru, capped} samples
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+// place a car on the ring at approach `a`'s entry — the merge. called ONLY
+// after the yield gate passes, so the slot is clear (VERIFY).
+function admit(a) {
+  ring.push({ th: entryTh[a], src: a, left: TAU * 1.0 + (0.15 + Math.random() * 0.15) });
+  merging.push({ src: a, p: 0 });
+}
+
+function stepSim(dt) {
+  simT += dt;
+  const input = inputF * IN_MAX;
+
+  // arrivals: the input feeds the approaches at an equal share. each mouth's
+  // queue integrates its share — nothing is created outside this.
+  for (let i = 0; i < N_APPROACH; i++) {
+    queue[i] += (input / N_APPROACH) * dt;
+  }
+
+  // circulate: every ring car advances by RING_SPEED·dt, counting down its
+  // remaining arc. a car that has finished its turn peels off and exits.
+  for (const c of ring) {
+    const adv = RING_SPEED * dt;
+    c.th = (c.th + adv) % TAU;
+    c.left -= adv;
+  }
+  let out = 0;
+  ring = ring.filter(c => {
+    if (c.left <= 0) { totalOut += 1; out += 1; return false; }
+    return true;
+  });
+
+  // the YIELD decision, per approach — the whole point. an entrant commits
+  // (merges) only when the gap it sees ahead is at least the threshold. the
+  // decision is LOCAL: each approach reads only its own gap, no central lock,
+  // no signal. we admit at most one car per approach per step (a discrete
+  // merge event), and only while that approach has someone waiting.
+  const g = effGap();
+  let served = 0;
+  for (let i = 0; i < N_APPROACH; i++) {
+    if (queue[i] < 1) continue;                 // no one fully waiting here
+    const seen = gapAt(i);
+    // yield: hold unless the clear arc ahead meets the acceptance threshold.
+    // this gate is the mutual-exclusion guarantee — a merge only lands in a
+    // slot with ≥ threshold (≥ CAR_ARC) of clear ring ahead of it (VERIFY).
+    if (seen >= g) {
+      queue[i] -= 1;
+      if (queue[i] < 0) queue[i] = 0;
+      admit(i);
+      served += 1;
+    }
+  }
+
+  // smoothed per-approach wait estimate: longer queues mean longer waits, and
+  // a cautious (high) gap under load stretches them. a light proxy for the read.
+  for (let i = 0; i < N_APPROACH; i++) {
+    const inst = queue[i] * g / RING_SPEED;     // rough queue-clearing time
+    wait[i] += (inst - wait[i]) * Math.min(1, dt * 2);
+  }
+
+  // smoothed throughput estimate (cars/s) from completed exits.
+  const instRate = dt > 0 ? out / dt : 0;
+  thru += (instRate - thru) * Math.min(1, dt * 3);
+
+  const input2 = inputF * IN_MAX;
+  const capped = thru < input2 - 0.15;          // are entrants queuing (gap-limited)?
+  trace.push({ t: simT, thru: thru, capped });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the ring, its approaches and queues. bottom band: throughput(t).
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.44);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 100;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// throughput plot vertical span — headroom above the input ceiling.
+const THRU_MAX = 5.0;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a throughput in [0..THRU_MAX] to a y in the plot band (up = more flow)
+function yOfThru(r) {
+  const frac = Math.max(0, Math.min(1, r / THRU_MAX));
+  return PLOT_TOP + PLOT_H - frac * PLOT_H;
+}
+
+// --- top band: the ring, the approaches, the queues ---------------------
+// a single circular ring centred in the band. cars ride it as --ink dots,
+// spaced by their own yielding so none overlap. four approach mouths reach in
+// from outside; each shows a queue of waiting cars whose length ∝ its backlog,
+// warming to --mark when the queue is long (cautious gap under load). a car
+// mid-merge slides from the mouth onto the ring — the visible "slotting in".
+function ringCentre() {
+  return { cx: Math.round(W * 0.5), cy: SCENE_TOP + Math.round(SCENE_H * 0.5) };
+}
+function drawScene(dt) {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+  const { cx, cy } = ringCentre();
+  const R = RING_R;
+
+  // the ring itself — a --shade band, the shared circulating lane.
+  ctx.strokeStyle = shade; ctx.lineWidth = 26;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.stroke();
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, R + 13, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, R - 13, 0, TAU); ctx.stroke();
+
+  const g = effGap();
+
+  // the approach mouths, queues and the yield markers. each mouth is a short
+  // stub reaching in from outside toward its entry angle on the ring.
+  for (let i = 0; i < N_APPROACH; i++) {
+    const th = entryTh[i];
+    const ex = cx + Math.cos(th), ey = cy + Math.sin(th);   // direction unit-ish
+    const dx = Math.cos(th), dy = Math.sin(th);
+    const mouthX = cx + dx * (R + 14), mouthY = cy + dy * (R + 14);
+    const outX = cx + dx * (R + 210), outY = cy + dy * (R + 210);
+
+    // the approach lane stub — --ink, the pipe wall feeding the mouth.
+    ctx.strokeStyle = ink; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(mouthX, mouthY); ctx.lineTo(outX, outY); ctx.stroke();
+
+    // the waiting queue: a line of dots backed up outward from the mouth. its
+    // length ∝ the backlog; warms to --mark when it's a long, cautious queue.
+    const qn = Math.min(14, Math.floor(queue[i]));
+    const hot = queue[i] > 6;
+    ctx.fillStyle = hot ? mark : ink;
+    for (let k = 0; k < qn; k++) {
+      const d = R + 40 + k * 12;
+      ctx.beginPath(); ctx.arc(cx + dx * d, cy + dy * d, 5, 0, TAU); ctx.fill();
+    }
+    // the live gap this entrant sees, and whether it accepts — a --mark tick
+    // at the mouth when the gate is currently open (a merge is committing).
+    const seen = gapAt(i);
+    const accept = queue[i] >= 1 && seen >= g;
+    ctx.fillStyle = accept ? mark : faint;
+    ctx.font = '17px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(accept ? 'merging' : (queue[i] >= 1 ? 'yield' : 'clear'),
+                 cx + dx * (R + 172), cy + dy * (R + 172));
+    // per-approach queue count
+    ctx.fillStyle = hot ? mark : faint;
+    ctx.fillText('q ' + queue[i].toFixed(1), cx + dx * (R + 198), cy + dy * (R + 198));
+  }
+
+  // the circulating cars — --ink dots riding the ring. their spacing IS the
+  // invariant made visible: yield keeps every pair ≥ CAR_ARC apart, so they
+  // never pile onto one another.
+  for (const c of ring) {
+    const x = cx + Math.cos(c.th) * R, y = cy + Math.sin(c.th) * R;
+    ctx.fillStyle = ink;
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, TAU); ctx.fill();
+  }
+
+  // cars mid-merge slide from their mouth onto the ring slot (decoration).
+  const inSpeed = 1.4;
+  for (const m of merging) {
+    m.p += inSpeed * dt;
+    const th = entryTh[m.src];
+    const dx = Math.cos(th), dy = Math.sin(th);
+    const d = (R + 40) - m.p * 40;               // slides from just outside onto R
+    const x = cx + dx * d, y = cy + dy * d;
+    ctx.fillStyle = mark;
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, TAU); ctx.fill();
+  }
+  merging = merging.filter(m => m.p <= 1);
+
+  // a quiet centre label: no signal, no controller.
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('no signal', cx, cy - 8);
+  ctx.fillText('each entrant yields', cx, cy + 18);
+
+  // labels: input arriving, throughput leaving. sit them under the band.
+  const labY = SCENE_TOP + SCENE_H - 4;
+  const input = inputF * IN_MAX;
+  ctx.fillStyle = ink; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('input ' + input.toFixed(1), PAD + 6, labY);
+  ctx.textAlign = 'right';
+  ctx.fillText('throughput ' + thru.toFixed(1), W - PAD - 6, labY);
+
+  // the acceptance-gap gauge — the threshold drawn as an arc the entrant
+  // demands clear. a --faint arc of length g near the top so the eye reads how
+  // cautious the current gap setting is.
+  ctx.textAlign = 'center';
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('gap threshold ' + g.toFixed(2) + ' rad', cx, SCENE_TOP + 22);
+}
+
+// --- bottom band: throughput over time ----------------------------------
+// throughput(t) scrolling right-to-left, newest at the right. it rises toward
+// the input rate when gaps are freely accepted, and sags below it — drawn
+// --mark — when a high gap threshold makes entrants cautious and cars queue
+// at the approaches. the gap-vs-throughput tradeoff drawn as a curve.
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('throughput (cars/s through the ring) over the last ' + WINDOW + 's — rising as merges flow, sagging when the gap makes entrants wait', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the input line — the demand the ring is being fed. throughput can meet it
+  // when gaps are accepted freely, and falls short when they aren't.
+  const input = inputF * IN_MAX;
+  const inY = yOfThru(input);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, inY); ctx.lineTo(PLOT_RIGHT, inY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('input ' + input.toFixed(1) + '  (demand)', PLOT_LEFT + 6, inY - 8);
+
+  // the throughput trace — --ink while it keeps up with the input, --mark once
+  // it sags below (entrants gap-limited, queues building).
+  ctx.lineWidth = 2;
+  let prev = null;
+  for (const p of trace) {
+    const px = xOfTime(p.t), py = yOfThru(p.thru);
+    if (prev) {
+      ctx.strokeStyle = p.capped ? mark : ink;
+      ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(px, py); ctx.stroke();
+    }
+    prev = { x: px, y: py };
+  }
+
+  // the live head dot at the right edge
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = p.capped ? mark : ink;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfThru(p.thru), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw(dt) {
+  ctx.clearRect(0, 0, W, H);
+  drawScene(dt);
+  drawTrace();
+}
+
+// --- regime read: is flow keeping up, and how cautious is the yield? -----
+function regimeOf() {
+  const input = inputF * IN_MAX;
+  const totalQ = queue.reduce((a, b) => a + b, 0);
+  const g = effGap();
+  const capped = thru < input - 0.15;
+  if (capped && g > 0.35) return 'cautious — the high gap makes entrants wait, queues build, throughput falls short';
+  if (capped) return 'gap-limited — arrivals outrun the merges, cars queue at the approaches';
+  if (totalQ > 0.5) return 'flowing — entrants find their gaps, the queues work down';
+  return 'clear — every entrant merges on its gap, the ring carries the whole input';
+}
+
+function updateReadout() {
+  const input = inputF * IN_MAX;
+  const g = effGap();
+  const totalQ = queue.reduce((a, b) => a + b, 0);
+  const maxW = Math.max.apply(null, wait);
+
+  readout.innerHTML =
+    'input <b>' + input.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'gap threshold <b>' + g.toFixed(2) + '</b> rad &nbsp;·&nbsp; '
+    + 'throughput <b>' + thru.toFixed(1) + '</b>'
+    + '<br>on the ring <b>' + ring.length + '</b> cars &nbsp;·&nbsp; '
+    + 'waiting (all approaches) <b>' + totalQ.toFixed(1) + '</b> &nbsp;·&nbsp; '
+    + 'longest wait <b>' + maxW.toFixed(1) + '</b>s'
+    + '<br>completed <b>' + totalOut + '</b> &nbsp;·&nbsp; each entrant yields locally, no central signal'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  const input = inputF * IN_MAX;
+  inputV.textContent = input.toFixed(1);
+  gapV.textContent = effGap().toFixed(2);
+  updateReadout();
+}
+
+// slider changes take effect live — they do NOT reset the ring or queues.
+// raising the input starts the approaches filling; raising the gap makes
+// entrants demand more clearance, so merges slow and cars back up from
+// wherever they currently sit; lowering it lets them merge more freely.
+inputEl.oninput = () => { inputF = inputEl.value / 100; refresh(); };
+gapEl.oninput = () => { gapThresh = gapEl.value / 100; refresh(); };
+
+// --- the live loop: small fixed sub-steps for a stable integration -------
+// SLICE small so the ring advance and the discrete merge decisions resolve
+// evenly — each entrant's gap is read against the live ring positions, and dt
+// small keeps a car from advancing past a whole car-footprint in one step, so
+// the yield gate always sees the true clearance and the no-overlap invariant
+// holds tightly (VERIFY).
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const dtFrame = elapsed;   // for the merge/scene animation
+  const SLICE = 0.008;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw(dtFrame);
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

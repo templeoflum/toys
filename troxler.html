@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>troxler</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --field: #d9d5ca;   /* the neutral field the colours fade into */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  button { font-family: 'Courier New', monospace; font-size: .78rem; color: var(--ink); background: transparent;
+           border: 1px solid var(--faint); border-radius: 3px; padding: .35rem .8rem; cursor: pointer; margin-bottom: 1.1rem; }
+  button:hover { border-color: var(--mark); color: var(--mark); }
+  canvas { width: min(560px, 92vw); height: auto; display: block; border: 1px solid var(--faint); background: var(--field); }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>troxler fading</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">fade</span><input type="range" id="fade" min="1.5" max="9" step="0.5" value="4.5"><span class="val" id="fadeV"></span></div>
+    <div class="row"><span class="name">softness</span><input type="range" id="blur" min="10" max="90" step="2" value="46"><span class="val" id="blurV"></span></div>
+    <div class="row"><span class="name">blobs</span><input type="range" id="count" min="4" max="16" step="1" value="9"><span class="val" id="countV"></span></div>
+  </div>
+  <button id="blink">blink &mdash; restore them</button>
+  <canvas id="cv" width="1120" height="800"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">rest your eyes on the mark at the centre and hold still. within a few seconds the soft colours in your side vision drain to grey &mdash; yet they never left; every blob is still at full strength. <b>blink</b>, or brush the pointer across the field, and they flood back. drop <b>fade</b> to see how long the periphery holds before your visual system gives up on what stays constant.</div>
+
+<script>
+'use strict';
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height, cx = W/2, cy = H/2;
+const readout = document.getElementById('readout').firstElementChild;
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const hues = [8, 45, 92, 150, 200, 262, 305, 335];
+let blobs = [], fadeT = 4.5, blur = 46, count = 9;
+let faded = 0, lastReset = performance.now();
+
+function place(){
+  const R = Math.min(W,H)*0.36, r0 = Math.min(W,H)*0.10;
+  blobs = [];
+  for (let i=0;i<count;i++){
+    const a = (i/count)*Math.PI*2 - Math.PI/2;
+    const rad = R*(0.74 + 0.26*((i*7)%count)/count);
+    blobs.push({ x: cx+Math.cos(a)*rad, y: cy+Math.sin(a)*rad, hue: hues[i%hues.length],
+                 size: r0*(0.9 + 0.5*((i*5)%count)/count) });
+  }
+}
+function reset(){ faded = 0; lastReset = performance.now(); }
+
+cv.addEventListener('pointermove', reset);
+document.getElementById('blink').addEventListener('click', reset);
+
+function bind(id, vid, fn, fmt){ const e=document.getElementById(id), v=document.getElementById(vid);
+  const upd = ()=>{ fn(+e.value); v.textContent = fmt(e.value); }; e.oninput = upd; upd(); }
+bind('fade','fadeV', v=>fadeT=v, v=>v+' s');
+bind('blur','blurV', v=>blur=v, v=>v);
+bind('count','countV', v=>{count=v; place(); reset();}, v=>v+' blobs');
+
+function draw(now){
+  const still = (now - lastReset)/1000;
+  const target = still < 0.6 ? 0 : Math.min(1, (still-0.6)/fadeT);
+  faded += (target - faded)*0.05;
+
+  ctx.fillStyle = css('--field'); ctx.fillRect(0,0,W,H);
+  for (const b of blobs){
+    const sat = 46*(1-faded);            // colour drains to grey
+    const light = 62 - 4*faded;
+    const alpha = 0.92*(1 - 0.85*faded); // and toward the field
+    const g = ctx.createRadialGradient(b.x,b.y,0,b.x,b.y,b.size+blur);
+    g.addColorStop(0,'hsla('+b.hue+','+sat+'%,'+light+'%,'+alpha+')');
+    g.addColorStop(1,'hsla('+b.hue+','+sat+'%,'+light+'%,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.size+blur,0,Math.PI*2); ctx.fill();
+  }
+  ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx-8,cy); ctx.lineTo(cx+8,cy); ctx.moveTo(cx,cy-8); ctx.lineTo(cx,cy+8); ctx.stroke();
+
+  readout.innerHTML = faded < 0.15
+    ? 'the colours are <b>full</b> &mdash; look straight at the centre mark and wait.'
+    : faded > 0.7 ? 'they&rsquo;ve <b>faded to grey</b>, though nothing on the screen changed.'
+                  : 'fading&hellip; the periphery is letting go of what holds still.';
+  requestAnimationFrame(draw);
+}
+place(); requestAnimationFrame(draw);
+</script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rotating snakes</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(520px, 94vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>rotating snakes</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">asymmetry</span><input type="range" id="asym" min="0" max="100" value="100"><span class="val" id="asymV"></span></div>
+    <div class="row"><span class="name">fixate</span><input type="range" id="fixate" min="0" max="100" value="0"><span class="val" id="fixateV"></span></div>
+  </div>
+  <canvas id="cv" width="520" height="520"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">nothing here moves &mdash; it is a still picture. the rings seem to creep and rotate because each little tile steps black&rarr;dark&rarr;white&rarr;light in one direction, and that lopsided run of brightness fools your motion detectors, most of all out of the corner of your eye. drop the <b>asymmetry</b> so the steps run even, and the drift dies though the picture barely changes; raise <b>fixate</b> for a dot to stare at and feel the motion settle where you look.</div>
+
+<script>
+'use strict';
+
+const CX = 260, CY = 260;
+const RINGS = [[60, 104], [104, 148], [148, 192], [192, 236]];
+const ASYM = [18, 92, 242, 168];        // black, dark, white, light — the drift steps
+const SYM = [18, 242, 18, 242];         // even alternation — no drift direction
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const aEl = document.getElementById('asym'), aV = document.getElementById('asymV');
+const fEl = document.getElementById('fixate'), fV = document.getElementById('fixateV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let asym = 1;
+let fixate = 0;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function g2(v) { return 'rgb(' + v + ',' + v + ',' + v + ')'; }
+
+function draw() {
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, 520, 520);
+
+  RINGS.forEach(([ri, ro], ring) => {
+    const M = Math.round((ri + ro) * 0.16);          // ~square tiles
+    for (let i = 0; i < M; i++) {
+      const a0 = i * 2 * Math.PI / M, a1 = (i + 1) * 2 * Math.PI / M;
+      // sequence offset by 2 on alternate rings -> neighbours drift opposite
+      const idx = (i + (ring % 2 ? 2 : 0)) % 4;
+      const L = Math.round(SYM[idx] + (ASYM[idx] - SYM[idx]) * asym);
+      ctx.beginPath();
+      ctx.arc(CX, CY, ro, a0, a1);
+      ctx.arc(CX, CY, ri, a1, a0, true);
+      ctx.closePath();
+      ctx.fillStyle = g2(L);
+      ctx.fill();
+    }
+  });
+
+  // thin paper separators between rings keep the tiles crisp
+  ctx.strokeStyle = css('--paper'); ctx.lineWidth = 3;
+  for (const [ri] of RINGS) { ctx.beginPath(); ctx.arc(CX, CY, ri, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.beginPath(); ctx.arc(CX, CY, RINGS[RINGS.length - 1][1], 0, Math.PI * 2); ctx.stroke();
+
+  if (fixate > 0.5) {
+    ctx.fillStyle = css('--mark');
+    ctx.beginPath(); ctx.arc(CX, CY, 9, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function refresh() {
+  aV.textContent = asym < 0.02 ? 'even — no drift' : Math.round(asym * 100) + '%';
+  fV.textContent = fixate > 0.5 ? 'dot on — stare' : 'off';
+  readout.innerHTML = asym < 0.02
+    ? 'the steps run even &mdash; a still, flat pattern, and the drift is gone.'
+    : fixate > 0.5
+      ? 'stare at the dot: where you fixate steadies, the edges keep creeping.'
+      : 'a still picture that seems to rotate &mdash; strongest at the edge of your gaze.';
+  draw();
+}
+
+aEl.oninput = () => { asym = +aEl.value / 100; refresh(); };
+fEl.oninput = () => { fixate = +fEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

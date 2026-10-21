@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dial indicator</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #check { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>dial indicator</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">plunger x</span><input type="range" id="trav" min="0" max="5000" value="1370" step="1"><span class="val" id="travV"></span></div>
+    <div class="row"><span class="name">least count</span>
+      <span class="modes">
+        <button id="b01">0.01 mm</button>
+        <button id="b001">0.001 mm</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a <b>rack</b> cut into the plunger drives a <b>pinion</b>, geared through to the <b>pointer</b>. the train <b>amplifies</b>: a tiny linear plunger travel becomes a large needle sweep. the ratio is fixed &mdash; <b>1 needle revolution = 1 mm</b> of plunger travel, and the face carries <b>100 divisions</b>, so <b>1 division = 0.01 mm</b>. reading = whole revolutions (the small counter) + needle division &divide; 100. that reconstruction is the built-in check: it must equal the plunger travel.<span class="cite">the dial indicator / dial test gauge &middot; a rack-and-pinion gear train amplifies plunger travel into needle sweep &middot; 1 rev = 1 mm, 1 division = 0.01 mm &middot; field: precision metrology / mechanical amplification</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- dial indicator (dial test gauge) -----------------------------------
+// a RACK cut into the plunger drives a PINION; the pinion is geared through
+// to the POINTER. the gear train AMPLIFIES: a tiny linear plunger travel x
+// becomes a large angular needle sweep. the calibration is a FIXED RATIO —
+// the standard 0.01 mm gauge makes ONE full needle revolution per 1 mm of
+// travel, and the face carries 100 divisions, so one division = 0.01 mm.
+//
+//   revs per mm    R   = 1 / mmPerRev            (mmPerRev = 1.0 → R = 1)
+//   needle angle   θ   = ((x · R) mod 1) · 360°   = frac(revs) · 360°
+//   whole turns    n   = floor(x · R)             (the small revolution counter)
+//   division       d   = θ / (360° / divs)        (which of the `divs` ticks)
+//   travel         x   = (n + d/divs) · mmPerRev   [mm] — reconstructed reading
+//
+// VERIFY (load-bearing): the pointer angle is EXACTLY the fractional part of
+// (travel · revs-per-mm), and the reading reconstructed from the counter +
+// needle division must equal the slider travel to the last digit:
+//   (n + d/divs) · mmPerRev  ==  x .
+// no integration — the angle is read straight off x through the fixed ratio.
+//
+// modes change ONLY mmPerRev (the ratio), never the arithmetic:
+//   0.01 mm gauge:  mmPerRev = 1.0    → 1 rev = 1.00 mm, 1 div = 0.01 mm
+//   0.001 mm gauge: mmPerRev = 0.1    → 1 rev = 0.10 mm, 1 div = 0.001 mm (steeper)
+const DIVS = 100;          // graduations around the face — fixed at 100
+
+let travel = 1.37;         // plunger travel x, mm (slider 0..5000 → 0..5.000 mm)
+let mmPerRev = 1.0;        // mm of plunger travel per ONE full needle revolution
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const travEl = document.getElementById('trav'), travV = document.getElementById('travV');
+const readout = document.getElementById('readout').firstElementChild;
+const b01 = document.getElementById('b01');
+const b001 = document.getElementById('b001');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the exact gauge reading --------------------------------------------
+// everything downstream reads from this one object, so the drawn face, the
+// needle, the counter, and the readout can never disagree.
+function reading() {
+  const revsPerMM = 1 / mmPerRev;        // R — needle revolutions per mm
+  const lc = mmPerRev / DIVS;            // least count: mm per division
+  const revs = travel * revsPerMM;       // total needle revolutions (real)
+  const turns = Math.floor(revs + 1e-9); // whole turns — the counter
+  const frac = revs - turns;             // fraction of a turn past the counter
+  const angle = frac * TAU;              // needle angle from top (rad)
+  // the division the needle points at (0..DIVS), rounded to the tick it reads
+  const d = Math.round(frac * DIVS) % DIVS;
+  // reconstruct the travel from ONLY the counter + needle division — the check
+  const recon = (turns + d / DIVS) * mmPerRev;
+  return { revsPerMM, lc, revs, turns, frac, angle, d, recon };
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// left: the round dial face with the sweeping needle + small rev counter.
+// right: the rack-on-plunger driving the pinion (the amplification), with the
+// plunger sticking out the bottom pressing on a datum surface.
+const FACE_CX = Math.round(W * 0.36);
+const FACE_CY = Math.round(H * 0.44);
+const FACE_R = 320;
+
+// --- the round dial face: 100 graduations, needle, revolution counter ----
+// the face is marked 0..100 around the circle (0 at top). the long needle
+// sweeps to the current division; a small sub-dial counts whole revolutions
+// (= whole mm at the 0.01 gauge). the needle-to-tick registration IS the
+// reading — the drawn tick under the needle should match division d.
+function drawFace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+  const r = reading();
+
+  // the bezel + face
+  ctx.fillStyle = css('--paper');
+  ctx.strokeStyle = shade; ctx.lineWidth = 22;
+  ctx.beginPath(); ctx.arc(FACE_CX, FACE_CY, FACE_R, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(FACE_CX, FACE_CY, FACE_R - 14, 0, TAU); ctx.stroke();
+
+  // the 100 graduations — 0 at top, clockwise. every 10th is long + numbered.
+  const ang0 = -Math.PI / 2;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let i = 0; i < DIVS; i++) {
+    const a = ang0 + (i / DIVS) * TAU;
+    const major = (i % 10 === 0);
+    const rin = FACE_R - (major ? 46 : 26);
+    ctx.strokeStyle = major ? ink : faint;
+    ctx.lineWidth = major ? 3 : 1;
+    ctx.beginPath();
+    ctx.moveTo(FACE_CX + rin * Math.cos(a), FACE_CY + rin * Math.sin(a));
+    ctx.lineTo(FACE_CX + (FACE_R - 18) * Math.cos(a), FACE_CY + (FACE_R - 18) * Math.sin(a));
+    ctx.stroke();
+    if (major) {
+      ctx.fillStyle = faint; ctx.font = '30px "Courier New", monospace';
+      const rn = FACE_R - 78;
+      ctx.fillText(String(i), FACE_CX + rn * Math.cos(a), FACE_CY + rn * Math.sin(a));
+    }
+  }
+  // the "0 / 100" datum stroke at the top, in --mark
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(FACE_CX, FACE_CY - FACE_R + 18);
+  ctx.lineTo(FACE_CX, FACE_CY - FACE_R + 46);
+  ctx.stroke();
+
+  // the small revolution counter — a sub-dial low on the face
+  const scx = FACE_CX, scy = FACE_CY + 120, sR = 64;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(scx, scy, sR, 0, TAU); ctx.stroke();
+  ctx.fillStyle = ink; ctx.font = '48px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText(String(r.turns), scx, scy + 2);
+  ctx.fillStyle = faint; ctx.font = '17px "Courier New", monospace';
+  ctx.fillText('revs', scx, scy + sR + 20);
+
+  // the needle — sweeps to the current fraction of a turn (division d/100)
+  const na = ang0 + r.angle;
+  const nlen = FACE_R - 30;
+  ctx.strokeStyle = mark; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(FACE_CX - 44 * Math.cos(na), FACE_CY - 44 * Math.sin(na));  // short counter-tail
+  ctx.lineTo(FACE_CX + nlen * Math.cos(na), FACE_CY + nlen * Math.sin(na));
+  ctx.stroke();
+  ctx.lineCap = 'butt';
+  // the hub
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(FACE_CX, FACE_CY, 16, 0, TAU); ctx.fill();
+  ctx.fillStyle = mark; ctx.beginPath(); ctx.arc(FACE_CX, FACE_CY, 7, 0, TAU); ctx.fill();
+
+  // face labels: divisions + the least count (the ratio, stated on the dial)
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText((r.lc < 0.005 ? '0.001' : '0.01') + ' mm / div', FACE_CX, FACE_CY - 96);
+  ctx.fillText(DIVS + ' div · one turn = ' + mmPerRev.toFixed(2) + ' mm', FACE_CX, FACE_CY + 224);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// --- the rack-and-pinion train + the plunger ----------------------------
+// the plunger carries a RACK (cut teeth) that meshes a PINION; the pinion is
+// geared to the pointer. drawn on the right: the plunger sticks out the bottom
+// and presses up on a datum surface; pushing it in (more travel) slides the
+// rack up, spins the pinion, sweeps the needle. the tiny linear travel vs the
+// large needle sweep IS the amplification, labelled in --mark.
+function drawTrain() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+  const r = reading();
+
+  const stemX = Math.round(W * 0.74);      // the plunger axis
+  const topY = PAD + 80;                    // top of the body
+  const botY = H - 150;                     // where the plunger foot rests
+  const travelSpanMM = 5.0;                 // full drawn stroke maps to 5 mm
+  const strokePx = 360;                     // pixels that 5 mm of travel spans
+  // the rack slides UP into the body by the travel (drawn to the stroke span).
+  const inPx = Math.min(travel, travelSpanMM) / travelSpanMM * strokePx;
+
+  // the body / barrel the rack runs in
+  ctx.fillStyle = shade;
+  ctx.fillRect(stemX - 46, topY, 92, botY - topY - 260);
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(stemX - 46, topY, 92, botY - topY - 260);
+
+  // the rack — a toothed bar on the plunger. its rest position is near the
+  // bottom of the barrel; pushing the plunger in raises it by inPx.
+  const rackBot = botY - 220 - inPx;        // rack bottom rises as travel grows
+  const rackTop = rackBot - 300;
+  ctx.fillStyle = pick;
+  ctx.fillRect(stemX - 10, rackTop, 20, rackBot - rackTop);
+  // rack teeth (left edge) — a small comb so the mesh reads
+  ctx.strokeStyle = ink; ctx.lineWidth = 1.5;
+  for (let y = rackTop + 6; y < rackBot - 6; y += 16) {
+    ctx.beginPath();
+    ctx.moveTo(stemX - 10, y);
+    ctx.lineTo(stemX - 22, y + 8);
+    ctx.lineTo(stemX - 10, y + 16);
+    ctx.stroke();
+  }
+
+  // the pinion — a small gear meshing the rack teeth, off to the left. it
+  // spins by the same revolutions the needle turns (they share the train).
+  const pcx = stemX - 22 - 46, pcy = rackTop + 150, pR = 46;
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(pcx, pcy, pR, 0, TAU); ctx.stroke();
+  // pinion teeth, rotated by the pointer angle so it visibly turns
+  const spin = r.angle;                     // same fraction-of-turn as the needle
+  const pteeth = 12;
+  for (let i = 0; i < pteeth; i++) {
+    const a = spin + (i / pteeth) * TAU;
+    ctx.beginPath();
+    ctx.moveTo(pcx + (pR - 8) * Math.cos(a), pcy + (pR - 8) * Math.sin(a));
+    ctx.lineTo(pcx + (pR + 6) * Math.cos(a), pcy + (pR + 6) * Math.sin(a));
+    ctx.stroke();
+  }
+  ctx.fillStyle = mark; ctx.beginPath(); ctx.arc(pcx, pcy, 6, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('pinion', pcx, pcy + pR + 26);
+  ctx.textAlign = 'left';
+  ctx.fillText('rack', stemX + 16, rackTop + 24);
+
+  // the plunger stem below the barrel, ending in a rounded foot on the datum.
+  const footY = botY - inPx;                // the foot rises as the plunger is pushed in
+  ctx.strokeStyle = ink; ctx.lineWidth = 14; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(stemX, botY - 260 - inPx + 40);
+  ctx.lineTo(stemX, footY);
+  ctx.stroke();
+  ctx.lineCap = 'butt';
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(stemX, footY, 14, 0, TAU); ctx.fill();
+
+  // the datum surface the foot rests on (fixed); the travel is measured from
+  // the plunger's free rest down to here — drawn as the --mark caliper.
+  const datumY = botY;
+  ctx.strokeStyle = shade; ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(stemX - 140, datumY + 8); ctx.lineTo(stemX + 140, datumY + 8); ctx.stroke();
+
+  // the travel caliper (tiny linear travel, --mark) from rest (botY) to foot
+  const mx = stemX + 120;
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(mx, footY); ctx.lineTo(mx, botY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mx - 10, footY); ctx.lineTo(mx + 10, footY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mx - 10, botY); ctx.lineTo(mx + 10, botY); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('x ' + travel.toFixed(3) + ' mm', mx + 16, (footY + botY) / 2 + 6);
+
+  // the amplification label — tiny travel, large sweep
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('rack → pinion → pointer:  ' + mmPerRev.toFixed(2)
+               + ' mm travel  →  one full needle turn', PAD + 6, PAD + 30);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawFace();
+  drawTrain();
+}
+
+function updateReadout() {
+  const r = reading();
+  // the invariant, checked live: the travel reconstructed from ONLY the rev
+  // counter + needle division must equal the slider travel to the last digit.
+  const ok = Math.abs(r.recon - travel) < 0.5 * r.lc + 1e-9;
+  const decimals = r.lc < 0.005 ? 4 : 3;
+
+  readout.innerHTML =
+    'ratio <b>1 rev = ' + mmPerRev.toFixed(2) + ' mm</b> &nbsp;·&nbsp; '
+    + 'face <b>' + DIVS + ' div</b> &nbsp;·&nbsp; '
+    + '<span id="check">1 division = ' + r.lc.toFixed(decimals) + ' mm</span>'
+    + '<br>needle at division <b>' + String(r.d).padStart(2, '0') + '</b>'
+    + ' &nbsp;+&nbsp; counter <b>' + r.turns + ' rev' + (r.turns === 1 ? '' : 's') + '</b>'
+    + '<br>reading = (' + r.turns + ' + ' + r.d + '/' + DIVS + ') × ' + mmPerRev.toFixed(2)
+    + ' mm = <b>' + r.recon.toFixed(decimals) + ' mm</b>'
+    + ' &nbsp;=&nbsp; plunger travel <b>' + travel.toFixed(decimals) + ' mm</b>'
+    + '<br>' + (ok ? '(revs + needle/100) × ratio = plunger travel  ✓' : 'reading mismatch');
+}
+
+function refresh() {
+  const r = reading();
+  const decimals = r.lc < 0.005 ? 4 : 3;
+  travV.textContent = travel.toFixed(decimals);
+  draw();
+  updateReadout();
+}
+
+// the plunger slider drives everything: travel = value/1000 mm (0..5.000).
+travEl.oninput = () => { travel = +travEl.value / 1000; refresh(); };
+
+// mode buttons change ONLY the ratio mmPerRev (the amplification), never the
+// arithmetic. 0.01 gauge: 1 rev = 1 mm. 0.001 gauge: 1 rev = 0.1 mm (steeper).
+function setGauge(mpr) {
+  mmPerRev = mpr;
+  b01.classList.toggle('on', Math.abs(mpr - 1.0) < 1e-9);
+  b001.classList.toggle('on', Math.abs(mpr - 0.1) < 1e-9);
+  refresh();
+}
+b01.onclick = () => setGauge(1.0);
+b001.onclick = () => setGauge(0.1);
+
+// slider-driven; a light rAF keeps the draw crisp across resizes, no sim state.
+function frame() {
+  requestAnimationFrame(frame);
+}
+
+setGauge(1.0);
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

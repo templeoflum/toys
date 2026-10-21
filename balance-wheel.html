@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>balance wheel</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>balance wheel</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">amplitude A</span><input type="range" id="amp" min="10" max="300" value="180" step="1"><span class="val" id="ampV"></span></div>
+    <div class="row"><span class="name">inertia I</span><input type="range" id="inr" min="20" max="240" value="100" step="1"><span class="val" id="inrV"></span></div>
+    <div class="row"><span class="name">stiffness &kappa;</span><input type="range" id="kap" min="20" max="240" value="100" step="1"><span class="val" id="kapV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a weighted <b>wheel</b> is coupled to a spiral <b>hairspring</b> that winds as it turns one way, unwinds the other, always pulling it back to centre: a restoring torque <b>&tau; = &minus;&kappa;&middot;&theta;</b> proportional to how far it has turned. so the wheel <b>oscillates</b> &mdash; &theta;(t) = A&middot;cos(2&pi;t/T) &mdash; swinging back and forth at a period set only by its <b>inertia I</b> and the spring <b>stiffness &kappa;</b>: <b>T = 2&pi;&radic;(I/&kappa;)</b>. the swing size <b>A</b> does <b>not</b> enter T &mdash; wide or narrow, each swing takes the same time. that is <b>isochronism</b>, and it is why the balance keeps time. wind the spring stiffer or lighten the wheel and it beats faster.<span class="cite">the balance wheel + hairspring &middot; Huygens/Hooke ~1675 &middot; T = 2&pi;&radic;(I/&kappa;), independent of amplitude (isochronism) &middot; field: horology / harmonic oscillator</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the balance wheel: a torsional harmonic oscillator -----------------
+// a wheel of rotational inertia I is coupled to a spiral hairspring. the
+// spring provides a restoring torque proportional to the wheel's angular
+// displacement:  τ = −κ·θ  (κ = spring stiffness). that is the torsional
+// form of Hooke's law, so the wheel is a simple harmonic oscillator in θ:
+//   I·θ'' = −κ·θ    →    θ(t) = A·cos(2π t / T)
+// with period
+//   T = 2π·√(I/κ)
+// the DEFINING property is ISOCHRONISM: the period depends only on I and κ,
+// NOT on the amplitude A. a wide swing and a narrow swing take exactly the
+// same time — that is what lets the balance keep time as the mainspring's
+// drive (and hence A) fades through the day.
+//
+// VERIFY (load-bearing): T = 2π√(I/κ) EXACTLY, and A does NOT appear in it.
+//   · change A alone → the readout T is byte-for-byte unchanged (isochronism).
+//   · T scales as √I and as 1/√κ: 4× the inertia → 2× the period; 4× the
+//     stiffness → half the period.
+// the motion is driven ANALYTICALLY from elapsed sim-time — θ = A·cos(2π t/T)
+// — so the period is exactly the formula's, never a numeric-integration drift,
+// and A enters only as the multiplier out front, never inside the cosine's
+// time-scale. the readout T and the animation phase both read from the one
+// period() below — that shared source is the check.
+//
+// BEAT CONVENTION (also load-bearing, a factor-of-2 trap): a balance ticks
+// TWICE per full oscillation — once each time it passes through centre (θ=0),
+// i.e. once per HALF-period. horology counts these half-swings as "beats", so
+//   beats/hour (bph) = 3600 / (T/2) = 7200 / T.
+// (a 0.4 s balance → T/2 = 0.2 s → 18000 bph, the classic 5 Hz movement.)
+// the readout states this convention explicitly.
+
+// live knobs. amplitude A in degrees (the swing half-angle). inertia I and
+// stiffness κ in arbitrary but consistent units so T = 2π√(I/κ) reads in
+// seconds at the mid defaults (I=κ=1 → T=2π·1... rescaled below to a watch-like
+// range). A is the ONLY knob that must NOT touch T.
+let ampDeg = 18.0;   // amplitude A — the swing half-angle in degrees (slider/10)
+let I = 1.00;        // rotational inertia of the wheel
+let kappa = 1.00;    // hairspring stiffness κ (restoring torque per radian)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const ampEl = document.getElementById('amp'), ampV = document.getElementById('ampV');
+const inrEl = document.getElementById('inr'), inrV = document.getElementById('inrV');
+const kapEl = document.getElementById('kap'), kapV = document.getElementById('kapV');
+const readout = document.getElementById('readout').firstElementChild;
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const PAD = 30;
+
+// a scale factor folded into T so the I/κ slider range (both ~0.2..2.4) lands
+// the period in a watch-like ~0.2..1.5 s band. it multiplies √(I/κ) uniformly
+// and CANCELS out of every ratio — it changes the units of T, never the shape
+// of the law (T ∝ √(I/κ), amplitude-free). purely to make the seconds read nice.
+const T_SCALE = 0.40;
+
+// the analytic period — the one source both the readout and the animation use.
+// T = 2π·√(I/κ), amplitude-free by construction (ampDeg is nowhere in here).
+function period() { return T_SCALE * TAU * Math.sqrt(I / kappa); }
+function beat()   { return period() / 2; }          // half-period = one tick
+function bph()    { return 3600 / beat(); }          // beats per hour, 7200/T
+
+// amplitude in radians (for the drawn swing). the wheel's live angle is
+// θ(t) = A·cos(2π t/T) — A out front, the time-scale set only by the period.
+function ampRad() { return ampDeg * Math.PI / 180; }
+
+// sim-time drives the phase; sliders never reset it, so retuning I/κ/A is a
+// live change to an ongoing oscillation.
+let simT = 0;
+function theta() { return ampRad() * Math.cos(TAU * simT / period()); }
+
+// --- layout of the drawn scene ------------------------------------------
+// one big centred wheel: a rim on spokes carrying the spiral hairspring, a
+// reference index at rest-centre, and a swing arc showing the reach ±A. the
+// whole thing rotates by θ(t); the spiral winds tighter one way, opens the
+// other, always pulling back to centre.
+const CX = Math.round(W * 0.5);
+const CY = Math.round(H * 0.48);
+const RIM_R = 320;                       // wheel rim radius (to the rim band)
+const SPRING_R0 = 40;                    // hairspring inner (collet) radius
+const SPRING_R1 = 250;                   // hairspring outer radius at rest
+const SPRING_TURNS = 4.5;                // spiral turns at rest
+
+// --- the spiral hairspring ----------------------------------------------
+// an Archimedean spiral from the centre collet out to a fixed stud. the wheel
+// rotates the INNER end by θ while the OUTER end is anchored, so the spiral
+// winds (θ>0) or unwinds (θ<0) by θ spread across its length. more wind =
+// more stored torque = the −κθ pull back to centre. drawn as a polyline.
+function drawSpring(th) {
+  const mark = css('--mark'), faint = css('--faint');
+  const N = 260;                          // spiral sample points
+  ctx.strokeStyle = mark; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const f = i / N;                      // 0 at collet, 1 at the stud
+    // base spiral angle grows with the turns; the inner end carries the full
+    // wheel rotation th, the outer (stud) end carries none — a linear taper of
+    // the added twist along the spring (f=0 → th, f=1 → 0).
+    const base = f * SPRING_TURNS * TAU;
+    const twist = th * (1 - f);
+    const a = base + twist;
+    const r = SPRING_R0 + (SPRING_R1 - SPRING_R0) * f;
+    const x = CX + Math.cos(a) * r;
+    const y = CY + Math.sin(a) * r;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  // the fixed outer stud (anchor) — a small block where the spring is pinned.
+  const aStud = SPRING_TURNS * TAU;       // stud sits at f=1, twist=0 (fixed)
+  const sx = CX + Math.cos(aStud) * SPRING_R1;
+  const sy = CY + Math.sin(aStud) * SPRING_R1;
+  ctx.fillStyle = faint;
+  ctx.beginPath(); ctx.arc(sx, sy, 10, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('stud (fixed)', sx + 14, sy + 6);
+}
+
+// --- the wheel: rim on spokes, rotating by θ ----------------------------
+// a heavy rim (its mass makes the inertia I) carried on spokes from the hub.
+// the whole wheel turns by θ(t). a bold index spoke + a rim mark make the
+// oscillation unmistakable; a faint arc shows the reach ±A about centre.
+function drawWheel(th) {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  // the swing-reach arc — the wheel's rim mark sweeps between ±A about the top.
+  // A sets how wide this arc is; it does NOT set how long a sweep takes.
+  const A = ampRad();
+  ctx.strokeStyle = shade; ctx.lineWidth = 2; ctx.setLineDash([4, 10]);
+  ctx.beginPath();
+  ctx.arc(CX, CY, RIM_R + 34, -Math.PI / 2 - A, -Math.PI / 2 + A);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // the ±A end ticks and the rest-centre index at the top
+  for (const s of [-1, 1]) {
+    const a = -Math.PI / 2 + s * A;
+    ctx.strokeStyle = faint; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(CX + Math.cos(a) * (RIM_R + 22), CY + Math.sin(a) * (RIM_R + 22));
+    ctx.lineTo(CX + Math.cos(a) * (RIM_R + 46), CY + Math.sin(a) * (RIM_R + 46));
+    ctx.stroke();
+  }
+  // the fixed rest-centre reference line (θ=0), straight up
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 8]);
+  ctx.beginPath();
+  ctx.moveTo(CX, CY); ctx.lineTo(CX, CY - RIM_R - 56);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the hairspring sits inside the rim (drawn under the wheel spokes).
+  drawSpring(th);
+
+  // the rim — a thick ring; its mass is where the inertia I lives.
+  ctx.strokeStyle = ink; ctx.lineWidth = 22;
+  ctx.beginPath(); ctx.arc(CX, CY, RIM_R, 0, TAU); ctx.stroke();
+
+  // the spokes + a bold index arm, all rotated by θ.
+  ctx.save();
+  ctx.translate(CX, CY);
+  ctx.rotate(th);
+  // three plain spokes
+  ctx.strokeStyle = ink; ctx.lineWidth = 6;
+  for (let k = 0; k < 3; k++) {
+    const a = k * TAU / 3 + Math.PI / 6;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(a) * (RIM_R - 11), Math.sin(a) * (RIM_R - 11));
+    ctx.stroke();
+  }
+  // the index arm — points "up" at rest (θ=0), the eye that tracks the swing.
+  ctx.strokeStyle = mark; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(Math.cos(-Math.PI / 2) * (RIM_R - 11), Math.sin(-Math.PI / 2) * (RIM_R - 11));
+  ctx.stroke();
+  ctx.lineCap = 'butt';
+  // a rim weight (timing screw) on the index arm's rim end
+  ctx.fillStyle = mark;
+  ctx.beginPath();
+  ctx.arc(Math.cos(-Math.PI / 2) * RIM_R, Math.sin(-Math.PI / 2) * RIM_R, 14, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+
+  // the hub + collet (the spring's inner anchor, turns WITH the wheel)
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(CX, CY, 20, 0, TAU); ctx.fill();
+  ctx.strokeStyle = mark; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(CX, CY, SPRING_R0, 0, TAU); ctx.stroke();
+
+  // labels
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('balance wheel  (inertia I = ' + I.toFixed(2) + ')', PAD + 6, 44);
+  ctx.fillText('hairspring  τ = −κ·θ  (κ = ' + kappa.toFixed(2) + ')', PAD + 6, 74);
+  ctx.textAlign = 'center'; ctx.fillStyle = faint;
+  ctx.fillText('rest', CX, CY - RIM_R - 66);
+  ctx.textAlign = 'left';
+  // the live θ, in degrees, near the hub
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace';
+  ctx.fillText('θ = ' + (th * 180 / Math.PI).toFixed(1) + '°', CX + 40, CY + 8);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawWheel(theta());
+}
+
+// --- regime read: where in the swing, and the isochronism note ----------
+// θ(t) = A·cos(2π t/T): at the turning points |θ| = A (velocity 0), at centre
+// θ = 0 (velocity max). the reminder that A is nowhere in T is the teaching.
+function regimeOf() {
+  const th = theta();
+  const A = ampRad();
+  const near = A > 1e-6 ? Math.abs(th) / A : 0;
+  if (near > 0.96) return 'at a turning point (|θ| = A) — momentarily at rest, about to swing back';
+  if (near < 0.08) return 'crossing centre (θ = 0) — moving fastest, one beat as it passes';
+  return 'mid-swing — the hairspring pulls it back toward centre';
+}
+
+function updateReadout() {
+  const T = period(), b = beat();
+  // T computed straight from the formula, alongside the same value the phase
+  // uses — they are the one period() call, so they cannot disagree.
+  const Tformula = T_SCALE * TAU * Math.sqrt(I / kappa);
+
+  readout.innerHTML =
+    'amplitude A <b>' + ampDeg.toFixed(0) + '°</b> &nbsp;·&nbsp; '
+    + 'inertia I <b>' + I.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'stiffness κ <b>' + kappa.toFixed(2) + '</b>'
+    + '<br>T = 2π√(I/κ) = <b>' + Tformula.toFixed(3) + ' s</b> &nbsp;·&nbsp; '
+    + 'beat = T/2 = <b>' + b.toFixed(3) + ' s</b> &nbsp;·&nbsp; '
+    + 'rate = 7200/T = <b>' + bph().toFixed(0) + ' bph</b>'
+    + '<br><b>A does not enter T</b> — change amplitude, T holds (isochronism)'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  ampV.textContent = ampDeg.toFixed(0) + '°';
+  inrV.textContent = I.toFixed(2);
+  kapV.textContent = kappa.toFixed(2);
+  updateReadout();
+}
+
+// sliders take effect live and do NOT reset the swing. amplitude rescales the
+// reach only (the reach arc widens/narrows, T holds); inertia and stiffness
+// retune the period. amp is slider/10 (10..300 → 1.0..30.0°); I and κ slider/100.
+ampEl.oninput = () => { ampDeg = ampEl.value / 10; refresh(); };
+inrEl.oninput = () => { I = inrEl.value / 100; refresh(); };
+kapEl.oninput = () => { kappa = kapEl.value / 100; refresh(); };
+
+// reset — back to the defaults, phase to zero (start at full swing, θ = A).
+bReset.onclick = () => {
+  ampDeg = 18.0; I = 1.00; kappa = 1.00; simT = 0;
+  ampEl.value = 180; inrEl.value = 100; kapEl.value = 100;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: advance sim-time, redraw ----------------------------
+// the phase is analytic — θ = A·cos(2π t/T) — so the loop just advances t and
+// repaints. no integration, so the period is EXACTLY 2π√(I/κ) and can never
+// drift; amplitude scales the cosine's height, never its time-scale.
+let last = performance.now();
+function frame(now) {
+  let elapsed = (now - last) / 1000;
+  last = now;
+  if (elapsed > 0.25) elapsed = 0.25;   // guard tab-switch jumps
+  simT += elapsed;
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+// start at rest-centre reach: begin the phase so the wheel opens at full swing.
+ampDeg = 18.0;
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

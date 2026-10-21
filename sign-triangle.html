@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the sign triangle</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --mark: #b8603a;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --rule: #8a8270;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .4rem; }
+  .controls { display: flex; gap: .5rem; margin: .8rem 0 1.2rem; flex-wrap: wrap; justify-content: center; }
+  button {
+    font: inherit; font-size: .85rem;
+    background: none; border: 1px solid var(--ink); border-radius: 2px;
+    color: var(--ink); padding: .3rem .8rem; cursor: pointer;
+  }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  #canvas { width: min(560px, 94vw); height: 400px; display: block; touch-action: none; }
+  #readout {
+    width: min(560px, 94vw); margin-top: 1.4rem; line-height: 1.85;
+    font-family: 'Courier New', monospace; font-size: .9rem;
+  }
+  #relation { color: var(--ink); }
+  #relation b { font-weight: normal; color: var(--mark); border-bottom: 1px solid var(--faint); }
+  #links { color: var(--rule); font-size: .82rem; margin-top: .5rem; }
+  #teaching {
+    margin-top: 1.1rem; font-style: italic; font-size: .84rem;
+    color: var(--ink); line-height: 1.7;
+  }
+  .hint { margin-top: 1.6rem; font-style: italic; font-size: .8rem; color: var(--faint); text-align: center; }
+</style>
+</head>
+<body>
+  <h1>the sign triangle</h1>
+  <div class="controls">
+    <button id="swap-sig">swap the word</button>
+    <button id="swap-ref">swap the thing</button>
+    <button id="reset">reset</button>
+  </div>
+  <canvas id="canvas" width="560" height="400"></canvas>
+  <div id="readout">
+    <div id="relation">&nbsp;</div>
+    <div id="links">&nbsp;</div>
+  </div>
+  <div id="teaching">
+    meaning is a triadic relation, not a word&rarr;thing link.
+    the word reaches the thing only through the concept &mdash; the base of the
+    triangle is dashed because nothing runs straight along it.
+  </div>
+  <div class="hint">click a corner to cycle its content &mdash; watch what the base link does</div>
+
+<script>
+'use strict';
+// Ogden & Richards (1923), The Meaning of Meaning: the semiotic triangle.
+// THOUGHT/REFERENCE sits at the apex. SYMBOL and REFERENT sit at the base.
+// SYMBOL <-> THOUGHT is a real (causal) relation; THOUGHT <-> REFERENT is a
+// real relation; SYMBOL <-> REFERENT is IMPUTED — no direct link, only the
+// path up through thought. We draw the base dashed to hold that honesty.
+// (This is the triad, not Saussure's two-part signifier/signified dyad. The
+//  referent — the actual thing — is the third corner Saussure left out.)
+
+// Each corner carries a rotating set of contents. The signifier and referent
+// swap independently so we can show two failures of the naive word->thing view:
+//   - same concept, different word (a synonym, or another language): the base
+//     re-anchors but the apex holds.
+//   - same word, different thing (a homonym): the word no longer reaches one
+//     referent — ambiguity, resolved only by which concept you climb through.
+const SETS = [
+  { sig: 'TREE',   con: 'a woody perennial plant',        ref: 'the oak in the yard' },
+  { sig: 'ARBRE',  con: 'a woody perennial plant',        ref: 'the oak in the yard' },
+  { sig: 'BANK',   con: 'a place that holds money',       ref: 'the branch on Main St.' },
+  { sig: 'BANK',   con: 'the sloping edge of a river',    ref: 'the muddy rise by the water' },
+  { sig: 'GAVAGAI',con: '(concept not yet fixed)',        ref: 'the rabbit in the field' },
+];
+
+// state[c] indexes SETS for each corner independently.
+let sig = 0, con = 0, ref = 0;
+
+const CORNERS = {
+  thought:  { x: 280, y: 70,  label: 'THOUGHT / REFERENCE', role: 'the signified — the concept, the sense' },
+  symbol:   { x: 70,  y: 330, label: 'SYMBOL',              role: 'the signifier — the word, the mark' },
+  referent: { x: 490, y: 330, label: 'REFERENT',           role: 'the thing itself, out in the world' },
+};
+
+const cv = document.getElementById('canvas');
+const ctx = cv.getContext('2d');
+const relEl = document.getElementById('relation');
+const linkEl = document.getElementById('links');
+
+// device-pixel crispness on the fixed logical 560x400 board.
+function fitDPR() {
+  const r = window.devicePixelRatio || 1;
+  cv.width = 560 * r; cv.height = 400 * r;
+  cv.style.width = 'min(560px, 94vw)'; cv.style.height = '400px';
+  ctx.setTransform(r, 0, 0, r, 0, 0);
+}
+
+function edge(a, b, dashed) {
+  ctx.beginPath();
+  ctx.setLineDash(dashed ? [7, 6] : []);
+  ctx.lineWidth = dashed ? 1.5 : 2;
+  ctx.strokeStyle = dashed ? '#b8603a' : '#2b2a26';
+  ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function edgeLabel(a, b, text, dashed) {
+  const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+  ctx.font = "italic 12px 'Courier New', monospace";
+  ctx.fillStyle = dashed ? '#b8603a' : '#8a8270';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // lift base-edge text a touch above the line so it doesn't sit on the rule.
+  const dy = (a.y === b.y) ? 16 : 0;
+  ctx.fillText(text, mx, my + dy);
+}
+
+function corner(pt, title, content, sub) {
+  ctx.fillStyle = '#faf7ef';
+  ctx.strokeStyle = '#2b2a26';
+  ctx.lineWidth = 1.5;
+  const w = 150, h = 34, x = pt.x - w / 2, y = pt.y - h / 2;
+  ctx.setLineDash([]);
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeRect(x, y, w, h);
+  // corner heading (positional label) sits just outside the box.
+  ctx.font = "11px 'Courier New', monospace";
+  ctx.fillStyle = '#8a8270';
+  ctx.textAlign = 'center';
+  const headAbove = pt.y < 200;
+  ctx.textBaseline = headAbove ? 'bottom' : 'top';
+  ctx.fillText(title, pt.x, headAbove ? y - 6 : y + h + 6);
+  // content, centered in the box.
+  ctx.font = "15px Georgia, serif";
+  ctx.fillStyle = '#2b2a26';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(content, pt.x, pt.y - 2);
+  ctx.font = "italic 10px Georgia, serif";
+  ctx.fillStyle = '#8a8270';
+  ctx.fillText(sub, pt.x, pt.y + 11);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, 560, 400);
+  const T = CORNERS.thought, S = CORNERS.symbol, R = CORNERS.referent;
+  // real relations first (solid), then the imputed base (dashed).
+  edge(S, T, false);
+  edge(T, R, false);
+  edge(S, R, true);
+  edgeLabel(S, T, 'stands for', false);
+  edgeLabel(T, R, 'refers to', false);
+  edgeLabel(S, R, 'imputed  ·  no direct link', true);
+
+  corner(T, CORNERS.thought.label,  SETS[con].con, 'concept / sense');
+  corner(S, CORNERS.symbol.label,   SETS[sig].sig, 'word / mark');
+  corner(R, CORNERS.referent.label, SETS[ref].ref, 'the thing');
+
+  readout();
+}
+
+function readout() {
+  const w = SETS[sig].sig, c = SETS[con].con, t = SETS[ref].ref;
+  relEl.innerHTML =
+    'the word <b>' + w + '</b> stands for <b>' + c + '</b>, ' +
+    'which refers to <b>' + t + '</b>.';
+
+  // name the two failure modes when the corners disagree.
+  let note;
+  const sameConcept = SETS[sig].con === SETS[con].con;
+  const wordSet = SETS.filter(s => s.sig === w);
+  const homonym = wordSet.length > 1 && new Set(wordSet.map(s => s.con)).size > 1;
+
+  if (homonym) {
+    note = 'same word, two concepts &mdash; the word alone does not reach one thing (ambiguity). ' +
+           'which referent you land on depends on the concept you climb through.';
+  } else if (!sameConcept) {
+    note = 'the word and the concept were set apart &mdash; the base has no ground to stand on ' +
+           'until the apex agrees.';
+  } else {
+    note = 'swap the word (a synonym, another language) and the apex holds &mdash; ' +
+           'the concept, not the word, is what the referent hangs from.';
+  }
+  linkEl.innerHTML =
+    'direct: SYMBOL&ndash;THOUGHT, THOUGHT&ndash;REFERENT &nbsp;·&nbsp; ' +
+    'mediated: SYMBOL&ndash;REFERENT<br>' + note;
+}
+
+// swap the word only: pick another entry, carry the current concept + thing.
+document.getElementById('swap-sig').onclick = () => {
+  sig = (sig + 1) % SETS.length;
+  draw();
+};
+// swap the thing only: same word may now point at a different referent.
+document.getElementById('swap-ref').onclick = () => {
+  ref = (ref + 1) % SETS.length;
+  draw();
+};
+document.getElementById('reset').onclick = () => {
+  sig = con = ref = 0;
+  draw();
+};
+
+// click a corner box to cycle just that corner's content.
+cv.addEventListener('click', (e) => {
+  const rect = cv.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (560 / rect.width);
+  const y = (e.clientY - rect.top) * (400 / rect.height);
+  for (const [k, pt] of Object.entries(CORNERS)) {
+    if (Math.abs(x - pt.x) < 75 && Math.abs(y - pt.y) < 17) {
+      if (k === 'thought') con = (con + 1) % SETS.length;
+      else if (k === 'symbol') sig = (sig + 1) % SETS.length;
+      else ref = (ref + 1) % SETS.length;
+      draw();
+      return;
+    }
+  }
+});
+
+fitDPR();
+draw();
+</script>
+</body>
+</html>

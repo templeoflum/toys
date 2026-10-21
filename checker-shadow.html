@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>checker-shadow</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(720px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>checker-shadow</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">proof</span><input type="range" id="proof" min="0" max="100" value="0"><span class="val" id="proofV"></span></div>
+  </div>
+  <canvas id="cv" width="1160" height="840"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">square <b>A</b> sits in the light, square <b>B</b> in the shadow &mdash; and they look nothing alike. but they are the exact same gray. your eye does not report the raw light reaching it; it estimates the <i>surface</i> by discounting the shadow, so it reads B as a paler tile under darkness. drag <b>proof</b> to lay a bridge of that very same gray from one to the other: edge to edge, one flat tone.</div>
+
+<script>
+'use strict';
+
+// the construction (Adelson 1995): choose grays so a DARK tile in light equals
+// a LIGHT tile in shadow. light*k == dark, so both land on the same pixel.
+const LIGHT = 212;                 // a lit "white" checker — bright, to surround A
+const K = 0.5;                     // the shadow halves the light — a clear cast
+const SAME = Math.round(LIGHT * K);// == 106: dark-in-light AND light-in-shadow
+const DARK = SAME;                 // the lit "black" checker is that same 106
+
+const COLS = 8, ROWS = 5, SQ = 125;
+const BX = 80, BY = 150;           // board origin
+const XEDGE = BX + 3.6 * SQ;       // penumbra centre (light left of it, dark right)
+const PEN = 0.6 * SQ;              // half-width of the soft shadow edge
+const A = { c: 1, r: 2 }, B = { c: 6, r: 2 };   // same row, a bridge apart
+
+let proof = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const proofEl = document.getElementById('proof'), proofV = document.getElementById('proofV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+const sq = (c, r) => ({ x: BX + c * SQ, y: BY + r * SQ, cx: BX + (c + 0.5) * SQ, cy: BY + (r + 0.5) * SQ });
+const g = (n) => 'rgb(' + n + ',' + n + ',' + n + ')';
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, W, H);
+
+  // 1. the checkerboard in plain light (no shadow yet)
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const light = (r + c) % 2 === 0;
+      ctx.fillStyle = g(light ? LIGHT : DARK);
+      ctx.fillRect(BX + c * SQ, BY + r * SQ, SQ, SQ);
+    }
+  }
+
+  // 2. the cast shadow: a soft-edged band to the right of the cylinder.
+  // source-over black with alpha AL darkens by (1-AL); (1-AL)=K => AL=1-K.
+  const AL = 1 - K;
+  const grad = ctx.createLinearGradient(XEDGE - PEN, 0, XEDGE + PEN, 0);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,' + AL + ')');
+  ctx.fillStyle = grad;
+  ctx.fillRect(XEDGE - PEN, BY, (BX + COLS * SQ) - (XEDGE - PEN), ROWS * SQ);
+
+  // 3. stamp A and B at the exact same gray — proof against any rounding,
+  //    and the whole point: identical pixels under different context.
+  for (const s of [A, B]) {
+    const q = sq(s.c, s.r);
+    ctx.fillStyle = g(SAME);
+    ctx.fillRect(q.x, q.y, SQ, SQ);
+  }
+
+  // 4. the cylinder that casts it (green), standing at the shadow's head
+  drawCylinder(XEDGE, BY);
+
+  // 5. the proof bridge — one continuous strip of gray SAME across A..B
+  if (proof > 0) {
+    const qa = sq(A.c, A.r), qb = sq(B.c, B.r);
+    const y = qa.cy - 0.23 * SQ, h = 0.46 * SQ;
+    const x0 = qa.x, x1 = qb.x + SQ;
+    ctx.save();
+    ctx.globalAlpha = proof;
+    ctx.fillStyle = g(SAME);
+    roundRect(x0, y, x1 - x0, h, 8);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 6. labels, always on top so the bridge never hides them
+  for (const [s, ch] of [[A, 'A'], [B, 'B']]) {
+    const q = sq(s.c, s.r);
+    ctx.font = 'bold 40px Georgia';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3; ctx.strokeStyle = css('--paper');
+    ctx.strokeText(ch, q.cx, q.cy);
+    ctx.fillStyle = css('--ink');
+    ctx.fillText(ch, q.cx, q.cy);
+  }
+  ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+
+  readout.innerHTML = proof > 0.98
+    ? 'the bridge is <b>' + g(SAME) + '</b> — the same gray as A and as B. A, bridge, B are one flat tone.'
+    : 'A and B are the same gray: <b>' + g(SAME) + '</b>. the shadow is discounted, and your eye reads B as the paler surface.';
+}
+
+function drawCylinder(baseX, baseY) {
+  const rx = 46, ry = 15, bodyH = 118, topY = baseY - bodyH;
+  const grn = '#6f8f5a', grnD = '#5a7748', grnL = '#84a56b';
+  // soft contact shadow on the board
+  ctx.save();
+  ctx.globalAlpha = 0.28; ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.ellipse(baseX, baseY + 4, rx * 1.15, ry * 1.1, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // body
+  const bodyGrad = ctx.createLinearGradient(baseX - rx, 0, baseX + rx, 0);
+  bodyGrad.addColorStop(0, grnD); bodyGrad.addColorStop(0.5, grnL); bodyGrad.addColorStop(1, grnD);
+  ctx.fillStyle = bodyGrad;
+  ctx.fillRect(baseX - rx, topY, rx * 2, bodyH);
+  ctx.beginPath(); ctx.ellipse(baseX, baseY, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+  // top cap
+  ctx.fillStyle = grn;
+  ctx.beginPath(); ctx.ellipse(baseX, topY, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function refresh() {
+  proofV.textContent = proof === 0 ? 'the illusion' : proof > 0.98 ? 'one tone' : 'laying it';
+  draw();
+}
+
+proofEl.oninput = () => { proof = +proofEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

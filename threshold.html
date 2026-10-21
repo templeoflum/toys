@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>threshold</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --alarm: #b8603a;   /* false alarm — cry wolf */
+    --miss: #4a6670;    /* miss — slept through it */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 6.6rem; text-align: right; }
+  input[type=range] { accent-color: var(--ink); width: min(440px, 78vw); }
+  canvas { width: min(820px, 96vw); height: auto; display: block; }
+  #readout {
+    margin-top: 1.4rem; text-align: center; line-height: 1.9;
+    font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653;
+  }
+  #readout b { font-weight: normal; }
+  .alarm { color: var(--alarm); }
+  .miss { color: var(--miss); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 37rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>threshold</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">threshold</span><input type="range" id="thr" min="-400" max="700" value="120"></div>
+    <div class="row"><span class="name">signal apart</span><input type="range" id="sep" min="0" max="400" value="180"></div>
+  </div>
+  <canvas id="cv" width="1640" height="720"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">one watcher, two ways to fail: <span class="alarm">cry wolf</span> when it&rsquo;s only noise, or <span class="miss">sleep through</span> the real thing. slide the line &mdash; you trade one for the other, you can&rsquo;t kill both. push the humps apart (a stronger signal) and both shrink at once.</div>
+
+<script>
+'use strict';
+
+// erf via Abramowitz & Stegun 7.1.26 (|err| < 1.5e-7)
+function erf(x) {
+  const s = x < 0 ? -1 : 1; x = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * x);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return s * y;
+}
+const SQRT2 = Math.SQRT2;
+// standard-normal CDF
+function Phi(z) { return 0.5 * (1 + erf(z / SQRT2)); }
+function pdf(x, mu) { const d = x - mu; return Math.exp(-d * d / 2) / Math.sqrt(2 * Math.PI); }
+
+let thr = 1.2;   // threshold (x units)
+let sep = 1.8;   // separation d' between the two means
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const thrEl = document.getElementById('thr');
+const sepEl = document.getElementById('sep');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const X0 = -4, X1 = 7;   // plotted x-range
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), paper = css('--paper');
+  const cAlarm = css('--alarm'), cMiss = css('--miss');
+  ctx.clearRect(0, 0, W, H);
+
+  const padL = 30, padR = 30, padT = 30, base = H - 70;
+  const plotW = W - padL - padR;
+  const mu0 = 0, mu1 = sep;
+  const peak = pdf(0, 0);                 // ~0.399
+  const yScale = (base - padT) / (peak * 1.1);
+  const toX = x => padL + ((x - X0) / (X1 - X0)) * plotW;
+  const toY = p => base - p * yScale;
+
+  // baseline axis
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, base); ctx.lineTo(W - padR, base); ctx.stroke();
+
+  const thrX = toX(thr);
+
+  // shaded error regions: H0 tail right of threshold (false alarm),
+  // H1 body left of threshold (miss).
+  function fillUnder(mu, from, to, color) {
+    ctx.fillStyle = color; ctx.globalAlpha = 0.22;
+    ctx.beginPath();
+    const a = toX(from), b = toX(to);
+    ctx.moveTo(a, base);
+    for (let px = a; px <= b; px++) {
+      const x = X0 + ((px - padL) / plotW) * (X1 - X0);
+      ctx.lineTo(px, toY(pdf(x, mu)));
+    }
+    ctx.lineTo(b, base);
+    ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  fillUnder(mu0, thr, X1, cAlarm);   // false alarms
+  fillUnder(mu1, X0, thr, cMiss);    // misses
+
+  // the two distributions
+  function curve(mu, color, dash) {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(dash || []);
+    ctx.beginPath();
+    for (let px = padL; px <= W - padR; px++) {
+      const x = X0 + ((px - padL) / plotW) * (X1 - X0);
+      const y = toY(pdf(x, mu));
+      px === padL ? ctx.moveTo(px, y) : ctx.lineTo(px, y);
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  curve(mu0, ink, [6, 5]);   // noise only (H0), dashed
+  curve(mu1, ink, []);       // signal + noise (H1), solid
+
+  // labels for the humps — anchored outward so they spread apart, not
+  // collide, when the two humps sit close (weak signal).
+  ctx.fillStyle = faint; ctx.font = '22px Georgia';
+  ctx.textAlign = 'right';
+  ctx.fillText('only noise', toX(mu0) - 10, toY(peak) - 14);
+  ctx.textAlign = 'left';
+  ctx.fillText('a real signal', toX(mu1) + 10, toY(pdf(mu1, mu1)) - 14);
+
+  // threshold line
+  ctx.strokeStyle = ink; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(thrX, padT - 6); ctx.lineTo(thrX, base + 14); ctx.stroke();
+  ctx.fillStyle = ink; ctx.font = '18px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('call it a signal  →', thrX + 16, padT + 6);
+  ctx.textAlign = 'right';
+  ctx.fillText('←  ignore', thrX - 16, padT + 6);
+  ctx.textAlign = 'left';
+
+  // rates
+  const fa = 1 - Phi(thr - mu0);   // P(X > thr | noise)
+  const miss = Phi(thr - mu1);     // P(X < thr | signal)
+  const hit = 1 - miss;
+  const pct = v => (v * 100).toFixed(0) + '%';
+  readout.innerHTML =
+    '<span class="alarm">false alarm ' + pct(fa) + '</span> &nbsp;·&nbsp; '
+    + '<span class="miss">miss ' + pct(miss) + '</span> &nbsp;·&nbsp; '
+    + 'catches <b>' + pct(hit) + '</b> of real signals';
+}
+
+thrEl.oninput = () => { thr = thrEl.value / 100; draw(); };
+sepEl.oninput = () => {
+  sep = sepEl.value / 100;
+  draw();
+};
+draw();
+</script>
+</body>
+</html>

@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the crossing</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the crossing</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">arrival</span><input type="range" id="arr" min="5" max="60" value="30" step="1"><span class="val" id="arrV"></span></div>
+    <div class="row"><span class="name">policy</span>
+      <span class="modes">
+        <button id="mGreedy" class="on">greedy</button>
+        <button id="mSignal">signal</button>
+        <button id="mSep">separated</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two streams sharing one point must be arbitrated &mdash; grab it greedily and you&rsquo;re fast but you collide; put a signal on it and you&rsquo;re safe but everyone waits; give each stream its own lane and the conflict simply vanishes. (the shared floor is the junction; naming your own paths is the overpass.)<span class="cite">traffic control &middot; the intersection as a shared resource (mutual exclusion)</span></div>
+
+<script>
+'use strict';
+
+// --- the model: two one-way streams crossing at ONE junction cell -------
+// a horizontal road (cars flow left→right) and a vertical road (top→bottom)
+// cross at a single centre cell C. C is a strict mutex — at most one car in
+// it, in EVERY mode. three policies arbitrate who enters:
+//   greedy    — anyone adjacent enters if C empty; both-at-once = a CONFLICT
+//               (tallied, but still resolved to one occupant — never doubled).
+//   signal    — a light alternates green between the roads; only the green
+//               road may enter C. zero conflicts, but the red road WAITS.
+//   separated — the vertical road overpasses C on its own level; no shared
+//               cell, so no conflict AND no wait. both roads flow free.
+let mode = 'greedy';
+
+// arrival probability per step per road. slider is scaled by 100.
+let arr = 0.30;
+
+// each road is a lane of LANE cells indexed 0..LANE-1 toward the exit.
+// the junction sits at cell index CI on both lanes.
+const LANE = 21;         // odd, so the centre cell is exact
+const CI = (LANE - 1) / 2;   // 10 — the conflict cell on each lane
+
+// occupancy: 1 = a car sits in that cell this step, 0 = empty.
+// index 0 is the entrance, LANE-1 is the last cell before the exit edge.
+let hLane, vLane;        // Uint8Array(LANE) each
+
+// waited[cell] tracks how many steps the car in that cell has been blocked
+// from advancing (for the mean-wait measure). cleared when it moves.
+let hWait, vWait;
+
+// signal state: which road is green, and the step counter within the window.
+const GREEN_WIN = 8;     // steps per green phase — fixed, sensible
+let greenRoad = 'h';     // 'h' or 'v'
+let phaseStep = 0;
+
+// greedy fairness: which road gets priority on a tie this step. alternates
+// on every conflict so neither stream starves.
+let tiePriority = 'h';
+
+// C occupant, for drawing + the strict-mutex guarantee. null | 'h' | 'v'.
+let occ = null;
+let conflictFlash = 0;   // >0 for a few frames after a conflict, to flash C
+
+// --- rolling measures ---------------------------------------------------
+// throughput = cars cleared per step (rolling mean). wait = steps a car
+// spends blocked before it clears (rolling mean). conflicts = cumulative.
+let conflicts = 0;
+const WIN = 60;                       // rolling window length in steps
+const clearedHist = [];               // cars cleared per step, last WIN steps
+const waitHist = [];                  // wait-on-clear samples, last WIN*4 steps
+const WAIT_WIN = 240;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const arrEl = document.getElementById('arr'), arrV = document.getElementById('arrV');
+const readout = document.getElementById('readout').firstElementChild;
+const btnGreedy = document.getElementById('mGreedy');
+const btnSignal = document.getElementById('mSignal');
+const btnSep = document.getElementById('mSep');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- reset the sim (on mode change: the old numbers are incomparable) ----
+function reset() {
+  hLane = new Uint8Array(LANE);
+  vLane = new Uint8Array(LANE);
+  hWait = new Int32Array(LANE);
+  vWait = new Int32Array(LANE);
+  occ = null;
+  conflictFlash = 0;
+  conflicts = 0;
+  greenRoad = 'h';
+  phaseStep = 0;
+  tiePriority = 'h';
+  clearedHist.length = 0;
+  waitHist.length = 0;
+}
+
+// --- one sim step -------------------------------------------------------
+// order matters: iterate each lane FAR→NEAR (exit end first) so a car never
+// crosses two cells in one step. the junction cell CI is the mutex; whether a
+// car may move INTO it depends on the mode.
+function step() {
+  let cleared = 0;
+
+  // a per-cell "moved this step" flag, so the wait measure counts only cars
+  // that were BLOCKED (didn't move). set by every mover; cars that end the
+  // step in a cell with moved=0 sat still → they waited one tick.
+  hMoved.fill(0); vMoved.fill(0);
+
+  // signal: advance the light. only the green road may enter C.
+  if (mode === 'signal') {
+    phaseStep++;
+    if (phaseStep >= GREEN_WIN) { phaseStep = 0; greenRoad = greenRoad === 'h' ? 'v' : 'h'; }
+  }
+
+  // --- advance each lane, far→near, so no car crosses two cells in a step --
+  // step 1: exit tail (cells CI+1..LANE-1). the exit-most car leaves the board
+  // and its accumulated wait is sampled into the wait window.
+  cleared += advanceTail(hLane, hWait, hMoved);
+  cleared += advanceTail(vLane, vWait, vMoved);
+
+  // step 2: move any occupant OUT of the junction cell CI (into CI+1 if free),
+  // which frees the mutex, then creep the approach queue (cells 1..CI-2) up.
+  advanceOutOfC(hLane, hWait, hMoved);
+  advanceOutOfC(vLane, vWait, vMoved);
+
+  // step 3: entry into C — the arbitration. who is adjacent (at CI-1) and wants
+  // in, and is C free? each mode resolves the shared point differently.
+  const hWants = hLane[CI - 1] === 1;
+  const vWants = vLane[CI - 1] === 1;
+  const cFree = hLane[CI] === 0 && vLane[CI] === 0;
+
+  if (mode === 'sep') {
+    // no shared cell: horizontal owns CI on its level, vertical overpasses on
+    // its own. each enters its OWN CI independently — no conflict, no wait.
+    if (hWants && hLane[CI] === 0) enter(hLane, hWait, hMoved);
+    if (vWants && vLane[CI] === 0) enter(vLane, vWait, vMoved);
+  } else if (mode === 'signal') {
+    // only the green road may enter; the red road's adjacent car waits.
+    if (cFree) {
+      if (greenRoad === 'h' && hWants) enter(hLane, hWait, hMoved);
+      else if (greenRoad === 'v' && vWants) enter(vLane, vWait, vMoved);
+    }
+  } else {
+    // greedy: whoever is adjacent enters if C is free. if BOTH want in and C
+    // is free, that is a CONFLICT — a would-be collision. tally it, then let
+    // the priority road through and make the other wait (priority alternates
+    // so neither starves). the mutex is NEVER actually double-occupied.
+    if (cFree && hWants && vWants) {
+      conflicts++;
+      conflictFlash = 3;
+      if (tiePriority === 'h') enter(hLane, hWait, hMoved); else enter(vLane, vWait, vMoved);
+      tiePriority = tiePriority === 'h' ? 'v' : 'h';   // fairness alternation
+    } else if (cFree && hWants) {
+      enter(hLane, hWait, hMoved);
+    } else if (cFree && vWants) {
+      enter(vLane, vWait, vMoved);
+    }
+  }
+
+  // the mutex occupant, for drawing. STRICT: at most one of the CI cells is 1
+  // in shared modes (enter() only fires when C was free); in sep the two CI
+  // cells are on separate levels so both may hold a car without collision.
+  occ = hLane[CI] ? 'h' : (vLane[CI] ? 'v' : null);
+
+  // step 4: feed new arrivals at each entrance (cell 0) if it is empty.
+  if (hLane[0] === 0 && Math.random() < arr) { hLane[0] = 1; hWait[0] = 0; }
+  if (vLane[0] === 0 && Math.random() < arr) { vLane[0] = 1; vWait[0] = 0; }
+
+  // step 5: any car that did NOT move this step waited one tick.
+  accrueWaits(hLane, hWait, hMoved);
+  accrueWaits(vLane, vWait, vMoved);
+
+  // roll the throughput window.
+  clearedHist.push(cleared);
+  while (clearedHist.length > WIN) clearedHist.shift();
+
+  if (conflictFlash > 0) conflictFlash--;
+}
+
+// per-cell "moved this step" flags — reset at the top of each step.
+let hMoved = new Uint8Array(LANE), vMoved = new Uint8Array(LANE);
+
+// sample a wait value into the rolling wait window (used when a car clears).
+function sampleWait(w) {
+  waitHist.push(w);
+  while (waitHist.length > WAIT_WIN) waitHist.shift();
+}
+
+// advance the exit-side tail of a lane (cells CI+1 .. LANE-1) far→near. the
+// exit-most car leaves the board (its wait is sampled); each other car steps
+// into the free cell ahead. returns how many cars cleared this step.
+function advanceTail(lane, wait, moved) {
+  let cleared = 0;
+  if (lane[LANE - 1] === 1) { sampleWait(wait[LANE - 1]); lane[LANE - 1] = 0; wait[LANE - 1] = 0; cleared++; }
+  for (let c = LANE - 2; c > CI; c--) {
+    if (lane[c] === 1 && lane[c + 1] === 0) {
+      lane[c + 1] = 1; wait[c + 1] = wait[c]; moved[c + 1] = 1;
+      lane[c] = 0; wait[c] = 0;
+    }
+  }
+  return cleared;
+}
+
+// move the occupant OUT of CI into CI+1 if free (frees the mutex), then creep
+// the approach queue (cells 1..CI-2) forward far→near. cell CI-1 (the feeder)
+// is left for the entry arbitration — it fills CI only via enter(), never here.
+function advanceOutOfC(lane, wait, moved) {
+  if (lane[CI] === 1 && lane[CI + 1] === 0) {
+    lane[CI + 1] = 1; wait[CI + 1] = wait[CI]; moved[CI + 1] = 1;
+    lane[CI] = 0; wait[CI] = 0;
+  }
+  for (let c = CI - 1; c >= 0; c--) {
+    // only advance cells whose target is BELOW CI; the CI-1 → CI hop is the
+    // arbitration's job (enter()), so target CI is reserved. (c reaches 0 so a
+    // freshly-spawned car at the entrance actually creeps forward.)
+    if (c + 1 < CI && lane[c] === 1 && lane[c + 1] === 0) {
+      lane[c + 1] = 1; wait[c + 1] = wait[c]; moved[c + 1] = 1;
+      lane[c] = 0; wait[c] = 0;
+    }
+  }
+}
+
+// a car enters the junction cell CI from CI-1 (its only feeder), carrying its
+// accumulated wait. marks CI as moved so the entry doesn't count as a wait.
+function enter(lane, wait, moved) {
+  lane[CI] = 1; wait[CI] = wait[CI - 1]; moved[CI] = 1;
+  lane[CI - 1] = 0; wait[CI - 1] = 0;
+}
+
+// any car sitting in a cell it did NOT move into this step waited one tick.
+function accrueWaits(lane, wait, moved) {
+  for (let c = 0; c < LANE; c++) {
+    if (lane[c] === 1 && moved[c] === 0) wait[c]++;
+  }
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+const SCENE_TOP = 20, SCENE_H = Math.round(H * 0.55);
+const PANEL_TOP = SCENE_H + 70, PANEL_H = H - PANEL_TOP - 30;
+
+// the crossing is drawn centred in the scene band. the horizontal road runs
+// across; the vertical road runs down; they meet at C. each cell is CELL px.
+const SCENE_CX = W / 2;
+const SCENE_CY = SCENE_TOP + Math.round(SCENE_H * 0.5);
+const CELL = 34;                       // pixel size of one cell
+const ROAD_W = CELL;                   // road (lane) width in px
+
+// map a horizontal-lane cell index to an x on the horizontal road.
+function xOfH(c) { return SCENE_CX + (c - CI) * CELL; }
+// map a vertical-lane cell index to a y on the vertical road.
+function yOfV(c) { return SCENE_CY + (c - CI) * CELL; }
+
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        pick = css('--pick'), paper = css('--paper'), shade = css('--shade');
+
+  const halfLen = CI * CELL + CELL / 2;   // half the drawn road length
+
+  // the two road strips (grey lanes). in separated mode the vertical road is
+  // drawn as an overpass arcing over C rather than crossing through it.
+  ctx.fillStyle = shade;
+  // horizontal road strip
+  ctx.fillRect(SCENE_CX - halfLen, SCENE_CY - ROAD_W / 2, halfLen * 2, ROAD_W);
+
+  if (mode === 'sep') {
+    drawOverpass(shade, faint);
+  } else {
+    ctx.fillStyle = shade;
+    ctx.fillRect(SCENE_CX - ROAD_W / 2, SCENE_CY - halfLen, ROAD_W, halfLen * 2);
+  }
+
+  // the junction cell C — outlined; filled with the occupant's colour.
+  const cx0 = SCENE_CX - CELL / 2, cy0 = SCENE_CY - CELL / 2;
+  if (mode !== 'sep') {
+    if (occ) {
+      ctx.fillStyle = occ === 'h' ? ink : pick;
+      ctx.fillRect(cx0 + 3, cy0 + 3, CELL - 6, CELL - 6);
+    }
+    // flash the junction in --mark on a conflict step (the collision signal)
+    ctx.strokeStyle = conflictFlash > 0 ? mark : faint;
+    ctx.lineWidth = conflictFlash > 0 ? 4 : 2;
+    ctx.strokeRect(cx0, cy0, CELL, CELL);
+  }
+
+  // horizontal cars — --ink tokens. skip CI (drawn as the junction above).
+  ctx.fillStyle = ink;
+  for (let c = 0; c < LANE; c++) {
+    if (c === CI) continue;
+    if (hLane[c] === 1) fillCell(xOfH(c), SCENE_CY, ink);
+  }
+  // vertical cars — --pick (a mid tone) so the streams read apart.
+  for (let c = 0; c < LANE; c++) {
+    if (c === CI && mode !== 'sep') continue;   // junction drawn above
+    if (vLane[c] === 1) {
+      const y = yOfV(c);
+      // in separated mode the vertical car at C rides the overpass hump.
+      const yy = (mode === 'sep' && c === CI) ? y - CELL * 0.9 : y;
+      fillCell(SCENE_CX, yy, pick);
+    }
+  }
+
+  // greedy: on a conflict step, also flash the two contending adjacent cars
+  // (whichever of the CI-1 feeders still hold a car) in --mark.
+  if (mode === 'greedy' && conflictFlash > 0) {
+    if (hLane[CI - 1] === 1) fillCell(xOfH(CI - 1), SCENE_CY, mark);
+    if (vLane[CI - 1] === 1) fillCell(SCENE_CX, yOfV(CI - 1), mark);
+  }
+
+  // signal: draw the light state — a small indicator on each road's approach.
+  if (mode === 'signal') {
+    const live = greenRoad === 'h';
+    drawLight(SCENE_CX - halfLen + 10, SCENE_CY - ROAD_W / 2 - 20, live);       // h light
+    drawLight(SCENE_CX + ROAD_W / 2 + 8, SCENE_CY - halfLen + 10, !live);       // v light
+    ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+    ctx.fillText('green: ' + (live ? 'horizontal' : 'vertical'), SCENE_CX - halfLen, SCENE_TOP + 18);
+  }
+
+  // stream labels + direction arrows, quietly.
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('horizontal →', SCENE_CX - halfLen, SCENE_CY + ROAD_W / 2 + 26);
+  ctx.textAlign = 'center';
+  ctx.fillText('vertical ↓', SCENE_CX - ROAD_W / 2 - 60, SCENE_CY - halfLen + 4);
+}
+
+function fillCell(cx, cy, colour) {
+  ctx.fillStyle = colour;
+  ctx.fillRect(cx - CELL / 2 + 4, cy - CELL / 2 + 4, CELL - 8, CELL - 8);
+}
+
+// the overpass: the vertical road lifts over C on a curved hump, so it never
+// touches the horizontal cell. drawn as two strips meeting an arc above C.
+function drawOverpass(shade, faint) {
+  const halfLen = CI * CELL + CELL / 2;
+  const hump = CELL * 0.9;
+  ctx.fillStyle = shade;
+  // upper vertical strip, down to just above the crossing
+  ctx.fillRect(SCENE_CX - ROAD_W / 2, SCENE_CY - halfLen, ROAD_W, halfLen - CELL - hump);
+  // lower vertical strip, from just below the crossing
+  ctx.fillRect(SCENE_CX - ROAD_W / 2, SCENE_CY + CELL + hump - CELL, ROAD_W, halfLen - CELL - hump);
+  // the arc lifting over the horizontal road
+  ctx.strokeStyle = shade; ctx.lineWidth = ROAD_W;
+  ctx.beginPath();
+  ctx.moveTo(SCENE_CX, SCENE_CY - CELL - hump);
+  ctx.bezierCurveTo(
+    SCENE_CX - CELL * 1.6, SCENE_CY - hump,
+    SCENE_CX - CELL * 1.6, SCENE_CY + hump,
+    SCENE_CX, SCENE_CY + CELL + hump - CELL);
+  ctx.stroke();
+  // a hairline centre-line so the overpass reads as lifted, not merged
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(SCENE_CX, SCENE_CY - CELL - hump);
+  ctx.bezierCurveTo(
+    SCENE_CX - CELL * 1.6, SCENE_CY - hump,
+    SCENE_CX - CELL * 1.6, SCENE_CY + hump,
+    SCENE_CX, SCENE_CY + CELL + hump - CELL);
+  ctx.stroke();
+}
+
+function drawLight(x, y, isGreen) {
+  ctx.fillStyle = isGreen ? css('--ink') : css('--faint');
+  ctx.beginPath();
+  ctx.arc(x, y, 9, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// --- bottom panel: the tradeoff bars ------------------------------------
+// three pairs of bars — throughput (tall = good) and conflicts (tall = bad,
+// greedy only) — one pair per policy, the live one highlighted. makes the
+// tradeoff legible at a glance alongside the live numbers.
+const barState = {                     // rolling snapshots per mode, for the bars
+  greedy: { tp: 0, cf: 0, wt: 0 },
+  signal: { tp: 0, cf: 0, wt: 0 },
+  sep:    { tp: 0, cf: 0, wt: 0 },
+};
+
+function drawPanel() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        pick = css('--pick');
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD, PANEL_TOP, W - 2 * PAD, PANEL_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('the tradeoff — throughput (bar) vs conflicts (mark), by policy', PAD + 6, PANEL_TOP - 12);
+
+  const names = ['greedy', 'signal', 'sep'];
+  const labels = { greedy: 'greedy', signal: 'signal', sep: 'separated' };
+  const colW = (W - 2 * PAD) / 3;
+  const base = PANEL_TOP + PANEL_H - 40;
+  const top = PANEL_TOP + 30;
+  const maxBar = base - top;
+
+  for (let i = 0; i < 3; i++) {
+    const m = names[i];
+    const cx = PAD + colW * i + colW / 2;
+    const s = barState[m];
+    const isLive = mode === m;
+
+    // throughput bar. summed over both roads, so the ceiling is ~2 cars/step
+    // (both flowing); normalise against that so the bars stay comparable.
+    const tpH = Math.min(1, s.tp / 2.0) * maxBar;
+    ctx.fillStyle = isLive ? ink : faint;
+    ctx.fillRect(cx - 40, base - tpH, 34, tpH);
+
+    // conflicts bar — cumulative, log-ish scaled so it stays on-panel. always
+    // in --mark; zero for signal/separated by construction.
+    const cfNorm = Math.min(1, Math.log10(1 + s.cf) / 2.5);   // 0..1 over ~0..300
+    const cfH = cfNorm * maxBar;
+    ctx.fillStyle = mark;
+    ctx.fillRect(cx + 6, base - cfH, 34, cfH);
+
+    // labels
+    ctx.fillStyle = isLive ? ink : faint;
+    ctx.font = (isLive ? 'bold ' : '') + '20px Georgia'; ctx.textAlign = 'center';
+    ctx.fillText(labels[m], cx, base + 26);
+    ctx.font = '15px "Courier New", monospace'; ctx.fillStyle = faint;
+    ctx.fillText('tput', cx - 23, base + 44);
+    ctx.fillStyle = mark;
+    ctx.fillText('conf', cx + 23, base + 44);
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawPanel();
+}
+
+// --- live measures ------------------------------------------------------
+function throughput() {
+  if (clearedHist.length === 0) return 0;
+  let s = 0; for (const c of clearedHist) s += c;
+  return s / clearedHist.length;
+}
+function meanWait() {
+  if (waitHist.length === 0) return 0;
+  let s = 0; for (const w of waitHist) s += w;
+  return s / waitHist.length;
+}
+
+function updateReadout() {
+  const tp = throughput();
+  const mw = meanWait();
+
+  // remember the live policy's numbers for its bar.
+  const key = mode;
+  barState[key].tp = tp;
+  barState[key].cf = conflicts;
+  barState[key].wt = mw;
+
+  let regime;
+  if (mode === 'greedy') regime = 'greedy — fast, but conflicts pile up (unsafe)';
+  else if (mode === 'signal') regime = 'signal — safe, but everyone waits';
+  else regime = 'separated — own lanes, no conflict, no wait';
+
+  const cfTxt = mode === 'greedy' ? '<b>' + conflicts + '</b>' : '<b>0</b>';
+
+  readout.innerHTML =
+    'policy <b>' + (mode === 'sep' ? 'separated' : mode) + '</b> &nbsp;·&nbsp; '
+    + 'arrival <b>' + arr.toFixed(2) + '</b>/step'
+    + '<br>throughput <b>' + tp.toFixed(2) + '</b> cars/step'
+    + ' &nbsp;·&nbsp; conflicts ' + cfTxt
+    + ' &nbsp;·&nbsp; mean wait <b>' + mw.toFixed(1) + '</b> steps'
+    + '<br><span id="regime">' + regime + '</span>';
+}
+
+function refresh() {
+  arrV.textContent = arr.toFixed(2);
+  updateReadout();
+}
+
+// --- mode + slider wiring ------------------------------------------------
+function setMode(m) {
+  mode = m;
+  btnGreedy.classList.toggle('on', m === 'greedy');
+  btnSignal.classList.toggle('on', m === 'signal');
+  btnSep.classList.toggle('on', m === 'sep');
+  // a new policy makes the old counts incomparable — start the proof fresh,
+  // but keep the OTHER modes' last bar snapshots for the side-by-side.
+  reset();
+  refresh();
+}
+btnGreedy.onclick = () => setMode('greedy');
+btnSignal.onclick = () => setMode('signal');
+btnSep.onclick = () => setMode('sep');
+
+arrEl.oninput = () => { arr = arrEl.value / 100; refresh(); };
+
+// --- the live loop: fixed-substep accumulator (like the-jam) ------------
+const STEP_INT = 0.12;                 // seconds per sim step — watchable
+let last = performance.now();
+let acc = 0;
+
+function frame(now) {
+  let elapsed = (now - last) / 1000;
+  last = now;
+  if (elapsed > 0.25) elapsed = 0.25;
+  acc += elapsed;
+  let stepped = false;
+  while (acc >= STEP_INT) {
+    step();
+    acc -= STEP_INT;
+    stepped = true;
+  }
+  if (stepped) { draw(); updateReadout(); }
+  requestAnimationFrame(frame);
+}
+
+reset();
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

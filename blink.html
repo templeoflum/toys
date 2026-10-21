@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the blink</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  #caught { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the blink</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">blink every</span><input type="range" id="every" min="5" max="80" value="25" step="1"><span class="val" id="everyV"></span></div>
+    <div class="row"><span class="name">blink dur</span><input type="range" id="dur" min="20" max="400" value="120" step="5"><span class="val" id="durV"></span></div>
+    <div class="row"><span class="name">fade</span>
+      <span class="modes">
+        <button id="bSoft">soft</button>
+        <button id="bCut">cut</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">change</span>
+      <span class="modes">
+        <button id="bNow">change now</button>
+        <button id="bNext">change on next blink</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a brief, soft, rhythmic blink rides the same suppression that hides your own blinks &mdash; you stop seeing it. but the catch: a change made under the blink is missed (change-blindness), so a commit-blink is a heartbeat, an aliveness signal &mdash; never the way a real change is announced.<span class="cite">blink-suppression &amp; change-blindness &middot; visual perception (Volkmann; Rensink, O&rsquo;Regan &amp; Clark 1997)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the blink: a scheduled eyelid over a calm scene --------------------
+// the overlay alpha ramps 0 → peak → 0 over `blinkDur` milliseconds, once
+// every `blinkEvery` seconds. soft = a sin ease (like a real lid), cut = a
+// hard rectangular on for the whole duration. all timing is real-time via
+// performance.now(), independent of framerate — a 100ms blink is ~100ms.
+let blinkEvery = 2.5;   // seconds between blink starts (slider /10)
+let blinkDur = 120;     // full close+open time, milliseconds
+let fade = 'soft';      // 'soft' (sin ease) | 'cut' (rectangular)
+const PEAK = 0.9;       // overlay alpha at the blink's darkest point
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const everyEl = document.getElementById('every'), everyV = document.getElementById('everyV');
+const durEl = document.getElementById('dur'), durV = document.getElementById('durV');
+const readout = document.getElementById('readout').firstElementChild;
+const bSoft = document.getElementById('bSoft');
+const bCut = document.getElementById('bCut');
+const bNow = document.getElementById('bNow');
+const bNext = document.getElementById('bNext');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the scene: eight shapes in a ring ----------------------------------
+// each shape sits in one of 8 slots. `kind` circle|square, `tone` an index
+// into the palette tones. a change swaps a tone or moves a shape to an
+// empty slot. the ring holds 8 slots but only 8 shapes — moves need a spare
+// slot, so we keep the layout as an assignment of shapes to slots.
+const N_SHAPES = 8;
+const TONES = ['--ink', '--faint', '--shade', '--pick', '--mark'];
+
+// shapes[i] = {kind, tone}; slotOf[i] = which ring slot shape i occupies.
+// the ring has N_SHAPES slots (a full ring). to "move" a shape we swap two
+// shapes' slots, so the scene stays valid — no slot lost or doubled.
+let shapes = [];
+let slotOf = [];
+
+function buildScene() {
+  shapes = [];
+  slotOf = [];
+  for (let i = 0; i < N_SHAPES; i++) {
+    shapes.push({ kind: i % 2 === 0 ? 'circle' : 'square', tone: (i % (TONES.length - 1)) });
+    slotOf.push(i);
+  }
+}
+buildScene();
+
+// ring geometry — 8 slots evenly around a circle, centered in the canvas.
+const RING_CX = W / 2, RING_CY = Math.round(H * 0.46);
+const RING_R = Math.round(Math.min(W, H) * 0.30);
+const SHAPE_R = 78;
+
+function slotPos(slot) {
+  // slot 0 at the top, clockwise
+  const ang = -Math.PI / 2 + slot / N_SHAPES * TAU;
+  return { x: RING_CX + Math.cos(ang) * RING_R, y: RING_CY + Math.sin(ang) * RING_R };
+}
+
+// --- change scheduling --------------------------------------------------
+// a change is exactly one edit: swap a shape's tone, OR swap two shapes'
+// slots (one shape moves). `pendingChange` holds a change waiting for the
+// next blink's midpoint. `lastChangeWhere` records how it landed for the log.
+let pendingChange = false;
+let lastChangeWhere = '';   // '' | 'in view' | 'under a blink'
+let changeFlash = 0;        // brief --mark ring on the just-changed slot (view only)
+let changedSlot = -1;
+
+// pick and apply one valid change. alternates tone-swap and move so both
+// kinds of change get exercised.
+let changeParity = 0;
+function applyChange() {
+  changeParity ^= 1;
+  if (changeParity === 0) {
+    // tone-swap: give one shape a different palette tone
+    const i = Math.floor(Math.random() * N_SHAPES);
+    let t = shapes[i].tone;
+    // pick a genuinely different tone
+    let nt = t;
+    while (nt === t) nt = Math.floor(Math.random() * TONES.length);
+    shapes[i].tone = nt;
+    changedSlot = slotOf[i];
+  } else {
+    // move: swap the slots of two distinct shapes (one visibly relocates)
+    const a = Math.floor(Math.random() * N_SHAPES);
+    let b = Math.floor(Math.random() * N_SHAPES);
+    while (b === a) b = Math.floor(Math.random() * N_SHAPES);
+    const tmp = slotOf[a]; slotOf[a] = slotOf[b]; slotOf[b] = tmp;
+    changedSlot = slotOf[a];
+  }
+}
+
+// --- blink timing (real-time) -------------------------------------------
+// blinkClock counts real seconds since the last blink START. when it passes
+// blinkEvery a new blink begins and blinkClock wraps by subtracting the
+// cadence (so we never drop or double a blink across long frames). the blink
+// itself is `active` for its duration; blinkT is ms into the current blink.
+let blinkClock = 0;         // seconds since last blink start
+let active = false;         // is a blink currently playing
+let blinkT = 0;             // ms elapsed into the active blink
+let midFired = false;       // has the pending change fired at this blink's midpoint
+let overlayAlpha = 0;       // current eyelid alpha (0 fully open)
+
+// alpha trace: a rolling record of overlay alpha over the last few seconds,
+// so the eye can SEE how brief the dark actually is. {t, a} in real seconds.
+let realT = 0;
+const TRACE_WIN = 6;        // visible trace span (seconds)
+let alphaTrace = [];
+
+let last = performance.now();
+
+// the eyelid shape for a blink `blinkDur` ms long, `ms` into it.
+// soft: a sin arch 0→peak→0 (smooth, no banding). cut: flat peak the whole
+// duration (a hard rectangular flash). returns 0..PEAK.
+function eyelidAlpha(ms) {
+  const frac = ms / blinkDur;           // 0..1 across the blink
+  if (frac <= 0 || frac >= 1) return 0;
+  if (fade === 'cut') return PEAK;      // rectangular: full-on for the span
+  return PEAK * Math.sin(frac * Math.PI);   // soft: smooth arch
+}
+
+// the true "eyes shut" time — ms the overlay sits above 0.5·PEAK (>50%).
+// soft: the sin is above half-peak on the middle span; cut: the whole dur.
+function darkPeakMs() {
+  if (fade === 'cut') return blinkDur;
+  // sin(frac·π) > 0.5  ⇔  frac in (1/6, 5/6)  ⇒  2/3 of the duration
+  return blinkDur * (2 / 3);
+}
+
+function stepTime(dtSec) {
+  realT += dtSec;
+  blinkClock += dtSec;
+
+  // start a new blink when the cadence elapses (wrap, don't reset, so a long
+  // frame that skips a whole cadence still lands one blink cleanly).
+  if (!active && blinkClock >= blinkEvery) {
+    blinkClock -= blinkEvery;
+    active = true;
+    blinkT = 0;
+    midFired = false;
+  }
+
+  if (active) {
+    blinkT += dtSec * 1000;             // advance real ms into the blink
+    // fire a pending change at the midpoint (max occlusion), once per blink
+    if (pendingChange && !midFired && blinkT >= blinkDur / 2) {
+      applyChange();
+      pendingChange = false;
+      midFired = true;
+      lastChangeWhere = 'under a blink';
+      changedSlot = -1;                 // no in-view flash — it was hidden
+      bNext.classList.remove('on');
+    }
+    if (blinkT >= blinkDur) {
+      active = false;
+      blinkT = 0;
+      overlayAlpha = 0;                 // guarantee a full return to open
+    }
+  }
+
+  // resolve the eyelid alpha for this instant
+  overlayAlpha = active ? eyelidAlpha(blinkT) : 0;
+  if (!isFinite(overlayAlpha)) overlayAlpha = 0;
+
+  // decay the in-view change flash
+  if (changeFlash > 0) changeFlash = Math.max(0, changeFlash - dtSec);
+
+  // record the alpha trace
+  alphaTrace.push({ t: realT, a: overlayAlpha });
+  const cut = realT - TRACE_WIN;
+  while (alphaTrace.length && alphaTrace[0].t < cut) alphaTrace.shift();
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// the scene (ring) fills the upper band; the blink meter sits below it.
+const METER_H = 150;
+const METER_TOP = H - PAD - METER_H;
+
+function drawShape(slot, kind, toneVar) {
+  const p = slotPos(slot);
+  ctx.fillStyle = css(toneVar);
+  if (kind === 'circle') {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, SHAPE_R, 0, TAU);
+    ctx.fill();
+  } else {
+    ctx.fillRect(p.x - SHAPE_R, p.y - SHAPE_R, SHAPE_R * 2, SHAPE_R * 2);
+  }
+}
+
+function drawScene() {
+  const faint = css('--faint'), mark = css('--mark');
+
+  // a faint guide ring the shapes sit on
+  ctx.strokeStyle = css('--shade'); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(RING_CX, RING_CY, RING_R, 0, TAU); ctx.stroke();
+
+  // the eight shapes
+  for (let i = 0; i < N_SHAPES; i++) drawShape(slotOf[i], shapes[i].kind, TONES[shapes[i].tone]);
+
+  // the in-view change flash: a --mark ring on the slot that just changed in
+  // full view, so a `change now` is easy to catch. hidden changes get none.
+  if (changeFlash > 0 && changedSlot >= 0) {
+    const p = slotPos(changedSlot);
+    ctx.strokeStyle = mark;
+    ctx.globalAlpha = Math.min(1, changeFlash / 0.4);
+    ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.arc(p.x, p.y, SHAPE_R + 18, 0, TAU); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// the eyelid overlay — a fill toward --ink at the current alpha, over the
+// whole canvas. this is the blink you're tuning toward imperceptible.
+function drawOverlay() {
+  if (overlayAlpha <= 0) return;
+  ctx.globalAlpha = overlayAlpha;
+  ctx.fillStyle = css('--ink');
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
+}
+
+// --- blink meter: countdown + alpha trace -------------------------------
+// left: a bar counting down to the next blink. right: the alpha trace over
+// the last few seconds — spikes you can SEE are far briefer than they feel.
+function drawMeter() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  const left = PAD + 20, right = W - PAD - 20;
+  const w = right - left;
+
+  ctx.fillStyle = faint; ctx.font = '20px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('blink meter — countdown to the next blink · the overlay alpha over the last ' + TRACE_WIN + 's', left, METER_TOP - 16);
+
+  // frame
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(left, METER_TOP, w, METER_H);
+
+  // --- countdown bar (left third) ---
+  const cdW = Math.round(w * 0.24);
+  const cdX = left + 10, cdY = METER_TOP + METER_H / 2;
+  const remain = active ? 0 : Math.max(0, blinkEvery - blinkClock);
+  const frac = active ? 1 : (blinkClock / blinkEvery);
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(cdX, cdY - 18, cdW, 36);
+  ctx.fillStyle = active ? mark : css('--pick');
+  ctx.fillRect(cdX + 1, cdY - 17, Math.max(0, (cdW - 2) * Math.min(1, frac)), 34);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText(active ? 'BLINK' : ('next in ' + remain.toFixed(1) + 's'), cdX, cdY - 30);
+
+  // --- alpha trace (right span) ---
+  const trLeft = cdX + cdW + 60, trRight = right - 12;
+  const trW = trRight - trLeft;
+  const trTop = METER_TOP + 18, trBot = METER_TOP + METER_H - 18;
+  const trH = trBot - trTop;
+
+  // baseline (alpha 0) and peak reference (alpha 1)
+  ctx.strokeStyle = css('--shade'); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(trLeft, trBot); ctx.lineTo(trRight, trBot); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '15px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('α', trLeft - 24, trTop + 12);
+  ctx.fillText('0', trLeft - 24, trBot + 4);
+
+  const xOf = t => trLeft + (t - (realT - TRACE_WIN)) / TRACE_WIN * trW;
+  const yOf = a => trBot - (a / PEAK) * trH;
+
+  // the alpha trace itself — spikes at each blink, flat 0 between
+  ctx.strokeStyle = mark; ctx.lineWidth = 2; ctx.beginPath();
+  let startpen = true;
+  for (const s of alphaTrace) {
+    const x = xOf(s.t), y = yOf(s.a);
+    startpen ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    startpen = false;
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = faint; ctx.font = '15px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', trRight, trTop + 12);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = css('--paper'); ctx.fillRect(0, 0, W, H);
+  drawScene();
+  drawOverlay();      // the eyelid rides over the scene
+  drawMeter();        // the meter is UI — drawn over the eyelid so it stays readable
+}
+
+// --- regime read: is the blink near-imperceptible or a visible jump? -----
+// a short soft blink rides blink-suppression; a long one, or any hard cut,
+// reads as a jump. the boundary is soft — the percept is the operator's.
+function regimeOf() {
+  const shut = darkPeakMs();
+  if (fade === 'cut') {
+    return blinkDur <= 60
+      ? 'a hard cut, but brief — right at the edge of noticed'
+      : 'noticeable — the screen jumps (a hard cut announces itself)';
+  }
+  // soft
+  if (shut <= 80) return '≈ imperceptible — rides blink-suppression';
+  if (shut <= 160) return 'faint — a soft pulse, easy to miss';
+  return 'noticeable — the screen dims and lifts (too long to hide)';
+}
+
+function updateReadout() {
+  const shut = darkPeakMs();
+  const bpm = 60 / blinkEvery;
+
+  let caught = '';
+  if (lastChangeWhere === 'in view') {
+    caught = 'last change: <b>in view</b> — easy to catch';
+  } else if (lastChangeWhere === 'under a blink') {
+    caught = '<span id="caught">last change: under a blink — missed? '
+      + 'a change made under the blink is missed — the blink is a heartbeat, not a change-announcer</span>';
+  } else {
+    caught = 'last change: <b>—</b>';
+  }
+
+  readout.innerHTML =
+    'blink every <b>' + blinkEvery.toFixed(1) + ' s</b> &nbsp;·&nbsp; '
+    + 'blink dur <b>' + blinkDur + ' ms</b> &nbsp;·&nbsp; '
+    + 'fade <b>' + fade + '</b>'
+    + '<br>dark peak (&gt;50%) <b>' + Math.round(shut) + ' ms</b> &nbsp;·&nbsp; '
+    + 'blinks/min <b>' + bpm.toFixed(1) + '</b>'
+    + '<br><span id="regime">' + regimeOf() + '</span>'
+    + '<br>' + caught;
+}
+
+function setFade(mode) {
+  fade = mode;
+  bSoft.classList.toggle('on', mode === 'soft');
+  bCut.classList.toggle('on', mode === 'cut');
+  refresh();
+}
+
+function refresh() {
+  everyV.textContent = blinkEvery.toFixed(1);
+  durV.textContent = blinkDur + 'ms';
+  updateReadout();
+}
+
+// sliders take effect live — they do NOT reset the blink cadence mid-run.
+everyEl.oninput = () => { blinkEvery = everyEl.value / 10; refresh(); };
+durEl.oninput = () => { blinkDur = +durEl.value; refresh(); };
+
+bSoft.onclick = () => setFade('soft');
+bCut.onclick = () => setFade('cut');
+
+// change now — one visible change, in full view, with the --mark flash.
+bNow.onclick = () => {
+  applyChange();
+  lastChangeWhere = 'in view';
+  changeFlash = 0.6;                    // seconds of the catch-me ring
+  bNow.classList.add('on');
+  setTimeout(() => bNow.classList.remove('on'), 120);
+  refresh();
+};
+// change on next blink — arm a pending change; it fires at the midpoint of
+// the next blink (max occlusion). exactly one change per press.
+bNext.onclick = () => {
+  pendingChange = true;
+  bNext.classList.add('on');           // stays lit until it fires
+  refresh();
+};
+
+// --- the live loop: small fixed sub-steps for accurate real-time timing --
+function frame(now) {
+  let elapsed = (now - last) / 1000;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  // integrate in small slices so the blink's ms accounting stays crisp even
+  // across a long frame (the midpoint fire and full-return land cleanly).
+  const SLICE = 0.005;
+  while (elapsed > 0) {
+    const dt = Math.min(SLICE, elapsed);
+    stepTime(dt);
+    elapsed -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+setFade('soft');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>poggendorff</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --bar: #ccc3ae;
+    --diag: #5b6b74;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 11rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(620px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>poggendorff</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">bar</span><input type="range" id="bar" min="0" max="100" value="100"><span class="val" id="barV"></span></div>
+    <div class="row"><span class="name">guide</span><input type="range" id="guide" min="0" max="100" value="0"><span class="val" id="guideV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="600"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a single straight diagonal runs behind the pale bar. the segment on the right looks too high to be the same line as the one on the left &mdash; your eye mis-carries the slope across the gap it cannot see. shrink the <b>bar</b> to nothing and the diagonal joins into one plainly straight line; or raise the <b>guide</b> to lay the true line through both segments.</div>
+
+<script>
+'use strict';
+
+const CX = 450;                         // bar centre
+const BARMAX = 130;                      // full bar width
+const X0 = 150, X1 = 750;                // diagonal runs across this span
+// true collinear line through (X0, Y0) and (X1, Y1)
+const Y0 = 445, Y1 = 190;
+const slope = (Y1 - Y0) / (X1 - X0);
+const yAt = (x) => Y0 + slope * (x - X0);
+
+let bar = 1;      // 0 => no occluder, one continuous diagonal
+let guide = 0;    // proof: the true line drawn straight through
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const barEl = document.getElementById('bar'), barV = document.getElementById('barV');
+const guideEl = document.getElementById('guide'), guideV = document.getElementById('guideV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  const w = bar * BARMAX;
+  const bL = CX - w / 2, bR = CX + w / 2;
+
+  // the two visible segments of ONE straight line, split by the bar
+  ctx.strokeStyle = css('--diag'); ctx.lineWidth = 5; ctx.lineCap = 'round';
+  line(X0, yAt(X0), bL, yAt(bL));
+  line(bR, yAt(bR), X1, yAt(X1));
+
+  // the occluding bar, hiding the middle
+  if (bar > 0.005) {
+    ctx.fillStyle = css('--bar');
+    ctx.fillRect(bL, 60, w, 480);
+  }
+
+  // proof: the true continuous line, dashed, straight through everything
+  if (guide > 0) {
+    ctx.save();
+    ctx.globalAlpha = guide;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.setLineDash([7, 6]);
+    line(X0, yAt(X0), X1, yAt(X1));
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = bar < 0.02
+    ? 'the bar is gone &mdash; one straight diagonal, the segments were always collinear.'
+    : guide > 0.98
+      ? 'the guide runs dead through both segments &mdash; they lie on a single line.'
+      : 'the right segment looks offset, but both lie on one straight line behind the bar.';
+}
+
+function refresh() {
+  barV.textContent = bar < 0.02 ? 'off — diagonal joins' : Math.round(bar * 100) + '%';
+  guideV.textContent = guide > 0.98 ? 'true line shown' : guide > 0 ? 'rising' : 'off';
+  draw();
+}
+
+barEl.oninput = () => { bar = +barEl.value / 100; refresh(); };
+guideEl.oninput = () => { guide = +guideEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

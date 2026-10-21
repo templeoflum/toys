@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wheatstone-bridge</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>wheatstone bridge</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">unknown Rx</span><input type="range" id="rx" min="10" max="990" value="470" step="1"><span class="val" id="rxV"></span></div>
+    <div class="row"><span class="name">balance R3</span><input type="range" id="r3" min="10" max="990" value="300" step="1"><span class="val" id="r3V"></span></div>
+    <div class="row"><span class="name">ratio arms</span>
+      <span class="modes">
+        <button id="bEqual">R1=R2 (100)</button>
+        <button id="bTen">R1=100 R2=1000</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bNull">snap R3 to null</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a diamond of four resistors with a <b>battery</b> across one diagonal and a <b>galvanometer</b> across the other. you turn the <b>balancing R3</b> until the galvanometer reads <b>zero</b> &mdash; the <b>null</b>. at that null no current crosses the bridge and the reading no longer depends on the battery or the meter, only the ratio: <b>Rx = R1&middot;R3/R2</b>. a null instrument measures a balance, not a deflection.<span class="cite">the Wheatstone bridge &middot; Samuel Hunter Christie 1833, popularized by Charles Wheatstone 1843 &middot; balance at R1/R2 = Rx/R3; measured at the null</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- Wheatstone bridge · null measurement -------------------------------
+// a diamond of four resistors. one diagonal carries the battery (Vb), the
+// other bridges the two midpoints through a galvanometer. label the nodes:
+//   top A (battery +), bottom C (battery -), left B, right D.
+//   R1 = A→B, Rx = B→C   (left leg, the UNKNOWN in the lower arm)
+//   R2 = A→D, R3 = D→C   (right leg, the adjustable STANDARD in the lower arm)
+// the galvanometer bridges B↔D. treating it as ideal (no loading), the two
+// midpoint potentials are voltage-divider taps of the battery:
+//   Vb_node = Vb · Rx/(R1+Rx)      (left tap, node B)
+//   Vd_node = Vb · R3/(R2+R3)      (right tap, node D)
+// the galvanometer sees the difference; its deflection ∝ (Vb_node − Vd_node):
+//   Vg = Vb · ( Rx/(R1+Rx) − R3/(R2+R3) )
+// VERIFY (load-bearing): Vg = 0  ⇔  R1·R3 = R2·Rx  ⇔  R1/R2 = Rx/R3.
+// (standard adjacent-arm balance P·S = Q·R with P=R1,Q=Rx,R=R2,S=R3.)
+// away from balance Vg is proportional to the bridge imbalance (the divider
+// difference above). AT the null the read Rx = R3·R1/R2 equals the true Rx —
+// independent of Vb and of the meter's calibration. the numbers below must
+// satisfy Vg=0 exactly when R1·R3 = R2·Rx, and Rx_read = R3·R1/R2 there.
+const VB = 5.0;            // battery volts across the A–C diagonal (arbitrary — null is Vb-independent)
+
+// the two adjustable resistances (ohms), slider-driven.
+let Rx = 470;             // the UNKNOWN — what we are measuring
+let R3 = 300;             // the STANDARD — adjusted to null the galvanometer
+
+// the fixed known ratio arms. two presets: equal (balance ⇒ R3 = Rx) or 1:10.
+let R1 = 100, R2 = 100;
+let arm = 'equal';        // 'equal' | 'ten'
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rxEl = document.getElementById('rx'), rxV = document.getElementById('rxV');
+const r3El = document.getElementById('r3'), r3V = document.getElementById('r3V');
+const readout = document.getElementById('readout').firstElementChild;
+const bEqual = document.getElementById('bEqual');
+const bTen = document.getElementById('bTen');
+const bNull = document.getElementById('bNull');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// the galvanometer voltage — zero exactly at balance (R1·R3 = R2·Rx).
+function galvanometerV() {
+  return VB * ( Rx / (R1 + Rx) - R3 / (R2 + R3) );
+}
+// signed imbalance in [-1,1] — the divider difference, drives the needle.
+function imbalance() {
+  return Rx / (R1 + Rx) - R3 / (R2 + R3);
+}
+// the value R3 would need for a perfect null: R3 = Rx·R2/R1.
+function nullR3() { return Rx * R2 / R1; }
+// what the bridge READS for Rx once nulled with the current R3: Rx = R3·R1/R2.
+function rxRead() { return R3 * R1 / R2; }
+// treat "balanced" as the galvanometer within a hair of zero.
+function isBalanced() { return Math.abs(imbalance()) < 5e-4; }
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// the diamond sits centred-left; the galvanometer dial sits to its right.
+const CX = Math.round(W * 0.40);      // diamond centre x
+const CY = Math.round(H * 0.46);      // diamond centre y
+const DIAG = Math.round(H * 0.32);    // half-diagonal of the diamond
+
+// diamond node points — A top, C bottom, B left, D right.
+function nodes() {
+  return {
+    A: { x: CX, y: CY - DIAG },
+    C: { x: CX, y: CY + DIAG },
+    B: { x: CX - DIAG, y: CY },
+    D: { x: CX + DIAG, y: CY },
+  };
+}
+
+// a resistor drawn as a labelled zig-zag along a segment, with its value.
+function resistor(x0, y0, x1, y1, label, value, hot) {
+  const ink = css('--ink'), mark = css('--mark'), faint = css('--faint');
+  const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+  const ux = dx / len, uy = dy / len;      // unit along
+  const nx = -uy, ny = ux;                 // unit normal
+  const zigStart = 0.30, zigEnd = 0.70;    // the body occupies the middle
+  const amp = 16, teeth = 6;
+
+  ctx.strokeStyle = hot ? mark : ink;
+  ctx.lineWidth = 4;
+  // lead in
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  let px = x0 + ux * len * zigStart, py = y0 + uy * len * zigStart;
+  ctx.lineTo(px, py);
+  // the zig-zag body
+  for (let i = 0; i <= teeth; i++) {
+    const t = zigStart + (zigEnd - zigStart) * (i / teeth);
+    const bx = x0 + ux * len * t, by = y0 + uy * len * t;
+    const s = (i % 2 === 0) ? 1 : -1;
+    const zx = bx + nx * amp * s, zy = by + ny * amp * s;
+    ctx.lineTo(i === 0 ? px : zx, i === 0 ? py : zy);
+  }
+  // lead out
+  ctx.lineTo(x0 + ux * len * zigEnd, y0 + uy * len * zigEnd);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+
+  // the label + value, offset to the outside of the diamond
+  const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+  const outx = (mx - CX), outy = (my - CY);
+  const ol = Math.hypot(outx, outy) || 1;
+  const lx = mx + (outx / ol) * 62, ly = my + (outy / ol) * 62;
+  ctx.fillStyle = hot ? mark : ink;
+  ctx.textAlign = 'center';
+  ctx.font = '26px "Courier New", monospace';
+  ctx.fillText(label, lx, ly - 4);
+  ctx.fillStyle = faint;
+  ctx.font = '20px "Courier New", monospace';
+  ctx.fillText(value.toFixed(0) + ' Ω', lx, ly + 22);
+}
+
+// --- the bridge diamond -------------------------------------------------
+// four resistors on the four legs, the battery on the A–C diagonal, the
+// galvanometer bridging B↔D. the B↔D wire glows --mark and thins toward
+// nothing as the null is approached (no current crosses at balance).
+function drawBridge() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+  const n = nodes();
+  const bal = isBalanced();
+
+  // the galvanometer bridge wire B↔D (behind the resistors)
+  const imb = imbalance();
+  ctx.strokeStyle = bal ? faint : mark;
+  ctx.lineWidth = bal ? 2 : 3 + Math.min(6, Math.abs(imb) * 30);
+  ctx.setLineDash(bal ? [5, 5] : []);
+  ctx.beginPath(); ctx.moveTo(n.B.x, n.B.y); ctx.lineTo(n.D.x, n.D.y); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the four resistor legs. the lower arms (Rx, R3) are the working pair.
+  resistor(n.A.x, n.A.y, n.B.x, n.B.y, 'R1', R1, false);      // top-left
+  resistor(n.A.x, n.A.y, n.D.x, n.D.y, 'R2', R2, false);      // top-right
+  resistor(n.B.x, n.B.y, n.C.x, n.C.y, 'Rx', Rx, true);       // bottom-left (unknown)
+  resistor(n.D.x, n.D.y, n.C.x, n.C.y, 'R3', R3, true);       // bottom-right (standard)
+
+  // the four nodes
+  ctx.fillStyle = ink;
+  for (const k of ['A', 'B', 'C', 'D']) {
+    ctx.beginPath(); ctx.arc(n[k].x, n[k].y, 7, 0, TAU); ctx.fill();
+  }
+
+  // the battery on the A–C diagonal, drawn to the left of the vertical axis
+  drawBattery(n.A, n.C);
+
+  // the galvanometer sitting on the B–D bridge, centred, with the dial to
+  // the right. a small "G" hub on the wire, wire drawn to the dial.
+  const gHub = { x: (n.B.x + n.D.x) / 2, y: (n.B.y + n.D.y) / 2 };
+  const dial = { x: gHub.x, y: gHub.y - Math.round(DIAG * 0.44) };
+  ctx.strokeStyle = bal ? faint : mark; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(gHub.x, gHub.y); ctx.lineTo(dial.x, dial.y + 60); ctx.stroke();
+  ctx.fillStyle = css('--paper');
+  ctx.beginPath(); ctx.arc(gHub.x, gHub.y, 15, 0, TAU); ctx.fill();
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = ink; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('G', gHub.x, gHub.y + 7);
+
+  drawGalvanometer(dial.x, dial.y, imb, bal);
+
+  // quiet label
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('null instrument — read at balance, not at deflection', PAD + 6, PAD + 10);
+}
+
+// the battery: two plates (long thin / short thick) on the A–C diagonal.
+function drawBattery(A, C) {
+  const ink = css('--ink'), faint = css('--faint');
+  const mx = (A.x + C.x) / 2, my = (A.y + C.y) / 2;
+  const bx = mx - 90;   // slide the cell to the left of the vertical wire
+  // the wire from A down to the cell and on to C
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(A.x, A.y); ctx.lineTo(bx, A.y); ctx.lineTo(bx, my - 26);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(bx, my + 26); ctx.lineTo(bx, C.y); ctx.lineTo(C.x, C.y);
+  ctx.stroke();
+  // the cell plates
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(bx - 26, my - 26); ctx.lineTo(bx + 26, my - 26); ctx.stroke(); // long (+)
+  ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(bx - 14, my + 26); ctx.lineTo(bx + 14, my + 26); ctx.stroke(); // short (-)
+  ctx.fillStyle = faint; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('Vb ' + VB.toFixed(0) + 'V', bx - 34, my + 8);
+}
+
+// the galvanometer dial: an arc scale with a needle pivoting at bottom-centre.
+// zero (null) is straight up; the needle deflects left/right ∝ signed imbalance.
+// at balance the dial + needle highlight in --mark to shout the null.
+function drawGalvanometer(cx, cy, imb, bal) {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+  const R = 58, pivotY = cy + R * 0.55;
+
+  // dial face
+  ctx.fillStyle = css('--paper');
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
+  ctx.strokeStyle = bal ? mark : faint; ctx.lineWidth = bal ? 3 : 2;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.stroke();
+
+  // the scale arc across the top, with a centre tick at zero (--mark)
+  const span = 1.15;   // radians each side of vertical the needle can swing
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, pivotY, R * 0.72, -Math.PI/2 - span, -Math.PI/2 + span); ctx.stroke();
+  // tick marks
+  for (let i = -3; i <= 3; i++) {
+    const a = -Math.PI/2 + (i / 3) * span;
+    const r0 = R * 0.62, r1 = R * 0.74;
+    const centre = (i === 0);
+    ctx.strokeStyle = centre ? mark : faint; ctx.lineWidth = centre ? 3 : 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * r0, pivotY + Math.sin(a) * r0);
+    ctx.lineTo(cx + Math.cos(a) * r1, pivotY + Math.sin(a) * r1);
+    ctx.stroke();
+  }
+  ctx.fillStyle = mark; ctx.font = '14px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('0', cx, cy - R * 0.78);
+
+  // the needle — angle ∝ imbalance, saturating so it stays on the dial.
+  const defl = Math.max(-1, Math.min(1, imb * 6));   // scale the tiny divider difference
+  const ang = -Math.PI/2 + defl * span;
+  ctx.strokeStyle = bal ? mark : ink; ctx.lineWidth = bal ? 4 : 3;
+  ctx.beginPath();
+  ctx.moveTo(cx, pivotY);
+  ctx.lineTo(cx + Math.cos(ang) * R * 0.78, pivotY + Math.sin(ang) * R * 0.78);
+  ctx.stroke();
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(cx, pivotY, 5, 0, TAU); ctx.fill();
+
+  // label
+  ctx.fillStyle = bal ? mark : faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText(bal ? 'NULL' : 'galvanometer', cx, cy + R + 30);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawBridge();
+}
+
+// --- regime read: balanced vs deflecting --------------------------------
+function regimeOf() {
+  if (isBalanced()) return 'BALANCED — no current crosses the galvanometer; read Rx at the null';
+  const imb = imbalance();
+  const side = imb > 0 ? 'R3 too low — raise it' : 'R3 too high — lower it';
+  return 'deflecting — ' + side + ' to reach the null';
+}
+
+function updateReadout() {
+  const vg = galvanometerV();
+  const bal = isBalanced();
+  const readTxt = bal
+    ? 'BALANCED: Rx = R3·R2/R1 = <b>' + rxRead().toFixed(0) + ' Ω</b>'
+    : 'off balance — adjust R3 toward ' + nullR3().toFixed(0) + ' Ω';
+
+  readout.innerHTML =
+    'R1 <b>' + R1.toFixed(0) + '</b> &nbsp;·&nbsp; '
+    + 'R2 <b>' + R2.toFixed(0) + '</b> &nbsp;·&nbsp; '
+    + 'R3 <b>' + R3.toFixed(0) + '</b> &nbsp;·&nbsp; '
+    + 'Rx <b>' + Rx.toFixed(0) + '</b> Ω'
+    + '<br>galvanometer Vg <b>' + (vg >= 0 ? '+' : '') + vg.toFixed(4) + ' V</b> &nbsp;·&nbsp; '
+    + 'balance needs R1·Rx = R2·R3 &nbsp;(' + (R1 * Rx).toFixed(0) + ' vs ' + (R2 * R3).toFixed(0) + ')'
+    + '<br>' + readTxt
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  rxV.textContent = Rx.toFixed(0);
+  r3V.textContent = R3.toFixed(0);
+  updateReadout();
+}
+
+// sliders drive the resistances directly — no integration, pure state.
+rxEl.oninput = () => { Rx = +rxEl.value; refresh(); };
+r3El.oninput = () => { R3 = +r3El.value; refresh(); };
+
+function setArm(a) {
+  arm = a;
+  if (a === 'equal') { R1 = 100; R2 = 100; }
+  else               { R1 = 100; R2 = 1000; }
+  bEqual.classList.toggle('on', a === 'equal');
+  bTen.classList.toggle('on', a === 'ten');
+  refresh();
+}
+bEqual.onclick = () => setArm('equal');
+bTen.onclick = () => setArm('ten');
+
+// snap R3 to the exact null for the current Rx and ratio arms: R3 = Rx·R2/R1.
+// clamped into the slider range; the galvanometer drops to zero.
+bNull.onclick = () => {
+  const target = nullR3();
+  R3 = Math.max(+r3El.min, Math.min(+r3El.max, Math.round(target)));
+  r3El.value = R3;
+  bNull.classList.add('on');
+  setTimeout(() => bNull.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: pure redraw, no time-integration ---------------------
+// state lives entirely in the sliders; rAF only keeps the canvas painted.
+function frame() {
+  draw();
+  requestAnimationFrame(frame);
+}
+
+setArm('equal');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

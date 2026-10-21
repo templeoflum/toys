@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>balance-beam</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>balance-beam</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">unknown m</span><input type="range" id="mass" min="10" max="400" value="180" step="1"><span class="val" id="massV"></span></div>
+    <div class="row"><span class="name">counterpoise x</span><input type="range" id="pos" min="20" max="600" value="300" step="1"><span class="val" id="posV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">an unknown weight hangs at a <b>fixed</b> distance on the left; you slide a known <b>counterpoise</b> along the right arm until the beam sits <b>level</b>. at the null the two torques are equal &mdash; and the counterpoise's <b>position</b> reads the unknown mass straight off, no spring, no scale of force. weigh anything by moving a weight to where the lever agrees.<span class="cite">the balance &amp; steelyard &middot; the equal-arm balance (ancient Egypt) &middot; the Roman steelyard &mdash; weight by torque at the null, independent of gravity's strength</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- balance-beam: weighing by torque at the null -----------------------
+// a steelyard. an unknown mass m1 hangs at a FIXED distance d1 on the left
+// arm; a known counterpoise mass m2 slides to a distance d2 on the right
+// arm. torque is force×distance about the central pivot. net torque:
+//   Tnet = m1·d1 − m2·d2      (left positive, tips the left down when > 0)
+// the beam is LEVEL exactly when Tnet = 0, i.e. m1·d1 = m2·d2. the tilt
+// angle is a monotonic (saturating) function of Tnet — same sign, so the
+// null is the unique zero-crossing. at level the read mass off the lever
+// ratio is
+//   m_read = m2 · (d2 / d1)
+// and this EQUALS the true m1 precisely because m1·d1 = m2·d2 there. that
+// identity is the load-bearing VERIFY: level ⇔ m1·d1 = m2·d2 ⇔ m_read = m1.
+// gravity g cancels from both torques, so the reading is independent of it.
+const M2 = 100.0;     // the known counterpoise mass — the calibrated weight
+const D1 = 200.0;     // FIXED left-arm distance of the unknown mass
+
+// live knobs
+let m1 = 1.80;        // unknown mass (slider /100)
+let d2 = 3.00;        // counterpoise distance along the right arm (slider /100)
+
+// the beam's live tilt (radians, + = left side down) and its rate, damped
+// toward the equilibrium tilt so it settles onto the null.
+let tilt = 0;
+let tiltVel = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const massEl = document.getElementById('mass'), massV = document.getElementById('massV');
+const posEl = document.getElementById('pos'), posV = document.getElementById('posV');
+const readout = document.getElementById('readout').firstElementChild;
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// the two torques and their difference (the driver of the tilt).
+function tqLeft()  { return m1 * D1; }
+function tqRight() { return M2 * d2; }
+function netTorque() { return tqLeft() - tqRight(); }   // + tips left down
+
+// the equilibrium tilt the beam relaxes toward: a monotonic, sign-preserving
+// saturating map of the net torque. zero net torque → zero tilt (level).
+const MAX_TILT = 0.26;      // rad, the beam's hard stop against the rests
+const TQ_SCALE = 12000;     // torque that maps to ~full tilt
+function equilTilt() {
+  return MAX_TILT * Math.tanh(netTorque() / TQ_SCALE);
+}
+
+// the mass read straight off the lever ratio at the counterpoise position.
+// this is what the graduated arm shows; it EQUALS m1 only at the null.
+function readMass() { return M2 * (d2 / D1); }
+
+// within this torque band we call it level (the null indicator lights).
+const LEVEL_BAND = 60;      // |Tnet| below this reads as balanced
+function isLevel() { return Math.abs(netTorque()) < LEVEL_BAND; }
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+const PIVOT_X = Math.round(W * 0.5);
+const PIVOT_Y = Math.round(H * 0.46);
+const BEAM_HALF = Math.round(W * 0.40);   // half the drawn beam length
+// pixels-per-distance-unit: the left mass sits at D1, the counterpoise at d2.
+// scale so the max slider distance (6.00) reaches near the beam tip.
+const PX_PER_UNIT = BEAM_HALF / 6.4;
+
+// --- the settling integration -------------------------------------------
+// damp the tilt toward equilTilt() like a heavy beam on a pivot: a spring
+// pull toward equilibrium plus strong damping, so it eases in without ring.
+function stepSim(dt) {
+  const target = equilTilt();
+  const K = 90;      // pull toward equilibrium
+  const C = 16;      // damping
+  const accel = K * (target - tilt) - C * tiltVel;
+  tiltVel += accel * dt;
+  tilt += tiltVel * dt;
+  // clamp against the rests
+  if (tilt > MAX_TILT) { tilt = MAX_TILT; if (tiltVel > 0) tiltVel = 0; }
+  if (tilt < -MAX_TILT) { tilt = -MAX_TILT; if (tiltVel < 0) tiltVel = 0; }
+}
+
+// --- drawing the beam, pivot, weights, and torque arms ------------------
+// the beam rotates about the central pivot by −tilt (left-down = left tip
+// lower on screen). the unknown mass hangs at fixed D1 left; the counterpoise
+// rides at d2 right. a graduated right arm reads mass directly; two torque
+// bars under each side show force×distance. --mark lights the whole rig level.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+  const level = isLevel();
+  const accent = level ? mark : ink;
+
+  // a point on the beam at signed distance u (units, + = right), rotated
+  const s = Math.sin(-tilt), c = Math.cos(-tilt);
+  function beamPt(uPx, offY) {
+    // local (uPx along beam, offY perpendicular) → screen
+    return [PIVOT_X + uPx * c - offY * s, PIVOT_Y + uPx * s + offY * c];
+  }
+
+  // the pivot column and its knife-edge support (a triangle standing on base)
+  ctx.fillStyle = faint;
+  ctx.beginPath();
+  ctx.moveTo(PIVOT_X, PIVOT_Y - 6);
+  ctx.lineTo(PIVOT_X - 70, PIVOT_Y + 210);
+  ctx.lineTo(PIVOT_X + 70, PIVOT_Y + 210);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = shade; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(PIVOT_X - 150, PIVOT_Y + 210); ctx.lineTo(PIVOT_X + 150, PIVOT_Y + 210); ctx.stroke();
+
+  // the beam itself
+  const [lx, ly] = beamPt(-BEAM_HALF, 0);
+  const [rx, ry] = beamPt(BEAM_HALF, 0);
+  ctx.strokeStyle = accent; ctx.lineWidth = 10; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(rx, ry); ctx.stroke();
+  ctx.lineCap = 'butt';
+
+  // the graduated right arm — tick marks the counterpoise slides across,
+  // each labelled with the mass it would read (M2·u/D1)
+  ctx.strokeStyle = faint; ctx.fillStyle = faint;
+  ctx.font = '15px "Courier New", monospace'; ctx.textAlign = 'center';
+  for (let u = 1; u <= 6; u++) {
+    const [tx, ty] = beamPt(u * PX_PER_UNIT, 0);
+    ctx.lineWidth = 2;
+    const [tx2, ty2] = beamPt(u * PX_PER_UNIT, -14);
+    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(tx2, ty2); ctx.stroke();
+    const rm = (M2 * u / D1).toFixed(1);
+    const [lxr, lyr] = beamPt(u * PX_PER_UNIT, -30);
+    ctx.fillText(rm, lxr, lyr);
+  }
+
+  // the central pivot pin
+  ctx.fillStyle = accent;
+  ctx.beginPath(); ctx.arc(PIVOT_X, PIVOT_Y, 12, 0, TAU); ctx.fill();
+
+  // --- the unknown mass, hanging at fixed D1 on the left ---
+  // D1 (200) and d2 (in units ×100) share one scale — draw both via u/100.
+  const uLeft = -(D1 / 100) * PX_PER_UNIT;
+  const [hlx, hly] = beamPt(uLeft, 0);
+  // hanger line drops straight down from the beam point (gravity is vertical)
+  const massSize = 30 + Math.min(70, m1 * 12);
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(hlx, hly); ctx.lineTo(hlx, hly + 110); ctx.stroke();
+  ctx.fillStyle = ink;
+  ctx.fillRect(hlx - massSize / 2, hly + 110, massSize, massSize * 0.7);
+  ctx.fillStyle = css('--paper'); ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('?', hlx, hly + 110 + massSize * 0.45);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('m = ' + m1.toFixed(2), hlx, hly + 110 + massSize * 0.7 + 26);
+  ctx.fillText('d = ' + (D1 / 100).toFixed(2), hlx, hly + 110 + massSize * 0.7 + 50);
+
+  // --- the sliding counterpoise on the right, at d2 ---
+  const uRight = d2 * PX_PER_UNIT;
+  const [crx, cry] = beamPt(uRight, 0);
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(crx, cry); ctx.lineTo(crx, cry + 80); ctx.stroke();
+  // the counterpoise weight — a fixed known size (it never changes mass)
+  const cSize = 46;
+  ctx.fillStyle = pick;
+  ctx.beginPath(); ctx.arc(crx, cry + 80 + cSize / 2, cSize / 2, 0, TAU); ctx.fill();
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = ink; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText(M2.toFixed(0), crx, cry + 80 + cSize / 2 + 6);
+  ctx.fillStyle = faint;
+  ctx.fillText('d = ' + d2.toFixed(2), crx, cry + 80 + cSize + 26);
+
+  // --- torque bars under the base: force×distance on each side ---
+  const bY = PIVOT_Y + 300;
+  const maxTq = Math.max(tqLeft(), tqRight(), 1);
+  const barMax = W * 0.30;
+  ctx.font = '20px "Courier New", monospace';
+  // left torque (ink), grown left from center
+  ctx.fillStyle = ink; ctx.textAlign = 'center';
+  const wL = barMax * tqLeft() / (maxTq * 1.05);
+  ctx.fillRect(PIVOT_X - 40 - wL, bY, wL, 26);
+  ctx.fillText('m·d = ' + tqLeft().toFixed(0), PIVOT_X - 40 - wL / 2, bY - 12);
+  // right torque (mark), grown right from center
+  ctx.fillStyle = mark;
+  const wR = barMax * tqRight() / (maxTq * 1.05);
+  ctx.fillRect(PIVOT_X + 40, bY, wR, 26);
+  ctx.fillText('m·d = ' + tqRight().toFixed(0), PIVOT_X + 40 + wR / 2, bY - 12);
+  // the center gap label
+  ctx.fillStyle = faint; ctx.font = '18px Georgia';
+  ctx.fillText('torque', PIVOT_X, bY + 46);
+
+  // the LEVEL indicator at the null
+  if (level) {
+    ctx.fillStyle = mark; ctx.font = '30px "Courier New", monospace'; ctx.textAlign = 'center';
+    ctx.fillText('— LEVEL —', PIVOT_X, PIVOT_Y - 150);
+  } else {
+    ctx.fillStyle = faint; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+    ctx.fillText(netTorque() > 0 ? 'left heavy — slide the counterpoise out'
+                                 : 'right heavy — slide the counterpoise in',
+                 PIVOT_X, PIVOT_Y - 150);
+  }
+
+  // a quiet label
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('steelyard — weigh by torque at the null', PAD + 6, 40);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+}
+
+// --- regime read: level vs which way it tips ----------------------------
+function regimeOf() {
+  if (isLevel()) return 'level — torques equal, the counterpoise reads the mass';
+  return netTorque() > 0 ? 'left heavy — counterpoise torque too small'
+                         : 'right heavy — counterpoise torque too large';
+}
+
+function updateReadout() {
+  const tL = tqLeft(), tR = tqRight();
+  const rm = readMass();
+  const balLine = isLevel()
+    ? '<span id="regime">LEVEL: m = ' + rm.toFixed(2) + '  (= m2·d2/d1)</span>'
+    : '<span id="regime">' + regimeOf() + '</span>';
+
+  readout.innerHTML =
+    'unknown m <b>' + m1.toFixed(2) + '</b> at d <b>' + (D1 / 100).toFixed(2) + '</b>'
+    + ' &nbsp;·&nbsp; counterpoise <b>' + M2.toFixed(0) + '</b> at d <b>' + d2.toFixed(2) + '</b>'
+    + '<br>torque left m·d <b>' + tL.toFixed(0) + '</b> &nbsp;·&nbsp; '
+    + 'torque right m·d <b>' + tR.toFixed(0) + '</b> &nbsp;·&nbsp; '
+    + 'net <b>' + netTorque().toFixed(0) + '</b>'
+    + '<br>read mass = m2·(d2/d1) <b>' + rm.toFixed(2) + '</b>'
+    + '<br>' + balLine;
+}
+
+function refresh() {
+  massV.textContent = m1.toFixed(2);
+  posV.textContent = d2.toFixed(2);
+  updateReadout();
+}
+
+// slider changes take effect live — the beam re-settles toward the new null.
+massEl.oninput = () => { m1 = massEl.value / 100; refresh(); };
+posEl.oninput = () => { d2 = posEl.value / 100; refresh(); };
+
+// reset — knobs back to a known start, beam swung to rest.
+bReset.onclick = () => {
+  massEl.value = 180; posEl.value = 300;
+  m1 = 1.80; d2 = 3.00;
+  tilt = 0; tiltVel = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: small fixed sub-steps for a stable settle ------------
+let last = performance.now();
+function frame(now) {
+  let elapsed = (now - last) / 1000;
+  last = now;
+  if (elapsed > 0.25) elapsed = 0.25;
+  const SLICE = 0.005;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

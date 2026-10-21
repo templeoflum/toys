@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the bandit</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3.4rem; }
+  input[type=range] { accent-color: var(--ink); width: min(320px, 62vw); }
+  .modes { display: flex; gap: .4rem; flex-wrap: wrap; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  .modes button:hover { border-color: var(--mark); color: var(--mark); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #verdict { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the bandit</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">strategy</span>
+      <span class="modes">
+        <button id="bGreedy">greedy</button>
+        <button id="bEps">&epsilon;-greedy</button>
+        <button id="bManual">you pull</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&epsilon; explore</span><input type="range" id="eps" min="0" max="100" value="10" step="1"><span class="val" id="epsV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bStep">step</button>
+        <button id="bRun">run 100</button>
+        <button id="bReveal">reveal p</button>
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1040"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a row of <b>levers</b>, each with a <b>hidden</b> payoff chance p&mdash;pull one and it pays <b>1</b> with probability p, else <b>0</b>. you only see the <b>observed</b> rate (wins&nbsp;&divide;&nbsp;pulls), never the true p. so every pull is a bet two ways at once: <b>exploit</b> the lever that looks best so far, or <b>explore</b> an uncertain one to learn its real rate. <b>greedy</b> always pulls the current best&mdash;and can lock onto a lever that got lucky early, never trying the truly better one it under-sampled. <b>&epsilon;-greedy</b> pulls a random lever a fraction &epsilon; of the time; those explore-pulls cost reward now but find the best lever. <b>regret</b> is what that best lever <i>would</i> have paid minus what you actually earned&mdash;it only grows.<span class="cite">the multi-armed bandit &middot; explore vs exploit &middot; &epsilon;-greedy (Watkins 1989; Sutton &amp; Barto) &middot; regret = &Sigma;(p* &minus; p<sub>chosen</sub>) &middot; field: reinforcement learning / cognitive search</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the multi-armed bandit --------------------------------------------
+// K levers. lever i has a HIDDEN true payoff probability p[i], fixed at
+// reset. pulling lever i draws a Bernoulli reward:  reward = rand() < p[i].
+// the operator never sees p[i] until "reveal"; they see only the OBSERVED
+// mean  r[i] = wins[i] / pulls[i]  (0 when unpulled), which converges to
+// p[i] as pulls[i] grows.
+//
+// VERIFY (load-bearing):
+//   · reward model:  pull(i) yields 1 with prob p[i], else 0            (Bernoulli)
+//   · epsilon-greedy: with prob ε pull a UNIFORM random lever (explore),
+//     else pull argmax_i r[i] (exploit). greedy is ε = 0.
+//   · regret is EXPECTED regret against the true best lever:
+//       regret = Σ_t ( p*  −  p[chosen_t] ),   p* = max_i p[i].
+//     it is monotone non-decreasing (each term ≥ 0), zero only when every
+//     pull lands on a lever tied with p*. actual cumulative reward is the
+//     realised sum of Bernoulli draws (noisy); regret uses the true p so
+//     it reads the strategy's quality, not the coin's luck.
+//   · greedy-lock is REACHABLE: with all r[i]=0 at start greedy pulls
+//     lever 0; if it wins, r[0]>0 forever beats the still-unpulled 0s, so
+//     greedy can ride an early-lucky lever and never sample the true best.
+//
+// RNG: mulberry32, a small seedable PRNG. seeded from the reset seed and
+// advanced once per pull — randomness varies by PULL INDEX, never by the
+// wall clock. same seed + same clicks → same run (reproducible).
+
+const K = 5;                    // number of levers
+const NAMES = ['A', 'B', 'C', 'D', 'E'];
+
+// mulberry32: deterministic, seedable. one uint32 of state, one draw per call.
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// live state, all reset together
+let seed;          // the reset seed — bumped each reset so hidden p redraw
+let rng;           // the pull-stream RNG (advanced once per pull)
+let p;             // hidden true payoff prob per lever
+let pulls;         // pulls[i] — times lever i pulled
+let wins;          // wins[i]  — times it paid 1
+let totalPulls;    // global pull count
+let totalReward;   // global cumulative realised reward (sum of draws)
+let regret;        // cumulative EXPECTED regret  Σ (p* − p[chosen])
+let bestP;         // p* = max true p
+let lastPull;      // index of the last lever pulled (−1 = none)
+let lastReward;    // its realised reward (0/1), for the flash
+let lastKind;      // 'exploit' | 'explore' | 'manual', for the flash
+let revealed;      // show true p under each lever
+
+let mode = 'greedy';   // 'greedy' | 'eps' | 'manual'
+let eps = 0.10;        // explore fraction for ε-greedy
+
+// draw the hidden payoffs from the seed. spread across [0.1, 0.9] so a true
+// best exists and greedy has something to miss. deterministic from the seed.
+function drawPayoffs() {
+  const r = mulberry32(seed ^ 0x9E3779B9);
+  p = [];
+  for (let i = 0; i < K; i++) p.push(0.10 + 0.80 * r());
+  bestP = Math.max.apply(null, p);
+}
+
+function reset() {
+  // bump the seed each reset so the hidden payoffs actually re-randomize
+  seed = (seed == null ? 0x1234567 : (seed + 0x1111)) | 0;
+  drawPayoffs();
+  rng = mulberry32(seed);
+  pulls = new Array(K).fill(0);
+  wins = new Array(K).fill(0);
+  totalPulls = 0; totalReward = 0; regret = 0;
+  lastPull = -1; lastReward = 0; lastKind = ''; revealed = false;
+}
+
+// observed mean for lever i — 0 when unpulled (this zero is WHY greedy can
+// starve an untried lever: an unpulled lever looks no better than a losing one).
+function mean(i) { return pulls[i] > 0 ? wins[i] / pulls[i] : 0; }
+
+// argmax over observed means; ties broken to the LOWEST index (stable, so
+// the lock-on story is deterministic, not luck-of-the-tiebreak).
+function bestObserved() {
+  let bi = 0, bm = mean(0);
+  for (let i = 1; i < K; i++) { const m = mean(i); if (m > bm) { bm = m; bi = i; } }
+  return bi;
+}
+
+// pull lever i: draw its Bernoulli reward, fold into the tallies + regret.
+function pull(i, kind) {
+  const reward = rng() < p[i] ? 1 : 0;
+  pulls[i]++; if (reward) wins[i]++;
+  totalPulls++; totalReward += reward;
+  regret += (bestP - p[i]);          // expected regret against the true best
+  lastPull = i; lastReward = reward; lastKind = kind;
+}
+
+// one strategy step. greedy: exploit. ε-greedy: explore with prob ε (draw
+// from the SAME pull-stream rng so it stays reproducible), else exploit.
+function stepStrategy() {
+  if (mode === 'manual') return;      // manual waits for a lever click
+  if (mode === 'eps' && rng() < eps) {
+    const j = Math.floor(rng() * K);  // uniform random lever — the explore pull
+    pull(j, 'explore');
+  } else {
+    pull(bestObserved(), 'exploit');
+  }
+}
+
+// ------------------------------------------------------------------------
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+const epsEl = document.getElementById('eps'), epsV = document.getElementById('epsV');
+const bGreedy = document.getElementById('bGreedy');
+const bEps = document.getElementById('bEps');
+const bManual = document.getElementById('bManual');
+const bStep = document.getElementById('bStep');
+const bRun = document.getElementById('bRun');
+const bReveal = document.getElementById('bReveal');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+const W = cv.width, H = cv.height;
+
+// --- layout: a row of K levers, each a labelled bar of its OBSERVED rate,
+// with pull count under it; true p shown as a faint ghost tick only when
+// revealed. below the row, a regret line grows.
+const PAD = 60;
+const ROW_TOP = 70, ROW_H = 560;      // the lever row band
+const BAR_MAXH = 420;                 // full-height bar = observed rate 1.0
+
+// hit-boxes for manual clicks, filled during draw
+let levers = [];
+
+function drawLevers() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+  const gap = 40;
+  const slotW = (W - 2 * PAD - (K - 1) * gap) / K;
+  const baseY = ROW_TOP + BAR_MAXH + 40;   // the floor the bars stand on
+  levers = [];
+
+  // the best OBSERVED lever right now — greedy would pull this one next
+  const bo = totalPulls > 0 ? bestObserved() : -1;
+
+  for (let i = 0; i < K; i++) {
+    const x = PAD + i * (slotW + gap);
+    const m = mean(i);
+    const barH = m * BAR_MAXH;
+    const top = baseY - barH;
+    levers.push({ x, y: ROW_TOP, w: slotW, h: baseY - ROW_TOP + 90, i });
+
+    // slot outline — the full possible height (rate 0..1)
+    ctx.strokeStyle = faint; ctx.lineWidth = 1;
+    ctx.strokeRect(x, baseY - BAR_MAXH, slotW, BAR_MAXH);
+
+    // observed-rate bar
+    ctx.fillStyle = i === lastPull ? mark : (i === bo ? pick : shade);
+    ctx.fillRect(x, top, slotW, barH);
+    ctx.strokeStyle = faint; ctx.lineWidth = 1;
+    if (barH > 0) ctx.strokeRect(x, top, slotW, barH);
+
+    // the true-p ghost tick — a dashed line across the slot, only if revealed
+    if (revealed) {
+      const py = baseY - p[i] * BAR_MAXH;
+      ctx.strokeStyle = mark; ctx.lineWidth = 2; ctx.setLineDash([6, 6]);
+      ctx.beginPath(); ctx.moveTo(x - 6, py); ctx.lineTo(x + slotW + 6, py); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = mark; ctx.font = '19px "Courier New", monospace'; ctx.textAlign = 'left';
+      ctx.fillText('p ' + p[i].toFixed(2), x + slotW + 10, py + 6);
+    }
+
+    // lever name + a small "handle" glyph on top
+    ctx.fillStyle = ink; ctx.font = '34px Georgia'; ctx.textAlign = 'center';
+    ctx.fillText(NAMES[i], x + slotW / 2, baseY - BAR_MAXH - 22);
+
+    // observed rate + pull count under the bar
+    ctx.font = '22px "Courier New", monospace';
+    ctx.fillStyle = pulls[i] > 0 ? ink : faint;
+    ctx.fillText(pulls[i] > 0 ? m.toFixed(2) : '—', x + slotW / 2, baseY + 34);
+    ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+    ctx.fillText('n ' + pulls[i], x + slotW / 2, baseY + 62);
+
+    // mark the lever greedy would take next
+    if (i === bo) {
+      ctx.fillStyle = mark; ctx.font = '17px "Courier New", monospace';
+      ctx.fillText('best seen', x + slotW / 2, baseY + 88);
+    }
+  }
+
+  // floor line
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(PAD - 10, baseY); ctx.lineTo(W - PAD + 10, baseY); ctx.stroke();
+
+  // axis note: bar height = observed rate
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('bar = observed win rate (0 at floor, 1 at top)', PAD, ROW_TOP - 24);
+  ctx.textAlign = 'right';
+  ctx.fillText(mode === 'manual' ? 'click a lever to pull' : 'strategy chooses the lever',
+               W - PAD, ROW_TOP - 24);
+}
+
+// --- the last-pull flash + the running regret, drawn as a caption band ---
+function drawTally() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+  const y = ROW_TOP + BAR_MAXH + 190;
+
+  ctx.textAlign = 'left'; ctx.font = '22px "Courier New", monospace';
+  if (lastPull >= 0) {
+    ctx.fillStyle = faint;
+    ctx.fillText('last pull:', PAD, y);
+    ctx.fillStyle = mark;
+    const tag = lastKind === 'explore' ? '(explore)'
+              : lastKind === 'exploit' ? '(exploit)' : '(you)';
+    ctx.fillText(NAMES[lastPull] + '  →  ' + (lastReward ? 'paid 1' : 'paid 0') + '  ' + tag,
+                 PAD + 130, y);
+  } else {
+    ctx.fillStyle = faint;
+    ctx.fillText('no pulls yet — step, run, or pull a lever', PAD, y);
+  }
+
+  // the regret bar — a thin growing strip. we normalize its width against a
+  // reference (regret per pull ≤ (p* − p_min)); it can only grow.
+  const by = y + 44, bw = W - 2 * PAD, bh = 26;
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.strokeRect(PAD, by, bw, bh);
+  const worst = totalPulls * (bestP - Math.min.apply(null, p)) || 1;  // worst-case regret so far
+  const frac = Math.min(1, regret / worst);
+  ctx.fillStyle = mark; ctx.fillRect(PAD, by, bw * frac, bh);
+  ctx.fillStyle = ink; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('regret Σ(p* − p_chosen) = ' + regret.toFixed(2)
+    + '   (of worst-case ' + worst.toFixed(2) + ')', PAD, by + bh + 24);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawLevers();
+  drawTally();
+}
+
+// ------------------------------------------------------------------------
+function updateReadout() {
+  const bo = totalPulls > 0 ? bestObserved() : -1;
+  // the strategy's realised average reward per pull
+  const avg = totalPulls > 0 ? totalReward / totalPulls : 0;
+  let line3;
+  if (!revealed) {
+    line3 = 'true p hidden — reveal to see which lever greedy missed';
+  } else {
+    let bi = 0; for (let i = 1; i < K; i++) if (p[i] > p[bi]) bi = i;
+    const locked = bo >= 0 && bo !== bi && pulls[bi] < 3;
+    line3 = 'true best is <b>' + NAMES[bi] + '</b> (p ' + bestP.toFixed(2) + ')'
+      + (bo >= 0 ? ' &nbsp;·&nbsp; strategy favours <b>' + NAMES[bo] + '</b>' : '')
+      + (locked ? ' &nbsp;·&nbsp; <span id="verdict">locked on the wrong lever — best under-sampled</span>' : '');
+  }
+
+  readout.innerHTML =
+    'strategy <b>' + (mode === 'greedy' ? 'greedy' : mode === 'eps' ? 'ε-greedy (ε ' + eps.toFixed(2) + ')' : 'you pull') + '</b>'
+    + ' &nbsp;·&nbsp; pulls <b>' + totalPulls + '</b>'
+    + ' &nbsp;·&nbsp; reward <b>' + totalReward + '</b> (avg ' + avg.toFixed(3) + '/pull)'
+    + '<br>cumulative regret <b>' + regret.toFixed(2) + '</b>'
+    + ' &nbsp;·&nbsp; exploit takes the best-seen lever, explore gambles on an uncertain one'
+    + '<br>' + line3;
+}
+
+function refresh() { draw(); updateReadout(); }
+
+// --- controls -----------------------------------------------------------
+function setMode(m) {
+  mode = m;
+  bGreedy.classList.toggle('on', m === 'greedy');
+  bEps.classList.toggle('on', m === 'eps');
+  bManual.classList.toggle('on', m === 'manual');
+  // greedy is ε-greedy with ε pinned to 0; the slider only bites in ε mode
+  epsEl.disabled = (m !== 'eps');
+  epsEl.style.opacity = (m === 'eps') ? '1' : '0.4';
+  refresh();
+}
+bGreedy.onclick = () => setMode('greedy');
+bEps.onclick = () => setMode('eps');
+bManual.onclick = () => setMode('manual');
+
+epsEl.oninput = () => { eps = epsEl.value / 100; epsV.textContent = eps.toFixed(2); refresh(); };
+
+// step / run only drive the two automatic strategies; manual ignores them
+bStep.onclick = () => { if (mode !== 'manual') { stepStrategy(); refresh(); } };
+bRun.onclick = () => {
+  if (mode === 'manual') return;
+  for (let k = 0; k < 100; k++) stepStrategy();
+  refresh();
+};
+
+bReveal.onclick = () => { revealed = !revealed; bReveal.classList.toggle('on', revealed); refresh(); };
+
+bReset.onclick = () => {
+  reset();
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// manual pulls — click a lever bar
+cv.addEventListener('click', (e) => {
+  if (mode !== 'manual') return;
+  const rect = cv.getBoundingClientRect();
+  const sx = cv.width / rect.width, sy = cv.height / rect.height;
+  const mx = (e.clientX - rect.left) * sx, my = (e.clientY - rect.top) * sy;
+  for (const L of levers) {
+    if (mx >= L.x && mx <= L.x + L.w && my >= L.y && my <= L.y + L.h) {
+      pull(L.i, 'manual'); refresh(); break;
+    }
+  }
+});
+
+// --- boot ---------------------------------------------------------------
+reset();
+epsV.textContent = eps.toFixed(2);
+setMode('greedy');
+refresh();
+</script>
+</body>
+</html>

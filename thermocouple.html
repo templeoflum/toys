@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>thermocouple</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>thermocouple</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">hot T_h</span><input type="range" id="th" min="-50" max="1000" value="300" step="1"><span class="val" id="thV"></span></div>
+    <div class="row"><span class="name">cold T_c</span><input type="range" id="tc" min="-50" max="1000" value="25" step="1"><span class="val" id="tcV"></span></div>
+    <div class="row"><span class="name">couple</span>
+      <span class="modes">
+        <button id="bK">type K</button>
+        <button id="bJ">type J</button>
+        <button id="bT">type T</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two <b>dissimilar metals</b> joined at a <b>hot junction</b>; their free ends meet again at a <b>cold (reference) junction</b>. the Seebeck effect makes each metal carry a voltage per degree, and the two differ &mdash; so the pair produces an <b>EMF from the temperature difference</b>: <b>V = S&middot;(T_h &minus; T_c)</b>. it reads the <b>difference</b>, not the absolute heat &mdash; when the two junctions sit at the same temperature the voltage is <b>zero</b>, however hot they both are. a different couple gives a steeper or shallower volts-per-degree.<span class="cite">the thermocouple &middot; Thomas Seebeck 1821 &middot; V = S&middot;&Delta;T, EMF from a temperature difference &middot; field: thermoelectricity</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the thermocouple ----------------------------------------------------
+// two dissimilar metals joined at a HOT junction; their other ends form the
+// COLD (reference) junction. by the Seebeck effect each metal builds a small
+// voltage along a temperature gradient, and because the two metals have
+// different Seebeck coefficients the loop produces a net EMF set ONLY by the
+// temperature DIFFERENCE between the two junctions:
+//   V = S · (T_h − T_c)        S = the pair's Seebeck coefficient (µV per °C)
+// S here is the differential coefficient of the metal PAIR, not one metal.
+// the EMF is EXACTLY linear in ΔT (a real couple is mildly non-linear over a
+// wide span; we hold the ideal linear law — that is the mechanism being shown).
+// VERIFY (load-bearing): V = S·(T_h − T_c) exactly, with S in µV/°C.
+//   · type K, T_h = 300, T_c = 25 → ΔT = 275 °C → V = 41·275 = 11275 µV = 11.275 mV
+//   · T_h = T_c → ΔT = 0 → V = 0  (the null — difference, not absolute heat)
+//   · reverse the sign of ΔT → reverse the sign of V
+// UNITS ARE LOAD-BEARING: S is µV/°C. V(µV) = S·ΔT; V(mV) = V(µV)/1000.
+// a µV/mV slip here is a 1000× misread.
+const COUPLES = {
+  K: { S: 41, label: 'type K', a: 'chromel', b: 'alumel',      // ~41 µV/°C
+       colA: '#b8603a', colB: '#6d6653' },
+  J: { S: 51, label: 'type J', a: 'iron',    b: 'constantan',  // ~51 µV/°C
+       colA: '#8a5a2b', colB: '#5a6b6d' },
+  T: { S: 43, label: 'type T', a: 'copper',  b: 'constantan',  // ~43 µV/°C
+       colA: '#a5623a', colB: '#5a6b6d' },
+};
+
+let Th = 300;          // hot-junction temperature (°C)
+let Tc = 25;           // cold / reference junction temperature (°C)
+let couple = 'K';      // 'K' | 'J' | 'T' — sets the Seebeck coefficient S
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const thEl = document.getElementById('th'), thV = document.getElementById('thV');
+const tcEl = document.getElementById('tc'), tcV = document.getElementById('tcV');
+const readout = document.getElementById('readout').firstElementChild;
+const bK = document.getElementById('bK');
+const bJ = document.getElementById('bJ');
+const bT = document.getElementById('bT');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the exact model ------------------------------------------------------
+// S in µV/°C for the live couple.
+function seebeck() { return COUPLES[couple].S; }
+// the temperature difference — hot minus cold. this is what drives the EMF.
+function deltaT() { return Th - Tc; }
+// the EMF in microvolts: V = S · ΔT. this is the invariant.
+function emfMicro() { return seebeck() * deltaT(); }        // µV
+function emfMilli() { return emfMicro() / 1000; }           // mV
+
+// --- animated approach so a slider move visibly heats/cools --------------
+// the shown junction temperatures ease toward the slider targets; the drawn
+// glow and needle track the eased values, but the readout numbers are the
+// exact invariant from the true Th, Tc.
+let shownTh = Th, shownTc = Tc;
+let last = performance.now();
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// left: the two-metal loop — hot junction (left tip) and cold junction band,
+// the two coloured wires running between. right: a centre-zero galvanometer
+// dial the EMF deflects, so the null at ΔT = 0 is visible on the needle.
+const HOT_X = Math.round(W * 0.16);   // hot junction apex
+const MID_Y = Math.round(H * 0.44);
+const COLD_X = Math.round(W * 0.50);  // cold / reference junction
+
+// map a temperature (°C) to a warm fill fraction for the glow (−50..1000)
+function warmOf(t) { return Math.max(0, Math.min(1, (t + 50) / 1050)); }
+
+// --- the two-metal junction loop ----------------------------------------
+// wire A (top) and wire B (bottom) meet at the hot junction on the left and
+// again at the cold junction on the right. the hot end glows with shownTh, the
+// cold band with shownTc. the two wire colours read "dissimilar metals".
+function drawLoop() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+  const C = COUPLES[couple];
+
+  const spread = 150;                 // vertical gap of the two wires at cold end
+  const topY = MID_Y - spread, botY = MID_Y + spread;
+
+  // the hot junction — the two wires converge to a welded bead on the left.
+  // wire A (top)
+  ctx.lineWidth = 12; ctx.lineCap = 'round';
+  ctx.strokeStyle = C.colA;
+  ctx.beginPath();
+  ctx.moveTo(HOT_X, MID_Y);
+  ctx.lineTo(COLD_X - 40, topY);
+  ctx.stroke();
+  // wire B (bottom)
+  ctx.strokeStyle = C.colB;
+  ctx.beginPath();
+  ctx.moveTo(HOT_X, MID_Y);
+  ctx.lineTo(COLD_X - 40, botY);
+  ctx.stroke();
+
+  // hot-junction glow bead — warms from paper toward --mark with shownTh
+  const wh = warmOf(shownTh);
+  const grad = ctx.createRadialGradient(HOT_X, MID_Y, 4, HOT_X, MID_Y, 90);
+  grad.addColorStop(0, mark);
+  grad.addColorStop(1, css('--paper'));
+  ctx.globalAlpha = 0.25 + wh * 0.75;
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(HOT_X, MID_Y, 90, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(HOT_X, MID_Y, 14, 0, TAU); ctx.fill();
+  ctx.fillStyle = ink; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('hot junction', HOT_X, MID_Y + 130);
+  ctx.fillStyle = mark;
+  ctx.fillText('T_h = ' + Th.toFixed(0) + ' °C', HOT_X, MID_Y + 160);
+
+  // the cold / reference junction — the two wires terminate on a reference
+  // block held at shownTc. a cool --shade band; its temperature is the
+  // reference the EMF is measured against.
+  const wc = warmOf(shownTc);
+  ctx.fillStyle = shade;
+  ctx.fillRect(COLD_X - 40, topY - 26, 80, (botY - topY) + 52);
+  ctx.globalAlpha = 0.15 + wc * 0.7;
+  ctx.fillStyle = mark;
+  ctx.fillRect(COLD_X - 40, topY - 26, 80, (botY - topY) + 52);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.strokeRect(COLD_X - 40, topY - 26, 80, (botY - topY) + 52);
+  ctx.fillStyle = ink; ctx.textAlign = 'center';
+  ctx.fillText('cold junction', COLD_X, botY + 60);
+  ctx.fillStyle = mark;
+  ctx.fillText('T_c = ' + Tc.toFixed(0) + ' °C', COLD_X, botY + 90);
+
+  // metal labels along the two wires
+  ctx.font = '20px "Courier New", monospace';
+  ctx.fillStyle = C.colA; ctx.textAlign = 'left';
+  ctx.fillText(C.a, HOT_X + 120, topY + (MID_Y - topY) * 0.5 - 10);
+  ctx.fillStyle = C.colB;
+  ctx.fillText(C.b, HOT_X + 120, botY - (botY - MID_Y) * 0.5 + 26);
+
+  // the leads out of the cold block to the meter (top and bottom), meeting at
+  // the dial. the EMF appears across these leads.
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(COLD_X + 40, topY); ctx.lineTo(COLD_X + 260, topY);
+  ctx.moveTo(COLD_X + 40, botY); ctx.lineTo(COLD_X + 260, botY);
+  ctx.stroke();
+
+  // couple + coefficient label, quiet, top-left
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('couple: ' + C.label + '  (' + C.a + ' / ' + C.b + ',  S = ' + C.S + ' µV/°C)',
+               PAD + 6, 40);
+
+  return { meterTop: { x: COLD_X + 260, y: topY }, meterBot: { x: COLD_X + 260, y: botY } };
+}
+
+// --- the EMF meter: a centre-zero needle deflected by V ------------------
+// a small galvanometer across the leads. the needle deflects by an angle
+// proportional to V, centred so ΔT = 0 → V = 0 → needle at rest (the null).
+// clamped to the scale edge (cosmetic); the readout V is always the exact
+// invariant.
+const V_FULL = 40000;   // µV at full-scale deflection (the drawn clamp only)
+const NEEDLE_MAX = 50 * Math.PI / 180;
+function drawMeter(leads) {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+  const px = Math.round(W * 0.78);
+  const py = MID_Y + 40;
+  const R = 300;
+
+  // the two leads run into the meter body
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(leads.meterTop.x, leads.meterTop.y); ctx.lineTo(px - 120, py - 120);
+  ctx.moveTo(leads.meterBot.x, leads.meterBot.y); ctx.lineTo(px - 120, py + 120);
+  ctx.stroke();
+
+  // the dial arc, centre-zero (0 straight up, ± either side)
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(px, py, R, -Math.PI / 2 - NEEDLE_MAX, -Math.PI / 2 + NEEDLE_MAX);
+  ctx.stroke();
+  // ticks
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  for (let deg = -50; deg <= 50; deg += 10) {
+    const a = -Math.PI / 2 + deg * Math.PI / 180;
+    const major = (deg % 50 === 0) || deg === 0;
+    const r0 = R - (major ? 26 : 14);
+    ctx.strokeStyle = faint; ctx.lineWidth = major ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(px + r0 * Math.cos(a), py + r0 * Math.sin(a));
+    ctx.lineTo(px + R * Math.cos(a), py + R * Math.sin(a));
+    ctx.stroke();
+  }
+  ctx.textAlign = 'center'; ctx.fillStyle = faint;
+  ctx.fillText('0', px, py - R - 16);
+  ctx.textAlign = 'left';
+  ctx.fillText('+', px + (R + 20) * Math.cos(-Math.PI / 2 + NEEDLE_MAX), py + (R + 20) * Math.sin(-Math.PI / 2 + NEEDLE_MAX) + 6);
+  ctx.textAlign = 'right';
+  ctx.fillText('−', px + (R + 20) * Math.cos(-Math.PI / 2 - NEEDLE_MAX), py + (R + 20) * Math.sin(-Math.PI / 2 - NEEDLE_MAX) + 6);
+
+  // the needle — deflection proportional to V (from the eased Th/Tc so the
+  // picture tracks the heating, but the null at ΔT = 0 is exact).
+  const vShown = seebeck() * (shownTh - shownTc);          // µV, eased
+  const frac = Math.max(-1, Math.min(1, vShown / V_FULL));
+  const clamped = Math.abs(vShown) > V_FULL + 1e-9;
+  const a = -Math.PI / 2 + frac * NEEDLE_MAX;
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + R * Math.cos(a), py + R * Math.sin(a)); ctx.stroke();
+  // hub + counter-tail
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px - 40 * Math.cos(a), py - 40 * Math.sin(a)); ctx.stroke();
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(px, py, 12, 0, TAU); ctx.fill();
+
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('EMF ∝ (T_h − T_c)' + (clamped ? '  (off scale)' : ''), px, py + 46);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const leads = drawLoop();
+  drawMeter(leads);
+}
+
+// --- regime read: which way, or null ------------------------------------
+function regimeOf() {
+  const dT = deltaT();
+  if (dT === 0) return 'null — the junctions sit at the same temperature, V = 0 (difference, not absolute heat)';
+  return dT > 0
+    ? 'hot above cold — positive EMF, V rises with the difference'
+    : 'cold above hot — the difference reverses, and so does the EMF';
+}
+
+function updateReadout() {
+  const S = seebeck();
+  const dT = deltaT();
+  const uV = emfMicro();          // V = S·ΔT (µV) — the invariant
+  const mV = emfMilli();
+  readout.innerHTML =
+    'hot T_h <b>' + Th.toFixed(0) + ' °C</b> &nbsp;·&nbsp; '
+    + 'cold T_c <b>' + Tc.toFixed(0) + ' °C</b> &nbsp;·&nbsp; '
+    + 'ΔT = T_h − T_c <b>' + dT.toFixed(0) + ' °C</b>'
+    + '<br>couple <b>' + COUPLES[couple].label + '</b> &nbsp;·&nbsp; '
+    + 'Seebeck S <b>' + S + ' µV/°C</b>'
+    + '<br>V = S·ΔT = ' + S + '·(' + Th.toFixed(0) + ' − ' + Tc.toFixed(0) + ') = '
+    + '<b>' + uV.toFixed(0) + ' µV</b> = <b>' + mV.toFixed(3) + ' mV</b>'
+    + '<br>reads the difference, not the absolute heat &nbsp;·&nbsp; T_h = T_c → V = 0'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  thV.textContent = Th.toFixed(0);
+  tcV.textContent = Tc.toFixed(0);
+  updateReadout();
+}
+
+// slider changes take effect live — the junction temperatures jump and the
+// drawn glow/needle ease toward them; the readout V is always the exact
+// V = S·ΔT from the true Th, Tc.
+thEl.oninput = () => { Th = +thEl.value; refresh(); };
+tcEl.oninput = () => { Tc = +tcEl.value; refresh(); };
+
+function setCouple(c) {
+  couple = c;
+  bK.classList.toggle('on', c === 'K');
+  bJ.classList.toggle('on', c === 'J');
+  bT.classList.toggle('on', c === 'T');
+  refresh();
+}
+bK.onclick = () => setCouple('K');
+bJ.onclick = () => setCouple('J');
+bT.onclick = () => setCouple('T');
+
+// reset — hot back to 300 °C, cold to a 25 °C reference, type K.
+bReset.onclick = () => {
+  Th = 300; Tc = 25; couple = 'K';
+  thEl.value = 300; tcEl.value = 25;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  setCouple('K');
+};
+
+// --- the live loop: ease the shown junction temperatures toward target ---
+// shownTh/shownTc relax toward the true Th/Tc so a slider move shows the
+// junction heating or cooling. the readout always reports the exact invariant
+// V = S·(T_h − T_c) from the true temperatures, not the eased draw values.
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;
+  shownTh += (Th - shownTh) * Math.min(1, dt * 5);
+  shownTc += (Tc - shownTc) * Math.min(1, dt * 5);
+  if (Math.abs(Th - shownTh) < 0.5) shownTh = Th;
+  if (Math.abs(Tc - shownTc) < 0.5) shownTc = Tc;
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+setCouple('K');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

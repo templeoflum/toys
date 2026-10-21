@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the jam</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the jam</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">density &rho;</span><input type="range" id="dens" min="2" max="60" value="18" step="1"><span class="val" id="densV"></span></div>
+    <div class="row"><span class="name">dawdle p</span><input type="range" id="dawd" min="0" max="50" value="25" step="1"><span class="val" id="dawdV"></span></div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">raise the density and a traffic jam forms with no crash and no bottleneck &mdash; just cars, delay, and density; the jam then rolls <b>backward</b> against the traffic. at low density it flows free; cross the critical density and uniform flow breaks down into stop-and-go from nothing.<span class="cite">phantom traffic jam &middot; Nagel&ndash;Schreckenberg 1992 &middot; Sugiyama et al. 2008 (22 cars, a ring, a jam from nothing)</span></div>
+
+<script>
+'use strict';
+
+// --- the Nagel–Schreckenberg model on a ring ----------------------------
+const L = 260;      // number of cells on the one-lane loop
+const VMAX = 5;     // top speed in cells per step
+
+// the two knobs. density is a fraction of cells occupied; p is the dawdle
+// (random-slowdown) probability that seeds the instability.
+let rho = 0.18;     // above critical → a jam forms from an even start
+let p = 0.25;       // dawdle probability
+
+// car state: parallel arrays, index = car id, kept sorted by position ahead.
+// pos[i] in 0..L-1, spd[i] in 0..VMAX. we re-seed on density change.
+let pos = [];       // positions (ascending around the ring)
+let spd = [];       // speeds
+let carN = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const densEl = document.getElementById('dens'), densV = document.getElementById('densV');
+const dawdEl = document.getElementById('dawd'), dawdV = document.getElementById('dawdV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the loop strip. bottom band: the space-time raster.
+const STRIP_TOP = 60, STRIP_H = Math.round(H * 0.30);
+const DIAG_TOP = STRIP_TOP + STRIP_H + 90;
+const DIAG_H = H - DIAG_TOP - 40;
+
+// the road spans the same x-range in both bands so columns align exactly.
+const ROAD_LEFT = PAD;
+const ROAD_W = W - 2 * PAD;
+// map a cell index (0..L-1) to a pixel x on the road.
+function xOfCell(c) { return ROAD_LEFT + (c + 0.5) / L * ROAD_W; }
+
+// --- the space-time buffer ----------------------------------------------
+// a rolling buffer of the last DIAG_H rows. each row is a Uint8Array of L
+// occupancy flags (1 = a car sat in that cell that step). newest row at the
+// bottom. we redraw the whole band from this buffer each frame — no blitting.
+const rows = [];                       // array of Uint8Array(L), oldest first
+const MAX_ROWS = DIAG_H;
+
+function pushRow() {
+  const r = new Uint8Array(L);
+  for (let i = 0; i < carN; i++) r[pos[i]] = 1;
+  rows.push(r);
+  while (rows.length > MAX_ROWS) rows.shift();
+}
+
+// --- seeding -------------------------------------------------------------
+// place round(rho·L) cars at roughly even spacing, all at v = VMAX.
+// guard: at least 1 car, at most L-1 (leave one empty cell so gaps exist).
+function seed() {
+  let k = Math.round(rho * L);
+  if (k < 1) k = 1;
+  if (k > L - 1) k = L - 1;
+  pos = new Array(k);
+  spd = new Array(k);
+  for (let i = 0; i < k; i++) {
+    pos[i] = Math.floor(i * L / k);    // even spacing, ascending
+    spd[i] = VMAX;
+  }
+  carN = k;
+  rows.length = 0;                     // clearing the diagram on a re-seed
+}
+
+// --- one sim step: the four NaSch rules, PARALLEL update -----------------
+// cars are kept sorted ascending by position, so car i+1 is the one ahead
+// (car 0 is ahead of the last car, across the wrap). we read gaps from the
+// current snapshot (pos), compute every new speed, THEN move — so no car
+// sees another's already-moved position within the same step.
+function step() {
+  const newSpd = new Array(carN);
+  for (let i = 0; i < carN; i++) {
+    // 1. accelerate
+    let v = Math.min(spd[i] + 1, VMAX);
+    // 2. brake to the gap — empty cells to the next car ahead on the ring.
+    // with one car the "car ahead" is itself; the gap is the whole rest of
+    // the ring (L-1 empties), so it never brakes on itself.
+    const ahead = pos[(i + 1) % carN];
+    let gap = (ahead - pos[i] - 1 + L) % L;
+    if (carN === 1) gap = L - 1;
+    v = Math.min(v, gap);
+    // 3. dawdle — the instability seed
+    if (Math.random() < p) v = Math.max(v - 1, 0);
+    newSpd[i] = v;
+  }
+  // 4. move — apply all new speeds against the snapshot, then commit.
+  for (let i = 0; i < carN; i++) {
+    spd[i] = newSpd[i];
+    pos[i] = (pos[i] + spd[i]) % L;
+  }
+  // positions stay ordered: v <= gap means no car reaches the one ahead, so
+  // the ascending order (and the wrap) is preserved without a re-sort.
+  pushRow();
+}
+
+// --- top band: the loop strip -------------------------------------------
+function drawStrip() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  // the road as a horizontal strip that wraps left↔right
+  const roadY = STRIP_TOP + Math.round(STRIP_H * 0.5);
+  const carH = Math.round(STRIP_H * 0.5);
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(ROAD_LEFT, roadY - carH / 2, ROAD_W, carH);
+
+  ctx.fillStyle = faint; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('one-lane loop — wraps left↔right', ROAD_LEFT, STRIP_TOP - 16);
+
+  // each car as a small filled rect at its cell. moving (v≥3) → --ink,
+  // slow (0<v<3) → a mid tone, stopped (v=0) → --mark so jams glow.
+  const cellW = ROAD_W / L;
+  const rectW = Math.max(2, cellW * 0.8);
+  const slow = css('--pick');
+  for (let i = 0; i < carN; i++) {
+    const v = spd[i];
+    ctx.fillStyle = v >= 3 ? ink : (v > 0 ? slow : mark);
+    const x = xOfCell(pos[i]) - rectW / 2;
+    ctx.fillRect(x, roadY - carH / 2 + 2, rectW, carH - 4);
+  }
+}
+
+// --- bottom band: the space-time raster ---------------------------------
+// x = position (same mapping as the strip), y = time, newest row at the
+// bottom, older rows scrolling up and away. occupied cells → --ink marks,
+// empty cells → --paper. the jams show as dark bands slanting BACKWARD.
+function drawDiagram() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+  const paper = css('--paper');
+
+  // frame + labels
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(ROAD_LEFT, DIAG_TOP, ROAD_W, DIAG_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('space-time:  each row is one step, dark = a car', ROAD_LEFT + 6, DIAG_TOP - 40);
+  ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('position →', ROAD_LEFT + 4, DIAG_TOP - 16);
+  ctx.textAlign = 'right';
+  ctx.fillText('time ↓', ROAD_LEFT + ROAD_W - 4, DIAG_TOP - 16);
+  ctx.textAlign = 'left';
+
+  // clear the band to paper, then paint occupancy. newest row sits at the
+  // bottom edge; row j from the end is one pixel-row up.
+  ctx.fillStyle = paper;
+  ctx.fillRect(ROAD_LEFT + 1, DIAG_TOP + 1, ROAD_W - 2, DIAG_H - 2);
+
+  const cellW = ROAD_W / L;
+  const markW = Math.max(1, cellW);
+  ctx.fillStyle = ink;
+  const n = rows.length;
+  for (let j = 0; j < n; j++) {
+    // rows[n-1] is newest → bottom (y = DIAG_TOP + DIAG_H - 1)
+    const y = DIAG_TOP + DIAG_H - (n - j);
+    if (y < DIAG_TOP + 1) continue;
+    const r = rows[j];
+    for (let c = 0; c < L; c++) {
+      if (r[c]) {
+        const x = xOfCell(c) - markW / 2;
+        ctx.fillRect(x, y, markW, 1);
+      }
+    }
+  }
+
+  // a one-line caption near the diagram, in --mark
+  ctx.fillStyle = mark; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('jams drift backward — against the cars', ROAD_LEFT + 6, DIAG_TOP + DIAG_H + 26);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawStrip();
+  drawDiagram();
+}
+
+// --- live measures -------------------------------------------------------
+function meanSpeed() {
+  if (carN === 0) return NaN;
+  let s = 0;
+  for (let i = 0; i < carN; i++) s += spd[i];
+  return s / carN;
+}
+function stoppedFrac() {
+  if (carN === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < carN; i++) if (spd[i] === 0) s++;
+  return s / carN;
+}
+
+function updateReadout() {
+  if (carN === 0) {
+    readout.innerHTML =
+      'cars <b>0</b> &nbsp;·&nbsp; density ρ <b>—</b>'
+      + '<br>mean speed <b>—</b> &nbsp;·&nbsp; flow <b>—</b>'
+      + '<br><span id="regime">no cars</span>';
+    return;
+  }
+  const rhoLive = carN / L;
+  const ms = meanSpeed();
+  const flow = rhoLive * ms;            // throughput = density × mean speed
+  const stopped = stoppedFrac();
+
+  // honest, simple regime read: a sustained cluster shows as stopped cars or
+  // a mean speed that has collapsed below ~1.5 cells/step.
+  const jammed = stopped > 0.04 || ms < 1.5;
+  const regime = jammed
+    ? 'JAMMED — a cluster from nothing, drifting backward'
+    : 'free flow';
+
+  readout.innerHTML =
+    'cars <b>' + carN + '</b> &nbsp;·&nbsp; '
+    + 'density ρ <b>' + rhoLive.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'dawdle p <b>' + p.toFixed(2) + '</b>'
+    + '<br>mean speed <b>' + ms.toFixed(2) + '</b> cells/step'
+    + ' &nbsp;·&nbsp; flow = ρ·v <b>' + flow.toFixed(2) + '</b>'
+    + '<br><span id="regime">' + regime + '</span>';
+}
+
+function refresh() {
+  densV.textContent = rho.toFixed(2);
+  dawdV.textContent = p.toFixed(2);
+  updateReadout();
+}
+
+// density change re-seeds the cars and clears the diagram; p change just
+// clears the diagram (the instability is re-seeded from a clean raster).
+densEl.oninput = () => { rho = densEl.value / 100; seed(); refresh(); };
+dawdEl.oninput = () => { p = dawdEl.value / 100; rows.length = 0; refresh(); };
+
+// --- the live loop: fixed-substep accumulator ---------------------------
+// advance one sim STEP every STEP_INT seconds of real time, accumulating dt
+// so the cadence stays steady across framerates.
+const STEP_INT = 0.12;                  // seconds per sim step — watchable
+let last = performance.now();
+let acc = 0;
+let dirty = true;                       // redraw only when the scene changes
+
+function frame(now) {
+  let elapsed = (now - last) / 1000;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  acc += elapsed;
+  let stepped = false;
+  while (acc >= STEP_INT) {
+    step();
+    acc -= STEP_INT;
+    stepped = true;
+  }
+  // the scene only moves on a sim step (or a slider re-seed), so skip the
+  // heavy full-diagram repaint on the frames in between.
+  if (stepped || dirty) { draw(); updateReadout(); dirty = false; }
+  requestAnimationFrame(frame);
+}
+
+seed();
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

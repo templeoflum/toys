@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jastrow</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --bar: #6a7b73;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(620px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>jastrow</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">stack</span><input type="range" id="stack" min="0" max="100" value="100"><span class="val" id="stackV"></span></div>
+    <div class="row"><span class="name">trace</span><input type="range" id="trace" min="0" max="100" value="0"><span class="val" id="traceV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="560"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two curved bars are exactly the same shape and size. stacked, the lower one looks distinctly bigger &mdash; its short top edge sits under the long bottom edge of the one above, and the eye compares the touching edges, not the whole shapes. drop the <b>stack</b> to set them side by side and they match; or raise the <b>trace</b> to lay the same outline on both.</div>
+
+<script>
+'use strict';
+
+const R1 = 150, R2 = 208;               // inner (short) and outer (long) arc radii
+const A0 = 68 * Math.PI / 180, A1 = 112 * Math.PI / 180;
+const AX = 450, AY = 70;                // arc centre of the upper bar
+const NSAMP = 28;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const sEl = document.getElementById('stack'), sV = document.getElementById('stackV');
+const tEl = document.getElementById('trace'), tV = document.getElementById('traceV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let stack = 1;   // 1 => abutting (illusion); 0 => side by side (equal)
+let trace = 0;   // proof: the same outline on both
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// trace the bar polygon with arc centre at (cx, cy)
+function barPath(cx, cy) {
+  ctx.beginPath();
+  for (let i = 0; i <= NSAMP; i++) {           // outer arc, a0 -> a1
+    const a = A0 + (A1 - A0) * i / NSAMP;
+    const x = cx + R2 * Math.cos(a), y = cy + R2 * Math.sin(a);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  for (let i = NSAMP; i >= 0; i--) {           // inner arc, a1 -> a0
+    const a = A0 + (A1 - A0) * i / NSAMP;
+    ctx.lineTo(cx + R1 * Math.cos(a), cy + R1 * Math.sin(a));
+  }
+  ctx.closePath();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // upper bar fixed; lower bar moves from abutting (stack=1) to beside (stack=0)
+  const bx = AX + (1 - stack) * 250;
+  const by = AY + stack * (R2 - R1);
+  const A = { x: AX, y: AY }, B = { x: bx, y: by };
+
+  ctx.fillStyle = css('--bar');
+  barPath(A.x, A.y); ctx.fill();
+  barPath(B.x, B.y); ctx.fill();
+
+  if (trace > 0) {
+    ctx.save();
+    ctx.globalAlpha = trace;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2.5; ctx.setLineDash([7, 6]);
+    barPath(A.x, A.y); ctx.stroke();
+    barPath(B.x, B.y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = stack < 0.02
+    ? 'side by side &mdash; the two bars are plainly identical.'
+    : trace > 0.98
+      ? 'the same outline fits both &mdash; identical bars.'
+      : 'the lower bar looks bigger, but the two bars are the same shape and size.';
+}
+
+function refresh() {
+  sV.textContent = stack < 0.02 ? 'apart — they match' : stack > 0.98 ? 'stacked' : 'sliding';
+  tV.textContent = trace > 0.98 ? 'outline on both' : trace > 0 ? 'rising' : 'off';
+  draw();
+}
+
+sEl.oninput = () => { stack = +sEl.value / 100; refresh(); };
+tEl.oninput = () => { trace = +tEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

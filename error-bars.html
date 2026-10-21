@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>error bars</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #widen { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>error bars</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">a value</span><input type="range" id="a" min="0" max="40" value="12" step="0.1"><span class="val" id="aV"></span></div>
+    <div class="row"><span class="name">a &plusmn;</span><input type="range" id="ea" min="0" max="6" value="1.5" step="0.1"><span class="val" id="eaV"></span></div>
+    <div class="row"><span class="name">b value</span><input type="range" id="b" min="0" max="40" value="8" step="0.1"><span class="val" id="bV"></span></div>
+    <div class="row"><span class="name">b &plusmn;</span><input type="range" id="eb" min="0" max="6" value="0.8" step="0.1"><span class="val" id="ebV"></span></div>
+    <div class="row"><span class="name">c value</span><input type="range" id="c" min="0" max="40" value="15" step="0.1"><span class="val" id="cV"></span></div>
+    <div class="row"><span class="name">c &plusmn;</span><input type="range" id="ec" min="0" max="6" value="2.2" step="0.1"><span class="val" id="ecV"></span></div>
+    <div class="row"><span class="name">terms</span>
+      <span class="modes">
+        <button id="bT1">a</button>
+        <button id="bT2">a+b</button>
+        <button id="bT3">a+b+c</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">combine</span>
+      <span class="modes">
+        <button id="bSum">sum</button>
+        <button id="bProd">product</button>
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">each quantity is not one number but a <b>range</b> &mdash; a central value with an <b>uncertainty</b>, the interval [value &minus; e, value + e]. carry the ranges, not the midpoints, through the arithmetic. under a <b>sum</b> the endpoints add: [a,b] + [c,d] = [a+c, b+d], so the <b>half-widths add</b> and the result range only <b>widens</b> &mdash; adding never sharpens a measurement. under a <b>product</b> it is worse: the <b>relative</b> errors add, so a product's fractional uncertainty grows faster than either factor's.<span class="cite">interval arithmetic &middot; R.E. Moore 1966 &middot; sum half-width = &Sigma; half-widths &middot; field: interval arithmetic</span></div>
+
+<script>
+'use strict';
+
+// --- interval arithmetic ------------------------------------------------
+// a quantity carried as a RANGE, not a point: an interval [lo, hi] written
+// around a central value v with a half-width (uncertainty) e, so
+//   [lo, hi] = [v - e, v + e],   v = (lo+hi)/2,   e = (hi-lo)/2.
+// combine intervals endpoint-by-endpoint.
+//
+// SUM (exact):  [a,b] + [c,d] = [a+c, b+d].
+//   in centre/half-width form: (v1±e1) + (v2±e2) = (v1+v2) ± (e1+e2).
+//   the half-widths ADD. absolute uncertainty compounds under a sum and
+//   can only grow — adding a term never shrinks the range.
+//
+// PRODUCT (exact for positive intervals): with all endpoints > 0,
+//   [a,b]·[c,d] = [a·c, b·d]   (min = a·c, max = b·d when a,c ≥ 0).
+//   the RELATIVE half-width of the product is (e1/v1 + e2/v2 + e1·e2/(v1·v2))
+//   ≈ e1/v1 + e2/v2 — relative errors add, so a product's fractional
+//   uncertainty grows faster than either factor's. we keep it exact by
+//   taking the true endpoint product, not the linear approximation.
+//
+// VERIFY (load-bearing):
+//   · sum:     result half-width  ==  Σ term half-widths, to the digit.
+//   · product: result = [Π lo_i, Π hi_i] exactly (positive endpoints).
+//   · the running result range NEVER narrows as terms are added (sum) —
+//     each added term's e is ≥ 0, so the half-width is non-decreasing.
+
+// an interval as {v, e} — centre and half-width. lo = v-e, hi = v+e.
+function iv(v, e) { return { v: v, e: Math.max(0, e) }; }
+function lo(x) { return x.v - x.e; }
+function hi(x) { return x.v + x.e; }
+
+// [a,b] + [c,d] = [a+c, b+d].  centre and half-width both add.
+function addIv(x, y) { return iv(x.v + y.v, x.e + y.e); }
+
+// [a,b]·[c,d] for positive endpoints = [a·c, b·d]. rebuilt to centre/half.
+// general (sign-safe) product: min and max over the four endpoint products,
+// so it stays exact even if a slider pushes an endpoint below zero.
+function mulIv(x, y) {
+  const p = [lo(x) * lo(y), lo(x) * hi(y), hi(x) * lo(y), hi(x) * hi(y)];
+  const l = Math.min.apply(null, p), h = Math.max.apply(null, p);
+  return iv((l + h) / 2, (h - l) / 2);
+}
+
+// the three input quantities, each a range {v, e}.
+let A = iv(12, 1.5);
+let B = iv(8, 0.8);
+let C = iv(15, 2.2);
+
+let terms = 3;          // how many quantities are folded in: 1 | 2 | 3
+let mode = 'sum';       // 'sum' | 'product'
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const els = {
+  a: document.getElementById('a'), ea: document.getElementById('ea'),
+  b: document.getElementById('b'), eb: document.getElementById('eb'),
+  c: document.getElementById('c'), ec: document.getElementById('ec'),
+};
+const vals = {
+  a: document.getElementById('aV'), ea: document.getElementById('eaV'),
+  b: document.getElementById('bV'), eb: document.getElementById('ebV'),
+  c: document.getElementById('cV'), ec: document.getElementById('ecV'),
+};
+const bT1 = document.getElementById('bT1');
+const bT2 = document.getElementById('bT2');
+const bT3 = document.getElementById('bT3');
+const bSum = document.getElementById('bSum');
+const bProd = document.getElementById('bProd');
+const bReset = document.getElementById('bReset');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the running combination --------------------------------------------
+// the inputs actually in play, given the terms count.
+function activeInputs() {
+  return [A, B, C].slice(0, terms);
+}
+// fold the active inputs left-to-right, tracking the interval after each
+// step so the drawing can show the range WIDENING term by term.
+// sum starts from [0,0] (additive identity); product from [1,1].
+function runningSteps() {
+  const inputs = activeInputs();
+  const steps = [];
+  let acc = mode === 'sum' ? iv(0, 0) : iv(1, 0);
+  for (let k = 0; k < inputs.length; k++) {
+    acc = mode === 'sum' ? addIv(acc, inputs[k]) : mulIv(acc, inputs[k]);
+    steps.push(acc);
+  }
+  return { inputs: inputs, steps: steps, result: steps[steps.length - 1] };
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 40;
+const AXIS_X0 = 120;                 // left edge of the plotting strip
+const AXIS_X1 = W - 80;              // right edge
+// vertical bands: a stacked row per input, then a gap, then the result bar.
+const ROW_TOP = 120;
+const ROW_H = 130;
+const RESULT_GAP = 90;
+
+// the plot's value axis is auto-scaled so the widest drawn interval fits.
+// pick a max from the biggest endpoint of any drawn bar, rounded up.
+function axisMax() {
+  const { inputs, result } = runningSteps();
+  let m = 1;
+  for (const x of inputs) m = Math.max(m, Math.abs(hi(x)), Math.abs(lo(x)));
+  m = Math.max(m, Math.abs(hi(result)), Math.abs(lo(result)));
+  // headroom, then round up to a tidy step
+  m *= 1.08;
+  const step = m > 200 ? 50 : m > 60 ? 20 : m > 20 ? 10 : 5;
+  return Math.ceil(m / step) * step;
+}
+// canvas x for a value on the axis (0 .. axisMax → AXIS_X0 .. AXIS_X1).
+function xOf(v, amax) { return AXIS_X0 + (v / amax) * (AXIS_X1 - AXIS_X0); }
+
+// a single horizontal bar with error whiskers: a stem from 0 to the centre,
+// a centre tick, and a whisker spanning [lo, hi] with end caps.
+function drawBar(y, x, colour, label, amax) {
+  const xc = xOf(x.v, amax);
+  const xlo = xOf(lo(x), amax);
+  const xhi = xOf(hi(x), amax);
+  const x0 = xOf(0, amax);
+
+  // the stem: 0 → centre, showing the bar's magnitude
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(xc, y); ctx.stroke();
+
+  // the uncertainty whisker [lo, hi]
+  ctx.strokeStyle = colour; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(xlo, y); ctx.lineTo(xhi, y); ctx.stroke();
+  // end caps
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(xlo, y - 16); ctx.lineTo(xlo, y + 16); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(xhi, y - 16); ctx.lineTo(xhi, y + 16); ctx.stroke();
+  // centre marker
+  ctx.fillStyle = css('--ink');
+  ctx.beginPath(); ctx.arc(xc, y, 6, 0, Math.PI * 2); ctx.fill();
+
+  // the label, left of the strip
+  ctx.fillStyle = css('--ink'); ctx.font = '22px Georgia'; ctx.textAlign = 'right';
+  ctx.fillText(label, AXIS_X0 - 18, y + 7);
+
+  // the interval readout, printed above the whisker
+  ctx.fillStyle = colour; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('[' + lo(x).toFixed(1) + ', ' + hi(x).toFixed(1) + ']  ±' + x.e.toFixed(1),
+               (xlo + xhi) / 2, y - 26);
+}
+
+// --- the drawn scene ----------------------------------------------------
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+  const { inputs, steps, result } = runningSteps();
+  const amax = axisMax();
+
+  // the value axis along the top, with a few gridded ticks
+  const axisY = ROW_TOP - 60;
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(xOf(0, amax), axisY); ctx.lineTo(xOf(amax, amax), axisY); ctx.stroke();
+  ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+  const step = amax / 5;
+  for (let t = 0; t <= 5; t++) {
+    const v = t * step, x = xOf(v, amax);
+    ctx.strokeStyle = faint; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, axisY); ctx.lineTo(x, axisY - 8); ctx.stroke();
+    // a faint vertical grid line down the whole strip
+    ctx.strokeStyle = shade;
+    ctx.beginPath(); ctx.moveTo(x, axisY); ctx.lineTo(x, ROW_TOP + terms * ROW_H + RESULT_GAP + 40); ctx.stroke();
+    ctx.fillStyle = faint;
+    ctx.fillText(v.toFixed(0), x, axisY - 14);
+  }
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('value', xOf(amax, amax) - 4, axisY - 14);
+
+  // one bar per active input
+  const names = ['a', 'b', 'c'];
+  for (let k = 0; k < inputs.length; k++) {
+    const y = ROW_TOP + k * ROW_H + ROW_H / 2;
+    drawBar(y, inputs[k], ink, names[k], amax);
+  }
+
+  // a separating rule before the result
+  const sepY = ROW_TOP + inputs.length * ROW_H + 20;
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(AXIS_X0 - 40, sepY); ctx.lineTo(AXIS_X1, sepY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText(mode === 'sum' ? 'endpoints add: [a,b]+[c,d] = [a+c, b+d]'
+                              : 'endpoints multiply: [a,b]·[c,d] = [a·c, b·d]',
+               AXIS_X0 - 40, sepY + 26);
+
+  // the result bar, drawn in --mark with a wider whisker
+  const ry = sepY + RESULT_GAP;
+  drawBar(ry, result, mark, mode === 'sum' ? 'sum' : 'prod', amax);
+
+  // a bracket under the result whisker calling out its half-width, and — for
+  // the sum — the ghost stack showing how the input half-widths pile up to it.
+  const xlo = xOf(lo(result), amax), xhi = xOf(hi(result), amax);
+  ctx.strokeStyle = mark; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(xlo, ry + 30); ctx.lineTo(xlo, ry + 40);
+  ctx.lineTo(xhi, ry + 40); ctx.lineTo(xhi, ry + 30); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('half-width ±' + result.e.toFixed(2), (xlo + xhi) / 2, ry + 60);
+
+  // the running-widen trail: for the sum, stack each input's half-width end
+  // to end from the result centre, so the eye sees Σe build up to the whisker.
+  if (mode === 'sum' && inputs.length > 1) {
+    const xc = xOf(result.v, amax);
+    let cum = 0;
+    ctx.font = '13px "Courier New", monospace';
+    for (let k = 0; k < inputs.length; k++) {
+      const e0 = cum, e1 = cum + inputs[k].e;
+      const y = ry - 70 - k * 4;
+      ctx.strokeStyle = faint; ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(xOf(result.v + e0, amax), y);
+      ctx.lineTo(xOf(result.v + e1, amax), y);
+      ctx.stroke();
+      cum = e1;
+    }
+    ctx.fillStyle = faint; ctx.textAlign = 'left';
+    ctx.fillText('Σ half-widths', xc + 6, ry - 70 - inputs.length * 4 - 8);
+  }
+}
+
+// --- the read: result interval, half-width, and the honest fact ---------
+function updateReadout() {
+  const { inputs, result } = runningSteps();
+  const sumE = inputs.reduce(function (s, x) { return s + x.e; }, 0);
+
+  if (mode === 'sum') {
+    // absolute half-widths add — printed as the running sum, then checked
+    // against the result's own half-width (they must match to the digit).
+    const eList = inputs.map(function (x) { return x.e.toFixed(1); }).join(' + ');
+    readout.innerHTML =
+      'result <b>[' + lo(result).toFixed(2) + ', ' + hi(result).toFixed(2) + ']</b>'
+      + ' &nbsp;·&nbsp; centre <b>' + result.v.toFixed(2) + '</b>'
+      + ' &nbsp;·&nbsp; half-width <b>±' + result.e.toFixed(2) + '</b>'
+      + '<br>half-widths add: <b>' + eList + ' = ' + sumE.toFixed(2) + '</b>'
+      + ' &nbsp;·&nbsp; = result half-width <b>±' + result.e.toFixed(2) + '</b>'
+      + '<br><span id="widen">absolute uncertainty compounds under a sum &mdash; adding a term only widens the range, never sharpens it</span>';
+  } else {
+    // product: the exact endpoint interval, plus its RELATIVE half-width,
+    // and the sum of the factors' relative errors it grew from.
+    const relResult = result.v !== 0 ? result.e / Math.abs(result.v) : 0;
+    const relParts = inputs.map(function (x) {
+      return x.v !== 0 ? (x.e / Math.abs(x.v)) : 0;
+    });
+    const relSum = relParts.reduce(function (s, r) { return s + r; }, 0);
+    const relStr = relParts.map(function (r) { return (r * 100).toFixed(1) + '%'; }).join(' + ');
+    readout.innerHTML =
+      'result <b>[' + lo(result).toFixed(2) + ', ' + hi(result).toFixed(2) + ']</b>'
+      + ' &nbsp;·&nbsp; centre <b>' + result.v.toFixed(2) + '</b>'
+      + ' &nbsp;·&nbsp; half-width <b>±' + result.e.toFixed(2) + '</b>'
+      + '<br>relative error <b>' + (relResult * 100).toFixed(1) + '%</b>'
+      + ' &nbsp;·&nbsp; factors’ rel. errors <b>' + relStr + ' = ' + (relSum * 100).toFixed(1) + '%</b>'
+      + '<br><span id="widen">relative errors add under a product &mdash; the fractional uncertainty grows faster than either factor’s (result rel. &ge; the largest factor’s)</span>';
+  }
+}
+
+function refresh() {
+  vals.a.textContent = A.v.toFixed(1);
+  vals.ea.textContent = '±' + A.e.toFixed(1);
+  vals.b.textContent = B.v.toFixed(1);
+  vals.eb.textContent = '±' + B.e.toFixed(1);
+  vals.c.textContent = C.v.toFixed(1);
+  vals.ec.textContent = '±' + C.e.toFixed(1);
+  draw();
+  updateReadout();
+}
+
+// sliders drive the centres and half-widths live; the ranges recombine and
+// the result whisker widens or narrows as you move them.
+els.a.oninput = () => { A.v = parseFloat(els.a.value); refresh(); };
+els.ea.oninput = () => { A.e = parseFloat(els.ea.value); refresh(); };
+els.b.oninput = () => { B.v = parseFloat(els.b.value); refresh(); };
+els.eb.oninput = () => { B.e = parseFloat(els.eb.value); refresh(); };
+els.c.oninput = () => { C.v = parseFloat(els.c.value); refresh(); };
+els.ec.oninput = () => { C.e = parseFloat(els.ec.value); refresh(); };
+
+function setTerms(n) {
+  terms = n;
+  bT1.classList.toggle('on', n === 1);
+  bT2.classList.toggle('on', n === 2);
+  bT3.classList.toggle('on', n === 3);
+  refresh();
+}
+bT1.onclick = () => setTerms(1);
+bT2.onclick = () => setTerms(2);
+bT3.onclick = () => setTerms(3);
+
+function setMode(m) {
+  mode = m;
+  bSum.classList.toggle('on', m === 'sum');
+  bProd.classList.toggle('on', m === 'product');
+  refresh();
+}
+bSum.onclick = () => setMode('sum');
+bProd.onclick = () => setMode('product');
+
+// reset — the three quantities and their uncertainties back to the defaults.
+bReset.onclick = () => {
+  A = iv(12, 1.5); B = iv(8, 0.8); C = iv(15, 2.2);
+  els.a.value = 12; els.ea.value = 1.5;
+  els.b.value = 8; els.eb.value = 0.8;
+  els.c.value = 15; els.ec.value = 2.2;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: arithmetic is slider-driven, a rAF keeps it painted --
+function frame() {
+  draw();
+  requestAnimationFrame(frame);
+}
+
+setTerms(3);
+setMode('sum');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

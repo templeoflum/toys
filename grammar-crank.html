@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the grammar crank</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --rule: #8a8270;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .4rem; }
+  .controls { display: flex; gap: .5rem; margin: .8rem 0 1.4rem; align-items: center; }
+  button {
+    font: inherit; font-size: .9rem;
+    background: none; border: 1px solid var(--ink); border-radius: 2px;
+    color: var(--ink); padding: .35rem 1rem; cursor: pointer;
+  }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  #crank { font-size: 1rem; padding: .5rem 1.6rem; }
+  #chain { width: min(620px, 94vw); display: flex; flex-direction: column; gap: .45rem; }
+  .move {
+    border: 1.5px solid var(--ink); border-radius: 2px;
+    padding: .55rem .9rem; background: #faf7ef;
+    display: flex; flex-direction: column; gap: .15rem;
+    animation: land .25s ease-out both;
+  }
+  @keyframes land { from { opacity: 0; transform: translateY(-4px); } }
+  .fn { font-size: .72rem; letter-spacing: .18em; color: var(--rule); font-family: 'Courier New', monospace; }
+  .slot-line { font-size: .98rem; }
+  .slot-line b { font-weight: normal; border-bottom: 1px solid var(--faint); padding: 0 .1em; }
+  .why {
+    font-size: .74rem; font-style: italic; color: var(--rule);
+    display: none; margin-top: .15rem;
+  }
+  body.show-why .why { display: block; }
+  #tally { margin: 1.2rem 0 0; font-family: 'Courier New', monospace; font-size: .8rem; color: var(--rule); }
+  .hint { margin-top: 1.4rem; font-style: italic; font-size: .8rem; color: var(--faint); text-align: center; }
+</style>
+</head>
+<body>
+  <h1>the grammar crank</h1>
+  <div class="controls">
+    <button id="crank">crank</button>
+    <button id="why-btn">why</button>
+  </div>
+  <div id="chain"></div>
+  <div id="tally"></div>
+  <div class="hint">same rules every turn &mdash; never the same bones twice.<br>
+  the skeleton is the product; the clothing is the teller's.</div>
+
+<script>
+'use strict';
+// Propp-derived move grammar, reduced: ordered functions, inclusion odds,
+// pairing constraints. The crank samples a valid chain; it never stores one.
+const MOVES = [
+  { k: 'ABSENTATION',  p: .45, line: 'one of the [family] leaves the ground bare', why: 'optional opener — admitted by the ordering alone' },
+  { k: 'INTERDICTION', p: .55, line: 'the [authority] sets a line not to cross', why: 'opens a pair — VIOLATION must follow', opens: 'VIOLATION' },
+  { k: 'VIOLATION',    p: 1,   line: 'the [hero] crosses it', why: 'closes the pair INTERDICTION opened', closes: 'INTERDICTION' },
+  { k: 'LACK',         p: 1,   line: 'something the [family] cannot live without is missing or taken', why: 'the plot-opener — every chain needs the wound; must LIQUIDATE before the end', opens: 'LIQUIDATION' },
+  { k: 'DEPARTURE',    p: 1,   line: 'the [hero] leaves the known ground', why: 'required once LACK stands — someone must go' },
+  { k: 'TEST',         p: .7,  line: 'the [donor] tries the [hero] without saying why', why: 'opens the donor triad — REACTION and ACQUISITION ride with it', opens: 'ACQUISITION', triad: ['REACTION', 'ACQUISITION'] },
+  { k: 'REACTION',     p: 1,   line: 'the [hero] answers the trial in their own manner', why: 'rides the donor triad — all or none', requires: 'TEST' },
+  { k: 'ACQUISITION',  p: 1,   line: 'the [helper] or the [agent] passes into the [hero]’s hands', why: 'closes the donor triad TEST opened', closes: 'TEST' },
+  { k: 'GUIDANCE',     p: .5,  line: 'the [hero] is carried, led, or pointed to the place', why: 'optional bridge — admitted by the ordering alone' },
+  { k: 'STRUGGLE',     p: .65, line: 'the [hero] and the [villain] meet directly', why: 'opens a pair — VICTORY must follow', opens: 'VICTORY' },
+  { k: 'VICTORY',      p: 1,   line: 'the [villain] is beaten', why: 'closes the pair STRUGGLE opened', closes: 'STRUGGLE' },
+  { k: 'LIQUIDATION',  p: 1,   line: 'the missing thing is restored, the wound closed', why: 'closes what LACK opened — the chain cannot end open', closes: 'LACK' },
+  { k: 'RETURN',       p: .8,  line: 'the [hero] turns back', why: 'admitted by the ordering alone' },
+  { k: 'PURSUIT',      p: .35, line: 'the [villain]’s reach follows the [hero]', why: 'opens a pair — RESCUE must follow', opens: 'RESCUE' },
+  { k: 'RESCUE',       p: 1,   line: 'the [hero] slips the reach', why: 'closes the pair PURSUIT opened', closes: 'PURSUIT' },
+  { k: 'RECOGNITION',  p: .6,  line: 'the [hero] is known for what was done', why: 'admitted by the ordering alone' },
+  { k: 'WEDDING',      p: .5,  line: 'the [hero] is given a new standing', why: 'optional closer — admitted by the ordering alone' },
+];
+
+let count = 0;
+
+function crank() {
+  const open = new Set();
+  const chain = [];
+  for (const m of MOVES) {
+    let take;
+    if (m.closes) take = open.has(m.closes);
+    else if (m.requires) take = open.has(m.requires);
+    else take = Math.random() < m.p;
+    if (take) {
+      chain.push(m);
+      if (m.opens) open.add(m.k === 'TEST' ? 'TEST' : m.k);
+      if (m.closes) open.delete(m.closes);
+    }
+  }
+  return chain;
+}
+
+function render(chain) {
+  const el = document.getElementById('chain');
+  el.innerHTML = '';
+  chain.forEach((m, i) => {
+    const card = document.createElement('div');
+    card.className = 'move';
+    card.style.animationDelay = (i * 45) + 'ms';
+    card.innerHTML =
+      '<div class="fn">' + (i + 1) + ' · ' + m.k + '</div>' +
+      '<div class="slot-line">' + m.line.replace(/\[([a-z-]+)\]/g, '<b>$1</b>') + '</div>' +
+      '<div class="why">' + m.why + '</div>';
+    el.appendChild(card);
+  });
+  count++;
+  document.getElementById('tally').textContent =
+    'turn ' + count + ' · ' + chain.length + ' moves · all pairs closed';
+}
+
+document.getElementById('crank').onclick = () => render(crank());
+document.getElementById('why-btn').onclick = (e) => {
+  document.body.classList.toggle('show-why');
+  e.target.classList.toggle('on');
+};
+render(crank());
+</script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>muller-lyer</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 10rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>muller-lyer</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">fins</span><input type="range" id="fins" min="0" max="52" value="46"><span class="val" id="finsV"></span></div>
+    <div class="row"><span class="name">rule</span><input type="range" id="rule" min="0" max="100" value="0"><span class="val" id="ruleV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="560"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two black shafts are exactly the same length. the top wears out-turned fins (arrow-tails), the bottom in-turned ones (arrow-heads) &mdash; and the tails seem to pull the line longer, the heads to press it shorter. your eye reads the whole figure, not the shaft alone. shrink the <b>fins</b> to nothing and the two lines are plainly equal; pull the <b>rule</b> to drop guides from end to end.</div>
+
+<script>
+'use strict';
+
+const CX = 500, LEN = 380;              // centre, shaft length (equal for both)
+const YT = 200, YB = 360;               // top shaft y, bottom shaft y
+const ANG = 33 * Math.PI / 180;         // fixed fin angle; length is the knob
+
+let finLen = 46;   // 0 => no fins, lines bare and plainly equal
+let rule = 0;      // proof guides fade in
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const finsEl = document.getElementById('fins'), finsV = document.getElementById('finsV');
+const ruleEl = document.getElementById('rule'), ruleV = document.getElementById('ruleV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+// fins at an end point (ex,ey); `openX` is the x-direction the V opens toward
+function fins(ex, ey, openX) {
+  if (finLen <= 0) return;
+  const dx = openX * Math.cos(ANG) * finLen;
+  const dy = Math.sin(ANG) * finLen;
+  line(ex, ey, ex + dx, ey - dy);
+  line(ex, ey, ex + dx, ey + dy);
+}
+
+function shaft(y, outward) {
+  const xL = CX - LEN / 2, xR = CX + LEN / 2;
+  ctx.strokeStyle = css('--ink'); ctx.lineWidth = 4; ctx.lineCap = 'round';
+  line(xL, y, xR, y);
+  // outward (tails): left "<" opens right(+1), right ">" opens left(-1)  <——>
+  // inward  (heads): left ">" opens left(-1),  right "<" opens right(+1) >——<
+  fins(xL, y, outward ? 1 : -1);
+  fins(xR, y, outward ? -1 : 1);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  shaft(YT, true);    // top: arrow-tails, looks longer
+  shaft(YB, false);   // bottom: arrow-heads, looks shorter
+
+  // the proof: vertical guides from the shared endpoints — they line up
+  if (rule > 0) {
+    ctx.save();
+    ctx.globalAlpha = rule;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2;
+    ctx.setLineDash([7, 6]);
+    for (const x of [CX - LEN / 2, CX + LEN / 2]) line(x, YT - 40, x, YB + 40);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = finLen <= 0
+    ? 'no fins &mdash; two bare shafts, both <b>' + LEN + ' px</b>, plainly equal.'
+    : rule > 0.98
+      ? 'the guides fall straight through both ends &mdash; both shafts are <b>' + LEN + ' px</b>.'
+      : 'top and bottom are the same length: <b>' + LEN + ' px</b>. only the fins differ.';
+}
+
+function refresh() {
+  finsV.textContent = finLen <= 0 ? 'none' : finLen + 'px';
+  ruleV.textContent = rule > 0.98 ? 'guides down' : rule > 0 ? 'dropping' : 'off';
+  draw();
+}
+
+finsEl.oninput = () => { finLen = +finsEl.value; refresh(); };
+ruleEl.oninput = () => { rule = +ruleEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

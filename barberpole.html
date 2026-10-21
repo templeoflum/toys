@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>barberpole</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --stripe: #4a5560;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 13rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(560px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>barberpole</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">aperture</span><input type="range" id="aperture" min="0" max="100" value="0"><span class="val" id="apertureV"></span></div>
+    <div class="row"><span class="name">reveal</span><input type="range" id="reveal" min="0" max="100" value="0"><span class="val" id="revealV"></span></div>
+  </div>
+  <canvas id="cv" width="620" height="520"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the diagonal stripes really drift down-and-to-the-right, always at the same slant. but seen through the slot, they seem to travel along the slot's long axis &mdash; down a tall slot, sideways a wide one. the window's shape, not the stripes, rules the direction you see. slide the <b>aperture</b> from tall to wide and watch the motion turn; raise the <b>reveal</b> to drop the mask and see the true diagonal drift.</div>
+
+<script>
+'use strict';
+
+const W = 620, H = 520, CX = 310, CY = 250;
+const P = 48;                            // stripe period
+const SPEED = 0.045;                     // px per ms along the drift
+const DX = Math.SQRT1_2, DY = Math.SQRT1_2;   // drift down-right
+const SX = Math.SQRT1_2, SY = -Math.SQRT1_2;  // stripe direction (perpendicular)
+const SPAN = 760;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const apEl = document.getElementById('aperture'), apV = document.getElementById('apertureV');
+const rvEl = document.getElementById('reveal'), rvV = document.getElementById('revealV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let aperture = 0;   // 0 tall slot -> vertical motion; 1 wide slot -> horizontal motion
+let reveal = 0;     // proof: drop the mask, see the true diagonal drift
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function draw(ts) {
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, W, H);
+
+  const phase = (ts * SPEED) % P;
+
+  // the drifting diagonal grating, over the whole canvas
+  ctx.strokeStyle = css('--stripe');
+  ctx.lineWidth = P / 2;
+  const nmax = Math.ceil((W + H) / P) + 3;
+  for (let k = -3; k < nmax; k++) {
+    const o = k * P + phase;
+    const cx = o * DX, cy = o * DY;
+    ctx.beginPath();
+    ctx.moveTo(cx - SX * SPAN, cy - SY * SPAN);
+    ctx.lineTo(cx + SX * SPAN, cy + SY * SPAN);
+    ctx.stroke();
+  }
+
+  // aperture shape: tall (aperture=0) -> wide (aperture=1)
+  const aw = 120 + aperture * 300, ah = 400 - aperture * 300;
+  const ax = CX - aw / 2, ay = CY - ah / 2;
+
+  // mask everything outside the aperture with paper (fades out as reveal -> 1)
+  ctx.save();
+  ctx.globalAlpha = 1 - reveal;
+  ctx.fillStyle = css('--paper');
+  ctx.beginPath();
+  ctx.rect(0, 0, W, H);                       // outer
+  ctx.rect(ax, ay, aw, ah);                   // inner (hole) — even-odd
+  ctx.fill('evenodd');
+  ctx.restore();
+
+  // aperture frame (fades with reveal)
+  ctx.save();
+  ctx.globalAlpha = 1 - reveal;
+  ctx.strokeStyle = css('--ink'); ctx.lineWidth = 3;
+  ctx.strokeRect(ax, ay, aw, ah);
+  ctx.restore();
+
+  requestAnimationFrame(draw);
+}
+
+function refresh() {
+  apV.textContent = aperture < 0.02 ? 'tall — looks vertical' : aperture > 0.98 ? 'wide — looks sideways' : 'turning';
+  rvV.textContent = reveal > 0.98 ? 'mask off — true drift' : reveal > 0 ? 'lifting' : 'off';
+  readout.innerHTML = reveal > 0.98
+    ? 'the mask is gone &mdash; the stripes plainly drift on the diagonal.'
+    : aperture < 0.02
+      ? 'through the tall slot the drift looks vertical &mdash; but it is diagonal.'
+      : aperture > 0.98
+        ? 'through the wide slot the same drift looks horizontal.'
+        : "the slot's long axis is bending the direction you see.";
+}
+
+apEl.oninput = () => { aperture = +apEl.value / 100; refresh(); };
+rvEl.oninput = () => { reveal = +rvEl.value / 100; refresh(); };
+refresh();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

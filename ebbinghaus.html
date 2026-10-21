@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ebbinghaus</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --disk: #5b6b74;
+    --ring: #c9bfa6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5.5rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>ebbinghaus</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">surround</span><input type="range" id="surround" min="0" max="100" value="100"><span class="val" id="surroundV"></span></div>
+    <div class="row"><span class="name">match</span><input type="range" id="match" min="0" max="100" value="0"><span class="val" id="matchV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="560"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two slate disks are exactly the same size. the left one is ringed by big neighbours and reads small; the right by little ones and reads large &mdash; though neither ever changes. size is judged against company, not on its own. fade the <b>surround</b> to nothing and the disks are plainly equal; raise <b>match</b> to lay an identical ring over each.</div>
+
+<script>
+'use strict';
+
+const LC = { x: 305, y: 285 }, RC = { x: 695, y: 285 };  // group centres
+const RDISK = 46;                    // central disk radius — SAME for both
+const RBIG = 66, NBIG = 6;           // left neighbours: few, large
+const RSMALL = 19, NSMALL = 8;       // right neighbours: many, small
+
+let surround = 1;   // 0 => neighbours gone, disks bare and plainly equal
+let match = 0;      // proof rings fade in
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const surEl = document.getElementById('surround'), surV = document.getElementById('surroundV');
+const matEl = document.getElementById('match'), matV = document.getElementById('matchV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function disk(x, y, r, fill) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); }
+
+function neighbours(c, rN, n, dist) {
+  ctx.save();
+  ctx.globalAlpha = surround;
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + i * 2 * Math.PI / n;
+    disk(c.x + dist * Math.cos(a), c.y + dist * Math.sin(a), rN, css('--ring'));
+  }
+  ctx.restore();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // neighbours first, so the central disks sit clean on top
+  neighbours(LC, RBIG, NBIG, RDISK + RBIG + 16);
+  neighbours(RC, RSMALL, NSMALL, RDISK + RSMALL + 15);
+
+  disk(LC.x, LC.y, RDISK, css('--disk'));
+  disk(RC.x, RC.y, RDISK, css('--disk'));
+
+  // proof: an identical ring laid over each centre — same radius, so they match
+  if (match > 0) {
+    ctx.save();
+    ctx.globalAlpha = match;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2.5; ctx.setLineDash([6, 5]);
+    for (const c of [LC, RC]) {
+      ctx.beginPath(); ctx.arc(c.x, c.y, RDISK + 6, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = surround < 0.02
+    ? 'no neighbours &mdash; two bare disks, both radius <b>' + RDISK + '</b>, plainly equal.'
+    : match > 0.98
+      ? 'the two rings are the same size &mdash; both disks are radius <b>' + RDISK + '</b>.'
+      : 'both centre disks are radius <b>' + RDISK + '</b>. only the neighbours differ.';
+}
+
+function refresh() {
+  surV.textContent = surround < 0.02 ? 'none' : Math.round(surround * 100) + '%';
+  matV.textContent = match > 0.98 ? 'rings on' : match > 0 ? 'rising' : 'off';
+  draw();
+}
+
+surEl.oninput = () => { surround = +surEl.value / 100; refresh(); };
+matEl.oninput = () => { match = +matEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

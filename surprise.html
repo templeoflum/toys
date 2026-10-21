@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>surprise</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .4rem; }
+  .controls { display: flex; gap: .5rem; margin: .8rem 0 .9rem; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button {
+    font: inherit; font-size: .85rem;
+    background: none; border: 1px solid var(--ink); border-radius: 2px;
+    color: var(--ink); padding: .3rem .8rem; cursor: pointer;
+  }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .sep { width: 1rem; }
+  .lbl { font-family: 'Courier New', monospace; font-size: .72rem; color: #6d6653; }
+  #text {
+    font: inherit; font-size: .95rem; width: min(760px, 96vw);
+    background: var(--paper); border: 1px solid var(--faint); border-radius: 2px;
+    color: var(--ink); padding: .45rem .6rem; margin-bottom: 1.4rem;
+  }
+  #chart {
+    width: min(880px, 96vw); height: 300px; position: relative;
+    border-bottom: 1.5px solid var(--ink);
+    display: flex; align-items: flex-end; gap: 1px;
+  }
+  .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; min-width: 0; }
+  .bar { width: 78%; background: var(--ink); }
+  .glyph { font-family: 'Courier New', monospace; font-size: .62rem; color: #6d6653; line-height: 1; margin-top: 2px; white-space: pre; }
+  #baseline {
+    position: absolute; left: 0; right: 0; height: 0;
+    border-top: 1.5px dashed var(--pick); pointer-events: none;
+  }
+  #baseLabel { position: absolute; right: 0; font-family: 'Courier New', monospace; font-size: .66rem; color: #9a8f74; transform: translateY(-1.1rem); background: var(--paper); padding: 1px 3px; }
+  #readout {
+    margin-top: 1.6rem; text-align: center; line-height: 1.8;
+    font-family: 'Courier New', monospace; font-size: .9rem; color: #6d6653;
+  }
+  #readout b { color: var(--ink); font-weight: normal; }
+  .hint { margin-top: 1.4rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 36rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>surprise</h1>
+  <div class="controls">
+    <span class="lbl">model</span>
+    <button id="m-uniform">uniform</button>
+    <button id="m-0">frequency</button>
+    <button id="m-1" class="on">context</button>
+    <span class="sep"></span>
+    <span class="lbl">try</span>
+    <button id="s-rep">a pattern</button>
+    <button id="s-eng">a sentence</button>
+    <button id="s-noise">noise</button>
+  </div>
+  <input id="text" type="text" spellcheck="false" value="abababababababababababababab">
+  <div id="chart"><div id="baseline"></div><span id="baseLabel"></span></div>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">surprise is &minus;log&#8322;(chance): a symbol you saw coming is cheap, a shock is dear. a model that predicts well spends fewer bits &mdash; compression is just good prediction. type into a pattern and watch the bars shrink as it learns.</div>
+
+<script>
+'use strict';
+const SAMPLES = {
+  rep: 'abababababababababababababab',
+  eng: 'the quick brown fox jumps over the lazy dog then the fox ran home',
+  noise: 'acbddabcadbcacdbadcbdaacbdcbadbcadbcadbca',
+};
+let model = '1';
+
+const textEl = document.getElementById('text');
+const chart = document.getElementById('chart');
+const baseline = document.getElementById('baseline');
+const baseLabel = document.getElementById('baseLabel');
+const readout = document.getElementById('readout').firstElementChild;
+
+// per-character surprise (bits) reading a text left to right, the model
+// trained online on what it has already seen. Laplace-smoothed over the
+// text's own alphabet, so the model knows the letters, not the odds.
+function measure(text, order) {
+  const chars = [...text];
+  const alpha = new Set(chars);
+  const A = Math.max(alpha.size, 1);
+  const uni = Math.log2(A);
+  const per = [];
+
+  if (order === 'uniform') {
+    for (const ch of chars) per.push({ ch, bits: uni });
+  } else if (order === '0') {
+    const cnt = new Map(); let seen = 0;
+    for (const ch of chars) {
+      const c = cnt.get(ch) || 0;
+      per.push({ ch, bits: -Math.log2((c + 1) / (seen + A)) });
+      cnt.set(ch, c + 1); seen++;
+    }
+  } else {
+    const cnt = new Map(), tot = new Map();
+    let prev = null;
+    for (const ch of chars) {
+      let bits;
+      if (prev === null) {
+        bits = uni;
+      } else {
+        const m = cnt.get(prev), t = tot.get(prev) || 0;
+        const c = (m && m.get(ch)) || 0;
+        bits = -Math.log2((c + 1) / (t + A));
+      }
+      per.push({ ch, bits });
+      if (prev !== null) {
+        let m = cnt.get(prev); if (!m) { m = new Map(); cnt.set(prev, m); }
+        m.set(ch, (m.get(ch) || 0) + 1); tot.set(prev, (tot.get(prev) || 0) + 1);
+      }
+      prev = ch;
+    }
+  }
+  const total = per.reduce((a, p) => a + p.bits, 0);
+  return { per, uni, total, A, n: chars.length };
+}
+
+function glyph(ch) {
+  if (ch === ' ') return '␣';
+  if (ch === '\t') return '⇥';
+  return ch;
+}
+
+function render() {
+  const text = textEl.value;
+  const r = measure(text, model);
+  // clear bars (keep baseline + label nodes)
+  for (const el of [...chart.querySelectorAll('.col')]) el.remove();
+
+  const H = chart.clientHeight;
+  const scale = Math.max(r.uni, ...r.per.map(p => p.bits), 0.001) * 1.08;
+  const showGlyph = r.n > 0 && (chart.clientWidth / r.n) > 9;
+
+  for (const p of r.per) {
+    const col = document.createElement('div');
+    col.className = 'col';
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.height = (Math.max(p.bits, 0) / scale * H) + 'px';
+    bar.title = glyph(p.ch) + '  ' + p.bits.toFixed(2) + ' bits';
+    col.appendChild(bar);
+    if (showGlyph) {
+      const g = document.createElement('div');
+      g.className = 'glyph';
+      g.textContent = glyph(p.ch);
+      col.appendChild(g);
+    }
+    chart.appendChild(col);
+  }
+
+  // uniform baseline
+  const y = (r.uni / scale) * H;
+  baseline.style.bottom = y + 'px';
+  baseLabel.style.bottom = y + 'px';
+  baseLabel.textContent = 'no model: ' + r.uni.toFixed(2) + ' bits each';
+
+  const perChar = r.n ? (r.total / r.n) : 0;
+  const uniTotal = r.uni * r.n;
+  const saved = uniTotal > 0 ? Math.round((1 - r.total / uniTotal) * 100) : 0;
+  readout.innerHTML = r.n
+    ? '<b>' + r.total.toFixed(0) + '</b> bits for <b>' + r.n + '</b> symbols &mdash; '
+      + '<b>' + perChar.toFixed(2) + '</b> per symbol vs <b>' + r.uni.toFixed(2) + '</b> with no model'
+      + (saved > 0 ? ' &mdash; <b>' + saved + '%</b> saved' : '')
+    : 'type something';
+}
+
+for (const [id, key] of [['m-uniform', 'uniform'], ['m-0', '0'], ['m-1', '1']]) {
+  document.getElementById(id).onclick = () => {
+    model = key;
+    for (const j of ['m-uniform', 'm-0', 'm-1'])
+      document.getElementById(j).classList.toggle('on', j === id);
+    render();
+  };
+}
+for (const [id, key] of [['s-rep', 'rep'], ['s-eng', 'eng'], ['s-noise', 'noise']]) {
+  document.getElementById(id).onclick = () => { textEl.value = SAMPLES[key]; render(); };
+}
+textEl.oninput = render;
+render();
+</script>
+</body>
+</html>

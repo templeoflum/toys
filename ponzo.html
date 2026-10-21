@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ponzo</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --rail: #9a9484;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5.5rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(620px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>ponzo</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">converge</span><input type="range" id="converge" min="0" max="100" value="100"><span class="val" id="convergeV"></span></div>
+    <div class="row"><span class="name">rule</span><input type="range" id="rule" min="0" max="100" value="0"><span class="val" id="ruleV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="640"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two orange bars are exactly the same length. the converging rails read as parallel lines receding into distance &mdash; a road, a railway &mdash; so your eye takes the upper bar to be <i>farther</i>. a far thing that fills the same width must truly be bigger, so size-constancy inflates it. flatten the <b>converge</b> and the depth cue dies; raise the <b>rule</b> to drop guides down both ends.</div>
+
+<script>
+'use strict';
+
+const CX = 450, BARLEN = 300;           // centre, bar length (equal for both)
+const YTOP = 210, YBOT = 470;           // upper bar y, lower bar y
+const YRT = 120, YRB = 560;             // rail top / bottom
+const WB = 560;                         // rail separation at bottom
+
+let converge = 1;   // 0 => rails parallel, no depth cue
+let rule = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const conEl = document.getElementById('converge'), conV = document.getElementById('convergeV');
+const ruleEl = document.getElementById('rule'), ruleV = document.getElementById('ruleV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // rails: full separation WB at the bottom, narrowing to WB*(1-.82c) at top
+  const wTop = WB * (1 - 0.82 * converge);
+  ctx.strokeStyle = css('--rail'); ctx.lineWidth = 4; ctx.lineCap = 'round';
+  line(CX - WB / 2, YRB, CX - wTop / 2, YRT);
+  line(CX + WB / 2, YRB, CX + wTop / 2, YRT);
+
+  // the two identical bars
+  ctx.strokeStyle = css('--mark'); ctx.lineWidth = 11; ctx.lineCap = 'butt';
+  line(CX - BARLEN / 2, YTOP, CX + BARLEN / 2, YTOP);
+  line(CX - BARLEN / 2, YBOT, CX + BARLEN / 2, YBOT);
+
+  // proof: vertical guides at the shared bar ends — they pass through both
+  if (rule > 0) {
+    ctx.save();
+    ctx.globalAlpha = rule;
+    ctx.strokeStyle = css('--ink'); ctx.lineWidth = 2; ctx.setLineDash([7, 6]);
+    for (const x of [CX - BARLEN / 2, CX + BARLEN / 2]) line(x, YTOP - 40, x, YBOT + 40);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = converge < 0.02
+    ? 'rails parallel &mdash; no depth cue, and both bars are plainly <b>' + BARLEN + ' px</b>.'
+    : rule > 0.98
+      ? 'the guides fall through both ends &mdash; both bars are <b>' + BARLEN + ' px</b>.'
+      : 'both bars are <b>' + BARLEN + ' px</b>; the upper only looks longer, read as farther.';
+}
+
+function refresh() {
+  conV.textContent = converge < 0.02 ? 'parallel' : Math.round(converge * 100) + '%';
+  ruleV.textContent = rule > 0.98 ? 'guides down' : rule > 0 ? 'dropping' : 'off';
+  draw();
+}
+
+conEl.oninput = () => { converge = +conEl.value / 100; refresh(); };
+ruleEl.oninput = () => { rule = +ruleEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

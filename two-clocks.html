@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>two clocks</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --mark: #b8603a;
+    --story: #4a6670;   /* the story-time strip */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .5rem; margin-bottom: 1.2rem; flex-wrap: wrap; justify-content: center; max-width: 720px; }
+  button { font: inherit; font-size: .82rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .7rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  button.reset { border-color: var(--faint); color: #6d6653; margin-left: .3rem; }
+  button.reset:hover { border-color: var(--mark); color: var(--mark); background: none; }
+  canvas { width: min(860px, 96vw); height: auto; display: block; border: 1px solid var(--faint); }
+  #readout { margin-top: 1.3rem; text-align: center; font-family: 'Courier New', monospace; font-size: 1rem; color: var(--ink); line-height: 1.7; }
+  #readout .sub { display: block; font-size: .82rem; color: #6d6653; margin-top: .35rem; }
+  .hint { margin-top: 1.4rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 40rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>two clocks</h1>
+  <div class="controls">
+    <button data-d="scene" class="on">scene</button>
+    <button data-d="summary">summary</button>
+    <button data-d="stretch">stretch</button>
+    <button data-d="pause">pause</button>
+    <button data-d="flashback">flashback</button>
+    <button class="reset" id="reset">reset</button>
+  </div>
+  <canvas id="cv" width="1640" height="820"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two clocks run in every story. <b style="color:var(--story)">story-time</b> is the order events happened; <b style="color:var(--mark)">telling-time</b> is the order &mdash; and the room &mdash; they get told in. the ribbons are the map between them. a device is a shape of that map: hold them level (scene), squeeze a long stretch into a moment (summary), open a moment wide (stretch), stop the story clock while the telling runs on (pause), or double the telling back to an earlier event (flashback &mdash; the ribbons cross). event names are gibberish on purpose &mdash; only the shape carries the idea.</div>
+
+<script>
+'use strict';
+
+// seven story events, gibberish labels, in chronological (story-time) order.
+// each has a story-time position in [0,1] — where it falls on the story clock.
+const EVENTS = ['vorn', 'plith', 'garo', 'sesk', 'mund', 'trave', 'ollup'];
+const STORY_T = [0.00, 0.16, 0.33, 0.50, 0.66, 0.83, 1.00];
+
+// a device maps story-time -> telling-time. tellOrder is the sequence of event
+// indices as they reach the reader; tellT is each event's position on the
+// telling clock [0,1]. ratio is story-duration : telling-duration for the span
+// the device names (how much story-clock passes per unit of telling-clock).
+const DEVICES = {
+  scene: {
+    name: 'scene',
+    gloss: 'telling &asymp; story. the two clocks run level, ribbons stay parallel.',
+    ratio: '1 : 1',
+    tellOrder: [0, 1, 2, 3, 4, 5, 6],
+    tellT:     [0.00, 0.16, 0.33, 0.50, 0.66, 0.83, 1.00],
+  },
+  summary: {
+    name: 'summary',
+    // a long story stretch (garo..trave) is compressed into a sliver of telling.
+    // the outer events keep their room; the middle bunches — fan-in.
+    gloss: 'a long stretch of story compressed into little telling. the ribbons fan in.',
+    ratio: 'many : one  (story runs fast under a thin telling)',
+    tellOrder: [0, 1, 2, 3, 4, 5, 6],
+    tellT:     [0.00, 0.14, 0.44, 0.50, 0.56, 0.62, 1.00],
+  },
+  stretch: {
+    name: 'stretch',
+    // a brief story moment (sesk..mund) is expanded to fill most of the telling.
+    // the middle spreads wide — fan-out.
+    gloss: 'a brief story moment expanded to fill the telling. the ribbons fan out.',
+    ratio: 'one : many  (telling dwells where the story barely moves)',
+    tellOrder: [0, 1, 2, 3, 4, 5, 6],
+    tellT:     [0.00, 0.07, 0.14, 0.35, 0.80, 0.92, 1.00],
+  },
+  pause: {
+    name: 'pause',
+    // the story clock stops at sesk; the telling runs on (description) then resumes.
+    // sesk and mund sit at the same story-time but a gap of telling opens between.
+    gloss: 'the story clock stops; the telling runs on. a wide band of telling maps to a single story instant.',
+    ratio: 'zero : some  (story-time does not advance while telling continues)',
+    tellOrder: [0, 1, 2, 3, 4, 5, 6],
+    tellT:     [0.00, 0.11, 0.22, 0.33, 0.72, 0.86, 1.00],
+    // sesk(3) and mund(4) share one story instant — override their story mark:
+    storyOverride: { 4: 0.50 },
+  },
+  flashback: {
+    name: 'flashback',
+    // telling doubles back: after mund, the discourse returns to an earlier event.
+    // reorder the telling sequence so ribbons cross (anachrony / analepsis).
+    gloss: 'the telling jumps back to an earlier event. story order and telling order disagree &mdash; the ribbons cross.',
+    ratio: 'order broken  (telling-clock reverses against the story-clock)',
+    // telling sequence: vorn, plith, mund, garo(flashback), sesk, trave, ollup
+    tellOrder: [0, 1, 4, 2, 3, 5, 6],
+    tellT:     [0.00, 0.16, 0.33, 0.50, 0.66, 0.83, 1.00],
+  },
+};
+
+let device = 'scene';
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const PADL = 90, PADR = 60, TOP_Y = 150, BOT_Y = 660, STRIP_H = 60;
+function sx(t) { return PADL + t * (cv.width - PADL - PADR); }   // clock position -> x
+
+// story-time x for event i (with any per-device override)
+function storyX(dev, i) {
+  const o = dev.storyOverride && dev.storyOverride[i] != null ? dev.storyOverride[i] : STORY_T[i];
+  return sx(o);
+}
+// telling-time x for event i
+function tellX(dev, i) { return sx(dev.tellT[i]); }
+
+function strip(y, label, labelColor) {
+  ctx.fillStyle = css('--shade');
+  ctx.fillRect(PADL - 4, y, cv.width - PADL - PADR + 8, STRIP_H);
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+  ctx.strokeRect(PADL - 4, y, cv.width - PADL - PADR + 8, STRIP_H);
+  ctx.fillStyle = labelColor; ctx.font = '22px Georgia'; ctx.textAlign = 'right';
+  ctx.fillText(label, PADL - 18, y + STRIP_H / 2 + 8);
+}
+
+// a marker + label sitting on a strip
+function mark(x, y, name, isTop, hot) {
+  ctx.fillStyle = css('--paper'); ctx.strokeStyle = hot ? css('--mark') : css('--ink');
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y + STRIP_H / 2, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = css('--ink'); ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText(name, x, isTop ? y - 12 : y + STRIP_H + 28);
+}
+
+function draw() {
+  const dev = DEVICES[device];
+  const W = cv.width, H = cv.height;
+  ctx.fillStyle = css('--paper'); ctx.clearRect(0, 0, W, H);
+
+  // the two clock strips
+  strip(TOP_Y, 'story-time', css('--story'));
+  strip(BOT_Y, 'telling-time', css('--mark'));
+
+  // clock captions
+  ctx.fillStyle = '#6d6653'; ctx.font = '17px "Courier New", monospace';
+  ctx.textAlign = 'left';  ctx.fillText('what happened, in order', PADL, TOP_Y - 44);
+  ctx.textAlign = 'right'; ctx.fillText('the order + room it is told in', W - PADR, BOT_Y + STRIP_H + 52);
+
+  // ribbons: each event connects its story mark to its telling mark.
+  // draw a smooth cubic between strips; crossing ribbons reveal anachrony.
+  for (let i = 0; i < EVENTS.length; i++) {
+    const x0 = storyX(dev, i), y0 = TOP_Y + STRIP_H;
+    const x1 = tellX(dev, i), y1 = BOT_Y;
+    // a ribbon that leaves order is drawn in the mark hue; level ones stay faint.
+    const crossed = Math.abs((dev.tellT[i]) - STORY_T[i]) > 0.001 || (dev.storyOverride && dev.storyOverride[i] != null);
+    ctx.strokeStyle = crossed ? css('--mark') : css('--story');
+    ctx.globalAlpha = crossed ? 0.85 : 0.45;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    const my = (y0 + y1) / 2;
+    ctx.bezierCurveTo(x0, my, x1, my, x1, y1);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // event markers on both strips (top = story order, bottom = telling positions)
+  for (let i = 0; i < EVENTS.length; i++) {
+    const crossed = Math.abs((dev.tellT[i]) - STORY_T[i]) > 0.001 || (dev.storyOverride && dev.storyOverride[i] != null);
+    mark(storyX(dev, i), TOP_Y, EVENTS[i], true, false);
+    mark(tellX(dev, i), BOT_Y, EVENTS[i], false, crossed);
+  }
+
+  // telling-order arrow along the bottom strip — the reader's path through the discourse
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1; ctx.setLineDash([4, 6]);
+  const arrY = BOT_Y + STRIP_H + 80;
+  const order = dev.tellOrder;
+  ctx.beginPath();
+  for (let k = 0; k < order.length; k++) {
+    const x = tellX(dev, order[k]);
+    if (k === 0) ctx.moveTo(x, arrY); else ctx.lineTo(x, arrY);
+  }
+  ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = '#6d6653'; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('reader’s path: ' + order.map(i => EVENTS[i]).join(' → '), W / 2, arrY + 26);
+
+  // readout: device + gloss + ratio
+  readout.innerHTML = dev.name
+    + '<span class="sub">' + dev.gloss + '</span>'
+    + '<span class="sub">story : telling &mdash; ' + dev.ratio + '</span>';
+}
+
+function setBtns(key) {
+  for (const b of document.querySelectorAll('.controls button[data-d]'))
+    b.classList.toggle('on', b.dataset.d === key);
+}
+for (const b of document.querySelectorAll('.controls button[data-d]')) {
+  b.onclick = () => { device = b.dataset.d; setBtns(device); draw(); };
+}
+document.getElementById('reset').onclick = () => { device = 'scene'; setBtns('scene'); draw(); };
+
+draw();
+</script>
+</body>
+</html>

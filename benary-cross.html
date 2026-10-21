@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>benary cross</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(560px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>benary cross</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">cross</span><input type="range" id="cross" min="0" max="100" value="100"><span class="val" id="crossV"></span></div>
+    <div class="row"><span class="name">bridge</span><input type="range" id="bridge" min="0" max="100" value="0"><span class="val" id="bridgeV"></span></div>
+  </div>
+  <canvas id="cv" width="820" height="560"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two gray triangles are the exact same gray. one sits on the arm of the cross, the other in the notch beside it &mdash; the same black and white around each. the one that reads as part of the cross looks lighter; the one that reads as sitting on the white background looks darker. lightness follows what a shape belongs to, not just its surround. fade the <b>cross</b> away and they match; or raise the <b>bridge</b> to join them with that same gray.</div>
+
+<script>
+'use strict';
+
+const AW = 52, AL = 145, CX = 410, CY = 235;
+const GRAY = 128;
+// triangle on the arm (belongs to the cross): a tab on the top edge of the vertical arm
+const T2 = [[CX - AW, CY - AL], [CX + 28, CY - AL], [CX - AW, CY - AL - 80]];
+// triangle in the notch (belongs to the background): flush in the upper-right concavity
+const T1 = [[CX + AW, CY - AW], [CX + AW, CY - AW - 80], [CX + AW + 80, CY - AW]];
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const cEl = document.getElementById('cross'), cV = document.getElementById('crossV');
+const bEl = document.getElementById('bridge'), bV = document.getElementById('bridgeV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let cross = 1;    // 0 => cross fades out, triangles on white, equal
+let bridge = 0;   // proof: a band of the same gray joins them
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
+function g2(v) { return 'rgb(' + v + ',' + v + ',' + v + ')'; }
+function tri(p, fill) {
+  ctx.beginPath(); ctx.moveTo(p[0][0], p[0][1]); ctx.lineTo(p[1][0], p[1][1]); ctx.lineTo(p[2][0], p[2][1]); ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+}
+function cen(p) { return [(p[0][0] + p[1][0] + p[2][0]) / 3, (p[0][1] + p[1][1] + p[2][1]) / 3]; }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // the black cross (fades toward paper as cross -> 0)
+  const k = lerp(245, 16, cross);
+  ctx.fillStyle = g2(k);
+  ctx.fillRect(CX - AW, CY - AL, AW * 2, AL * 2);       // vertical arm
+  ctx.fillRect(CX - AL, CY - AW, AL * 2, AW * 2);       // horizontal arm
+
+  // proof: a band of the same gray joining the two triangles
+  if (bridge > 0) {
+    ctx.save();
+    ctx.globalAlpha = bridge;
+    const a = cen(T2), b = cen(T1);
+    ctx.strokeStyle = g2(GRAY); ctx.lineWidth = 26; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    ctx.restore();
+  }
+
+  // the two identical gray triangles, on top
+  tri(T2, g2(GRAY));   // on the cross arm
+  tri(T1, g2(GRAY));   // in the notch
+
+  readout.innerHTML = cross < 0.02
+    ? 'no cross &mdash; two bare gray triangles, both rgb(128), plainly equal.'
+    : bridge > 0.98
+      ? 'one band of gray joins them &mdash; both triangles are rgb(128).'
+      : 'both triangles are rgb(128); the one on the cross reads lighter than the one in the notch.';
+}
+
+function refresh() {
+  cV.textContent = cross < 0.02 ? 'gone — equal' : Math.round(cross * 100) + '%';
+  bV.textContent = bridge > 0.98 ? 'band joined' : bridge > 0 ? 'rising' : 'off';
+  draw();
+}
+
+cEl.oninput = () => { cross = +cEl.value / 100; refresh(); };
+bEl.oninput = () => { bridge = +bEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

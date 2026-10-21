@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hermann-grid</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(620px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>hermann-grid</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">contrast</span><input type="range" id="contrast" min="0" max="100" value="100"><span class="val" id="contrastV"></span></div>
+    <div class="row"><span class="name">scintillate</span><input type="range" id="scint" min="0" max="100" value="0"><span class="val" id="scintV"></span></div>
+  </div>
+  <canvas id="cv" width="820" height="700"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the grey smudges haunting the crossings are not on the page &mdash; look straight at any one and it vanishes. where the pale streets meet, your retina's centre-surround cells are flanked by light on all four sides and dim the spot, so a ghost darkens every crossing but the one you fixate. drop the <b>contrast</b> to nothing and the grid (and its ghosts) dissolve; raise <b>scintillate</b> for the fiercer white-dot version, where the spots flick black in the corner of your eye.</div>
+
+<script>
+'use strict';
+
+const N = 6, SQ = 96, ST = 28;          // squares per side, square size, street width
+const PITCH = SQ + ST;
+const OX = 60, OY = 40;
+
+let contrast = 1;   // 0 => paper, no grid
+let scint = 0;      // white dots at crossings => scintillating grid
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const conEl = document.getElementById('contrast'), conV = document.getElementById('contrastV');
+const scEl = document.getElementById('scint'), scV = document.getElementById('scintV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
+
+const g = (n) => 'rgb(' + n + ',' + n + ',' + n + ')';
+
+function draw() {
+  const W = cv.width, H = cv.height, BOX = N * PITCH - ST;
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, W, H);
+
+  // the streets: white for the classic grid, darkening to grey as it scintillates
+  // (the scintillating version needs grey streets for the white dots to pop)
+  const streetGray = lerp(246, 150, scint);
+  ctx.fillStyle = g(streetGray);
+  ctx.fillRect(OX, OY, BOX, BOX);
+
+  // the squares darken with contrast; at 0 they match the street and dissolve
+  const sqGray = lerp(streetGray, 26, contrast);
+  ctx.fillStyle = g(sqGray);
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      ctx.fillRect(OX + c * PITCH, OY + r * PITCH, SQ, SQ);
+    }
+  }
+
+  // scintillating variant: a white disk at every interior crossing
+  if (scint > 0 && contrast > 0.02) {
+    ctx.save();
+    ctx.globalAlpha = scint;
+    ctx.fillStyle = '#ffffff';
+    for (let r = 1; r < N; r++) {
+      for (let c = 1; c < N; c++) {
+        const x = OX + c * PITCH - ST / 2, y = OY + r * PITCH - ST / 2;
+        ctx.beginPath(); ctx.arc(x, y, ST * 0.46, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  readout.innerHTML = contrast < 0.02
+    ? 'no grid &mdash; and no ghosts. the spots were never on the page.'
+    : scint > 0.5
+      ? 'white dots at the crossings &mdash; watch them flick to black wherever you are not looking.'
+      : 'grey ghosts sit at every crossing but the one you fixate. nothing is drawn there.';
+}
+
+function refresh() {
+  conV.textContent = contrast < 0.02 ? 'off' : Math.round(contrast * 100) + '%';
+  scV.textContent = scint > 0.5 ? 'dots on' : scint > 0 ? Math.round(scint * 100) + '%' : 'off';
+  draw();
+}
+
+conEl.oninput = () => { contrast = +conEl.value / 100; refresh(); };
+scEl.oninput = () => { scint = +scEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

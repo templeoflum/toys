@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>micrometer</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #lc { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>micrometer</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">thimble</span><input type="range" id="turn" min="0" max="900" value="140" step="1"><span class="val" id="turnV"></span></div>
+    <div class="row"><span class="name">pitch p</span><input type="range" id="pitch" min="25" max="100" value="50" step="5"><span class="val" id="pitchV"></span></div>
+    <div class="row"><span class="name">divisions N</span>
+      <span class="modes">
+        <button id="b25">25</button>
+        <button id="b50">50</button>
+        <button id="b100">100</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a precision screw of <b>pitch p</b> drives the spindle, and the <b>thimble</b> is cut into <b>N</b> divisions, so turning it by ONE division advances the spindle by only <b>p/N</b>. the fine thread <b>amplifies</b>: a large rotation of the thimble becomes a tiny, exactly-readable advance &mdash; that amplification is the whole idea. reading = barrel (mm, from full &amp; half turns) + thimble (division &times; p/N).<span class="cite">the micrometer screw gauge &middot; William Gascoigne ~1638 &mdash; one thimble division = pitch/N; the screw amplifies rotation into a fine advance.</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- micrometer screw gauge ---------------------------------------------
+// a precision screw of PITCH p (mm per full turn) drives a spindle. the
+// THIMBLE is graduated into N divisions. one division of thimble rotation
+// advances the spindle by the LEAST COUNT p/N. the fine thread AMPLIFIES:
+// a large angular rotation becomes a tiny linear advance.
+//
+//   full turns t  = floor(rotation / N)        (rotation counted in divisions)
+//   divisions d   = rotation mod N             (thimble reading, past zero)
+//   advance x     = (t · p) + (d · p/N)  =  rotation · (p/N)     [mm]
+//   barrel read   = t · p                       (mm & half-mm on the sleeve)
+//   thimble read  = d · (p/N)
+//   least count   = p/N
+//
+// VERIFY (load-bearing): the spindle position is EXACTLY proportional to the
+// total angular rotation — advance = (p/N) · rotation. equivalently
+//   advance == barrel + thimble  AND  least count == p/N,
+// and (full turns × p) + (divisions × p/N) reconstructs advance to the last
+// digit. no integration: rotation drives everything directly.
+const HALF = 0.5;   // pitch is stored in mm; the sleeve is marked every half-mm
+
+let pitch = 0.5;    // p — mm advanced per full turn (slider 25..100 → 0.25..1.00)
+let N = 50;         // thimble divisions
+let rotDiv = 140;   // total rotation, counted in thimble DIVISIONS (the slider)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const turnEl = document.getElementById('turn'), turnV = document.getElementById('turnV');
+const pitchEl = document.getElementById('pitch'), pitchV = document.getElementById('pitchV');
+const readout = document.getElementById('readout').firstElementChild;
+const b25 = document.getElementById('b25');
+const b50 = document.getElementById('b50');
+const b100 = document.getElementById('b100');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the exact screw reading --------------------------------------------
+// everything downstream reads from this one object, so the drawn scale, the
+// gauge, and the readout can never disagree.
+function reading() {
+  const lc = pitch / N;                 // least count p/N
+  const turns = Math.floor(rotDiv / N); // whole turns completed
+  const d = rotDiv - turns * N;         // divisions past zero on the thimble
+  const barrel = turns * pitch;         // sleeve reading (mm), whole & half turns
+  const thimble = d * lc;               // thimble reading (mm)
+  const advance = rotDiv * lc;          // true spindle advance (mm) — the invariant
+  return { lc, turns, d, barrel, thimble, advance };
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+const SCENE_TOP = 60, SCENE_H = Math.round(H * 0.42);
+const SLEEVE_TOP = SCENE_TOP + SCENE_H + 90;
+const SLEEVE_H = H - SLEEVE_TOP - 60;
+
+// the frame + anvil + spindle closing on an object, showing the tiny linear
+// advance vs the large thimble rotation (the amplification).
+// geometry: anvil face fixed at ax; the spindle face sits at ax + gap, where
+// gap SHRINKS as the spindle advances into the object. advance is drawn
+// EXAGGERATED against the object so a fraction of a mm is visible.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+  const r = reading();
+
+  const cy = SCENE_TOP + Math.round(SCENE_H * 0.5);
+  const frameL = PAD + 40;
+  const anvilX = frameL + 260;          // fixed anvil face
+  const spanMax = 10;                   // mm — the drawn measuring span (0..10)
+  const spanPx = 620;                   // pixels that span maps to
+  const advPx = Math.min(r.advance, spanMax) / spanMax * spanPx;
+
+  // the C-frame (a quiet shade arc + the two jaws)
+  ctx.strokeStyle = shade; ctx.lineWidth = 40; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(anvilX - 30, cy + 150);
+  ctx.arc(anvilX + 40, cy + 40, 200, Math.PI * 0.62, Math.PI * 1.38, false);
+  ctx.stroke();
+  ctx.lineCap = 'butt';
+
+  // the anvil (fixed left jaw)
+  ctx.fillStyle = ink;
+  ctx.fillRect(anvilX - 26, cy - 60, 26, 120);
+
+  // the object being measured — its left face rests on the anvil, its right
+  // face is where the spindle stops. width = the advance (drawn to span).
+  const objL = anvilX;
+  const objW = advPx;
+  ctx.fillStyle = pick;
+  ctx.fillRect(objL, cy - 44, objW, 88);
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.strokeRect(objL, cy - 44, objW, 88);
+
+  // the spindle (moving right jaw) — closes onto the object's right face
+  const spindleX = objL + objW;
+  ctx.fillStyle = ink;
+  ctx.fillRect(spindleX, cy - 60, 26, 120);
+  // the spindle shaft running back into the barrel
+  ctx.fillStyle = faint;
+  ctx.fillRect(spindleX + 26, cy - 16, W - PAD - (spindleX + 26), 32);
+
+  // the ADVANCE caliper mark under the object (tiny linear advance, --mark)
+  const my = cy + 120;
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(objL, my); ctx.lineTo(spindleX, my); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(objL, my - 12); ctx.lineTo(objL, my + 12); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(spindleX, my - 12); ctx.lineTo(spindleX, my + 12); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('advance ' + r.advance.toFixed(3) + ' mm', (objL + spindleX) / 2, my + 40);
+
+  // the rotating THIMBLE dial (the large rotation) drawn as a wheel with N
+  // ticks and a moving reference mark, up-right of the frame.
+  const dcx = W - PAD - 240, dcy = SCENE_TOP + 200, dR = 150;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(dcx, dcy, dR, 0, TAU); ctx.stroke();
+  // the N division ticks around the rim
+  const ang0 = -Math.PI / 2;            // zero at top
+  for (let i = 0; i < N; i++) {
+    const a = ang0 + (i / N) * TAU;
+    const rin = (i % 5 === 0) ? dR - 26 : dR - 14;
+    ctx.strokeStyle = (i % 5 === 0) ? ink : faint;
+    ctx.lineWidth = (i % 5 === 0) ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(dcx + rin * Math.cos(a), dcy + rin * Math.sin(a));
+    ctx.lineTo(dcx + dR * Math.cos(a), dcy + dR * Math.sin(a));
+    ctx.stroke();
+  }
+  // the current thimble reference — d divisions past zero
+  const da = ang0 + (r.d / N) * TAU;
+  ctx.strokeStyle = mark; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(dcx, dcy);
+  ctx.lineTo(dcx + (dR - 6) * Math.cos(da), dcy + (dR - 6) * Math.sin(da));
+  ctx.stroke();
+  ctx.fillStyle = mark; ctx.beginPath();
+  ctx.arc(dcx + (dR - 6) * Math.cos(da), dcy + (dR - 6) * Math.sin(da), 8, 0, TAU); ctx.fill();
+  ctx.fillStyle = ink; ctx.font = '26px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText(String(r.d).padStart(2, '0'), dcx, dcy + 9);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('thimble · ' + N + ' div', dcx, dcy + dR + 34);
+
+  // the amplification label — big rotation, small advance
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('one division of thimble  →  p/N = ' + r.lc.toFixed(3) + ' mm advance',
+               PAD + 6, SCENE_TOP - 22);
+}
+
+// --- the BARREL / SLEEVE linear scale + the THIMBLE edge scale ------------
+// the sleeve is a straight rule marked every 1 mm (long) and every 0.5 mm
+// (short, below the datum line). the thimble's edge scale (N divisions) runs
+// alongside it; a --mark reference line reads the current division. together
+// they reconstruct the reading: barrel (from the sleeve) + thimble (from the
+// division under the reference).
+function drawScale() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+  const r = reading();
+
+  const L = PAD + 60, Rr = W - PAD - 60, boxW = Rr - L;
+  const datum = SLEEVE_TOP + Math.round(SLEEVE_H * 0.42);
+
+  // the sleeve span in mm — a fixed rule so the thimble edge scrolls over it
+  const sleeveMM = 12;                   // mm shown across the rule
+  const pxPerMM = boxW / sleeveMM;
+
+  // datum line
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(L, datum); ctx.lineTo(Rr, datum); ctx.stroke();
+
+  // sleeve marks: 1 mm above the datum, 0.5 mm below (half-mm graduations)
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  for (let mm = 0; mm <= sleeveMM; mm += HALF) {
+    const x = L + mm * pxPerMM;
+    const whole = (Math.abs(mm % 1) < 1e-9);
+    ctx.strokeStyle = whole ? ink : faint; ctx.lineWidth = whole ? 2 : 1;
+    if (whole) { ctx.beginPath(); ctx.moveTo(x, datum - 34); ctx.lineTo(x, datum); ctx.stroke(); }
+    else       { ctx.beginPath(); ctx.moveTo(x, datum); ctx.lineTo(x, datum + 30); ctx.stroke(); }
+    if (whole) { ctx.fillStyle = faint; ctx.fillText(String(mm), x, datum - 42); }
+  }
+  ctx.fillStyle = faint; ctx.textAlign = 'left';
+  ctx.fillText('sleeve — mm (above) · half-mm (below)', L, datum - 66);
+
+  // the barrel reading marker — where the thimble's leading edge sits on the
+  // sleeve. that edge = the whole+half turns advance (r.barrel).
+  const edgeX = L + Math.min(r.barrel, sleeveMM) * pxPerMM;
+  ctx.strokeStyle = shade; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(edgeX, SLEEVE_TOP); ctx.lineTo(edgeX, SLEEVE_TOP + SLEEVE_H); ctx.stroke();
+  // fill the covered sleeve faintly (the thimble body)
+  ctx.fillStyle = 'rgba(207,197,168,0.35)';
+  ctx.fillRect(edgeX, datum + 44, Rr - edgeX, 4);
+
+  // the thimble edge scale — N divisions laid out below the datum, its zero
+  // at the barrel edge, scrolling with the turn. the --mark reference sits on
+  // the datum's continuation (the sleeve's long line).
+  const thY = datum + 90;
+  const divPx = pxPerMM * pitch / N * (pxPerMM > 0 ? 1 : 1); // px per division = px per (p/N mm)
+  const px_perDiv = (pitch / N) * pxPerMM;
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(L, thY); ctx.lineTo(Rr, thY); ctx.stroke();
+  ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+  // draw a run of thimble divisions starting at the barrel edge
+  const nShown = Math.min(N + 1, Math.max(0, Math.floor((Rr - edgeX) / Math.max(px_perDiv, 1))) + 1);
+  for (let i = 0; i <= nShown; i++) {
+    const x = edgeX + i * px_perDiv;
+    if (x > Rr) break;
+    const big = (i % 5 === 0);
+    ctx.strokeStyle = big ? ink : faint; ctx.lineWidth = big ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(x, thY - (big ? 22 : 12)); ctx.lineTo(x, thY); ctx.stroke();
+    if (big) { ctx.fillStyle = faint; ctx.fillText(String(i), x, thY - 30); }
+  }
+  ctx.fillStyle = faint; ctx.textAlign = 'left';
+  ctx.fillText('thimble edge — ' + N + ' divisions · one = p/N = ' + r.lc.toFixed(3) + ' mm', L, thY + 34);
+
+  // the --mark reference reading the current thimble division (r.d)
+  const refX = edgeX + r.d * px_perDiv;
+  if (refX <= Rr) {
+    ctx.strokeStyle = mark; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(refX, thY - 40); ctx.lineTo(refX, thY + 14); ctx.stroke();
+    ctx.fillStyle = mark; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+    ctx.fillText('div ' + r.d, refX, thY - 48);
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawScale();
+}
+
+function updateReadout() {
+  const r = reading();
+  // the invariant, checked live: barrel + thimble must equal the true advance,
+  // and (turns × p) + (d × p/N) must reconstruct it exactly.
+  const recon = r.turns * pitch + r.d * r.lc;
+  const ok = Math.abs((r.barrel + r.thimble) - r.advance) < 1e-9
+          && Math.abs(recon - r.advance) < 1e-9;
+
+  readout.innerHTML =
+    'pitch p <b>' + pitch.toFixed(2) + ' mm/turn</b> &nbsp;·&nbsp; '
+    + 'divisions N <b>' + N + '</b> &nbsp;·&nbsp; '
+    + '<span id="lc">least count p/N = ' + r.lc.toFixed(3) + ' mm</span>'
+    + '<br>barrel <b>' + r.barrel.toFixed(2) + ' mm</b> ('
+    + r.turns + ' turn' + (r.turns === 1 ? '' : 's') + ') &nbsp;+&nbsp; '
+    + 'thimble <b>' + r.thimble.toFixed(3) + ' mm</b> (div ' + r.d + ')'
+    + '<br>total reading <b>' + r.advance.toFixed(3) + ' mm</b>  =  '
+    + 'spindle advance <b>' + r.advance.toFixed(3) + ' mm</b>'
+    + '<br>' + (ok ? 'barrel + thimble = advance = (p/N)·rotation  ✓' : 'reading mismatch');
+}
+
+function refresh() {
+  turnV.textContent = rotDiv;
+  pitchV.textContent = pitch.toFixed(2);
+  draw();
+  updateReadout();
+}
+
+// slider changes take effect live — the thimble rotation drives everything.
+turnEl.oninput = () => { rotDiv = +turnEl.value; refresh(); };
+// pitch slider maps 25..100 → 0.25..1.00 mm/turn (finer thread = finer p/N)
+pitchEl.oninput = () => { pitch = pitchEl.value / 100; refresh(); };
+
+function setN(n) {
+  N = n;
+  b25.classList.toggle('on', n === 25);
+  b50.classList.toggle('on', n === 50);
+  b100.classList.toggle('on', n === 100);
+  refresh();
+}
+b25.onclick = () => setN(25);
+b50.onclick = () => setN(50);
+b100.onclick = () => setN(100);
+
+// slider-driven; a light rAF keeps the draw crisp across resizes, no sim state.
+function frame() {
+  requestAnimationFrame(frame);
+}
+
+setN(50);
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

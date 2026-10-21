@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>same point</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --cart: #4a6670;
+    --polar: #8a7a4a;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .4rem; margin-bottom: 1.2rem; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  .sep { width: 1rem; }
+  canvas { width: min(720px, 96vw); height: auto; display: block; cursor: grab; }
+  canvas.drag { cursor: grabbing; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 2; font-family: 'Courier New', monospace; font-size: .9rem; color: #6d6653; }
+  #readout b { font-weight: normal; }
+  #readout .cart b { color: var(--cart); font-size: 1.1rem; }
+  #readout .polar b { color: var(--polar); font-size: 1.1rem; }
+  #readout .same { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>same point</h1>
+  <div class="controls">
+    <button id="bBoth" class="on">both frames</button>
+    <button id="bCart">cartesian</button>
+    <button id="bPolar">polar</button>
+    <span class="sep"></span>
+    <button id="bDeg" class="on">&theta; in degrees</button>
+    <button id="bRad">&theta; in radians</button>
+    <span class="sep"></span>
+    <button id="bReset">reset</button>
+  </div>
+  <canvas id="cv" width="1440" height="1440"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">one <b style="color:var(--mark)">point</b> on the plane, drag it. the <b style="color:var(--cart)">cartesian</b> frame names it by a horizontal step and a vertical step &mdash; (x, y). the <b style="color:var(--polar)">polar</b> frame names the same point by a distance and a turn &mdash; (r, &theta;). both readouts are the same point; the address is a choice of frame, not a fact about the point. move it and the numbers change together, but the point does not move because you renamed it.<span class="cite">coordinate frames &middot; r = &radic;(x&sup2;+y&sup2;) &middot; &theta; = atan2(y, x) &middot; x = r&middot;cos&theta; &middot; y = r&middot;sin&theta;</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the one invariant: a point in the plane -----------------------------
+// the point is stored ONCE, in plane units (x right, y up). that single pair
+// is the reality. cartesian and polar are two READINGS of it, computed on the
+// fly — neither is stored, neither is privileged.
+//   cartesian → polar :  r = sqrt(x² + y²)          θ = atan2(y, x)
+//   polar → cartesian :  x = r·cos θ                y = r·sin θ
+// atan2(y, x) returns θ in (−π, π]: 0 along +x, positive counter-clockwise,
+// negative clockwise below the x-axis. r is always ≥ 0. we display θ mapped
+// into [0, 360) degrees (or [0, 2π) radians) so the turn reads as one sweep
+// from +x counter-clockwise — a display choice, not a different point.
+let px = 3.2;                 // the point, in plane units — the reality
+let py = 2.1;
+const PX0 = 3.2, PY0 = 2.1;   // reset home
+
+let frame = 'both';           // both | cart | polar (which frame to emphasize)
+let degrees = true;           // θ display units
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// --- the two readings of the one point -----------------------------------
+function cartesian() { return { x: px, y: py }; }
+function polar() {
+  const r = Math.hypot(px, py);        // = sqrt(x² + y²), always ≥ 0
+  let th = Math.atan2(py, px);         // in (−π, π]
+  if (th < 0) th += TAU;               // display remap into [0, 2π): one CCW sweep
+  return { r, th };
+}
+
+// --- the drawn plane ------------------------------------------------------
+const W = cv.width, H = cv.height;
+const CX = W / 2, CY = H / 2;   // canvas origin (plane 0,0)
+const UNIT = 130;               // pixels per plane unit
+const RANGE = 5;                // plane extent shown each way (−5..5)
+
+function sx(x) { return CX + x * UNIT; }         // plane x → canvas x
+function sy(y) { return CY - y * UNIT; }         // plane y → canvas y (y up)
+function toPlane(cx, cy) { return [(cx - CX) / UNIT, (CY - cy) / UNIT]; }
+
+// --- the cartesian grid: squares -----------------------------------------
+function drawCartGrid(strong) {
+  const cart = css('--cart'), faint = css('--faint'), ink = css('--ink');
+  ctx.lineWidth = 1;
+  for (let i = -RANGE; i <= RANGE; i++) {
+    ctx.strokeStyle = strong ? cart : faint;
+    ctx.globalAlpha = strong ? 0.35 : 0.18;
+    ctx.beginPath(); ctx.moveTo(sx(i), sy(-RANGE)); ctx.lineTo(sx(i), sy(RANGE)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx(-RANGE), sy(i)); ctx.lineTo(sx(RANGE), sy(i)); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // axes
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(sx(-RANGE), CY); ctx.lineTo(sx(RANGE), CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX, sy(-RANGE)); ctx.lineTo(CX, sy(RANGE)); ctx.stroke();
+  ctx.fillStyle = css('--faint'); ctx.font = '22px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('x', sx(RANGE) - 26, CY - 12);
+  ctx.textAlign = 'center';
+  ctx.fillText('y', CX + 16, sy(RANGE) + 22);
+}
+
+// --- the polar grid: concentric circles + radial spokes ------------------
+function drawPolarGrid(strong) {
+  const polar = css('--polar'), faint = css('--faint');
+  ctx.strokeStyle = strong ? polar : faint;
+  ctx.globalAlpha = strong ? 0.35 : 0.18;
+  ctx.lineWidth = 1;
+  for (let r = 1; r <= RANGE; r++) {
+    ctx.beginPath(); ctx.arc(CX, CY, r * UNIT, 0, TAU); ctx.stroke();
+  }
+  // spokes every 30°
+  for (let d = 0; d < 360; d += 30) {
+    const a = d * Math.PI / 180;
+    ctx.beginPath(); ctx.moveTo(CX, CY);
+    ctx.lineTo(CX + Math.cos(a) * RANGE * UNIT, CY - Math.sin(a) * RANGE * UNIT);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// --- the point and its two addresses drawn onto the plane ----------------
+function drawPoint() {
+  const cart = css('--cart'), polarC = css('--polar'), mark = css('--mark'), faint = css('--faint');
+  const { x, y } = cartesian();
+  const { r, th } = polar();   // the module-level reading fn — not the color const
+  const showCart = frame !== 'polar';
+  const showPolar = frame !== 'cart';
+  const P = [sx(x), sy(y)];
+
+  // cartesian address: dotted legs x then y from origin to point
+  if (showCart) {
+    ctx.strokeStyle = cart; ctx.lineWidth = 2.5; ctx.setLineDash([7, 6]);
+    ctx.beginPath(); ctx.moveTo(CX, CY); ctx.lineTo(sx(x), CY); ctx.stroke();      // the x step
+    ctx.beginPath(); ctx.moveTo(sx(x), CY); ctx.lineTo(P[0], P[1]); ctx.stroke();  // the y step
+    ctx.setLineDash([]);
+    ctx.fillStyle = cart; ctx.font = '24px "Courier New", monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText('x = ' + x.toFixed(2), (CX + sx(x)) / 2, CY + 8);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('y = ' + y.toFixed(2), sx(x) + 10, (CY + P[1]) / 2);
+  }
+
+  // polar address: the radius line r, and the swept angle θ arc at the origin
+  if (showPolar) {
+    ctx.strokeStyle = polarC; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(CX, CY); ctx.lineTo(P[0], P[1]); ctx.stroke();     // the r reach
+    // the θ sweep arc (canvas angles go clockwise, so negate)
+    const rad = Math.max(46, r * UNIT * 0.28);
+    ctx.beginPath(); ctx.arc(CX, CY, rad, 0, -th, true); ctx.stroke();
+    // r label at the midpoint of the reach
+    ctx.fillStyle = polarC; ctx.font = '24px "Courier New", monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText('r = ' + r.toFixed(2), (CX + P[0]) / 2 - 6, (CY + P[1]) / 2 - 8);
+    // θ label just outside the arc, along the bisector of the sweep
+    const bis = th / 2;
+    ctx.textBaseline = 'middle';
+    ctx.fillText('θ', CX + Math.cos(bis) * (rad + 24), CY - Math.sin(bis) * (rad + 24));
+  }
+
+  // the point itself — the one shared reality
+  ctx.setLineDash([]);
+  ctx.fillStyle = mark;
+  ctx.beginPath(); ctx.arc(P[0], P[1], 12, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '22px Georgia'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  ctx.fillText('the point', P[0], P[1] - 20);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // draw the de-emphasized grid first, emphasized one on top
+  drawCartGrid(frame === 'cart');
+  drawPolarGrid(frame === 'polar');
+  drawPoint();
+}
+
+// --- the readout: both addresses of the one point ------------------------
+function updateReadout() {
+  const { x, y } = cartesian();
+  const { r, th } = polar();
+  const thShown = degrees ? (th * 180 / Math.PI).toFixed(1) + '°'
+                          : th.toFixed(3) + ' rad';
+
+  readout.innerHTML =
+      '<span class="cart">cartesian&nbsp; (x, y) = <b>(' + x.toFixed(2) + ', ' + y.toFixed(2) + ')</b></span>'
+    + '&nbsp;&nbsp;·&nbsp;&nbsp;'
+    + '<span class="polar">polar&nbsp; (r, θ) = <b>(' + r.toFixed(2) + ', ' + thShown + ')</b></span>'
+    + '<br><span class="same">one point, two frames &mdash; the address changed, the point did not</span>';
+}
+
+function refresh() { draw(); updateReadout(); }
+
+// --- drag the one point --------------------------------------------------
+let dragging = false;
+function pointer(ev) {
+  const rct = cv.getBoundingClientRect();
+  return [(ev.clientX - rct.left) / rct.width * cv.width,
+          (ev.clientY - rct.top) / rct.height * cv.height];
+}
+cv.addEventListener('pointerdown', (ev) => {
+  const [cx, cy] = pointer(ev);
+  const P = [sx(px), sy(py)];
+  // grab if near the point, else jump the point to the click
+  dragging = true; cv.classList.add('drag'); cv.setPointerCapture(ev.pointerId);
+  if (Math.hypot(cx - P[0], cy - P[1]) > 40) [px, py] = toPlane(cx, cy);
+  refresh();
+});
+cv.addEventListener('pointermove', (ev) => {
+  if (!dragging) return;
+  const [cx, cy] = pointer(ev);
+  [px, py] = toPlane(cx, cy);
+  // clamp to the shown plane extent so the address stays readable
+  px = Math.max(-RANGE, Math.min(RANGE, px));
+  py = Math.max(-RANGE, Math.min(RANGE, py));
+  refresh();
+});
+cv.addEventListener('pointerup', () => { dragging = false; cv.classList.remove('drag'); });
+
+// --- frame emphasis + θ units + reset ------------------------------------
+function setFrame(f) {
+  frame = f;
+  document.getElementById('bBoth').classList.toggle('on', f === 'both');
+  document.getElementById('bCart').classList.toggle('on', f === 'cart');
+  document.getElementById('bPolar').classList.toggle('on', f === 'polar');
+  refresh();
+}
+document.getElementById('bBoth').onclick = () => setFrame('both');
+document.getElementById('bCart').onclick = () => setFrame('cart');
+document.getElementById('bPolar').onclick = () => setFrame('polar');
+
+function setUnits(deg) {
+  degrees = deg;
+  document.getElementById('bDeg').classList.toggle('on', deg);
+  document.getElementById('bRad').classList.toggle('on', !deg);
+  refresh();
+}
+document.getElementById('bDeg').onclick = () => setUnits(true);
+document.getElementById('bRad').onclick = () => setUnits(false);
+
+document.getElementById('bReset').onclick = () => {
+  px = PX0; py = PY0; setFrame('both'); setUnits(true);
+};
+
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>apparent motion</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --dot: #2b2a26;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 3.5rem; text-align: right; }
+  .row span.val { width: 13rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(620px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>apparent motion</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">rate</span><input type="range" id="rate" min="0" max="100" value="80"><span class="val" id="rateV"></span></div>
+    <div class="row"><span class="name">both</span><input type="range" id="both" min="0" max="100" value="0"><span class="val" id="bothV"></span></div>
+  </div>
+  <canvas id="cv" width="620" height="360"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two dots, side by side, and only ever one is lit at a time &mdash; they simply take turns. flashed quickly enough, you don't see two blinking lamps but one dot gliding back and forth. the eye fills the gap between them with motion that was never there. slow the <b>rate</b> right down and it falls apart into two separate blinks; raise <b>both</b> to light them together and see there are plainly two.</div>
+
+<script>
+'use strict';
+
+const AX = 210, BX = 410, CY = 175, R = 30;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rEl = document.getElementById('rate'), rV = document.getElementById('rateV');
+const bEl = document.getElementById('both'), bV = document.getElementById('bothV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let rate = 0.8;   // 0 slow blinks -> 1 fast (apparent motion)
+let both = 0;     // proof: light both at once, plainly two
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function dot(x) { ctx.beginPath(); ctx.arc(x, CY, R, 0, Math.PI * 2); ctx.fillStyle = css('--dot'); ctx.fill(); }
+
+function draw(ts) {
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, 620, 360);
+
+  if (both > 0.5) {
+    dot(AX); dot(BX);
+  } else {
+    const T = 1500 - rate * 1280;          // full cycle 1500ms (slow) -> 220ms (fast)
+    const lit = Math.floor(ts / (T / 2)) % 2;
+    dot(lit === 0 ? AX : BX);
+  }
+
+  requestAnimationFrame(draw);
+}
+
+function refresh() {
+  rV.textContent = both > 0.5 ? '—' : rate < 0.15 ? 'slow — two blinks' : rate > 0.85 ? 'fast — one glides' : Math.round(1500 - rate * 1280) + 'ms cycle';
+  bV.textContent = both > 0.5 ? 'both lit — two dots' : 'off';
+  readout.innerHTML = both > 0.5
+    ? 'both dots lit at once &mdash; plainly two, not one moving.'
+    : rate < 0.15
+      ? 'slow &mdash; two separate dots, blinking in turn. no motion.'
+      : 'one dot seems to glide back and forth &mdash; but it is two, flashing in turn.';
+}
+
+rEl.oninput = () => { rate = +rEl.value / 100; refresh(); };
+bEl.oninput = () => { both = +bEl.value / 100; refresh(); };
+refresh();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

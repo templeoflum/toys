@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>galvanometer</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>galvanometer</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">current I</span><input type="range" id="cur" min="-100" max="100" value="40" step="1"><span class="val" id="curV"></span></div>
+    <div class="row"><span class="name">sensitivity</span><input type="range" id="sens" min="20" max="240" value="100" step="2"><span class="val" id="sensV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bField">field B</button>
+        <button id="bTurns">turns N</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a <b>current</b> through a coil of <b>N turns</b> and area A, sitting in a radial <b>field B</b>, feels a torque &tau; = N&middot;I&middot;A&middot;B that twists it against a restoring <b>spring</b> k. at balance the needle rests where the two match, so the deflection <b>&theta;</b> is exactly <b>proportional</b> to the current: double the current, double the angle; reverse it, and the needle swings the other way. the <b>sensitivity</b> knob raises the field (or the turns), so the same current deflects further.<span class="cite">the moving-coil galvanometer &middot; d'Arsonval/Deprez 1882 &middot; deflection &theta; &prop; current (&tau; = NIAB vs spring) &middot; field: electromagnetism</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- moving-coil (d'Arsonval) galvanometer ------------------------------
+// a coil of N turns, area A, hangs in a radial field B. a current I gives a
+// torque  τ = N·I·A·B  that twists the coil against a spring of stiffness k.
+// at equilibrium spring torque = magnetic torque, so:
+//   k·θ = N·A·B·I   →   θ = (N·A·B / k) · I
+// the needle angle is LINEAR in the current: θ = S·I with S = N·A·B/k the
+// full sensitivity. no time integration — the equilibrium is read directly
+// from the live knobs (a real ballistic needle settles here after ringing).
+//
+// VERIFY (load-bearing): θ = (N·A·B / k)·I EXACTLY.
+//   · doubling I doubles θ           (θ(2I) = 2·θ(I))
+//   · θ reverses sign with I         (θ(−I) = −θ(I))
+//   · raising B (or N) raises S, so the same I deflects further.
+// the readout prints S·I and θ side by side; they must match to the digit.
+// the DRAWN needle is clamped to the scale's ±θmax, but the readout θ stays
+// the true linear value — clamping is cosmetic, never the physics.
+const AREA = 1.0;   // coil area A, fixed (folds into the sensitivity constant)
+const SPRING = 1.0; // restoring spring stiffness k, fixed
+const THETA_MAX = 45 * Math.PI / 180;   // scale spans ±45° — the drawn clamp
+
+// live knobs. current I in amp-ish units (±). sensitivity feeds B or N.
+let I = 0.40;        // current through the coil, can be ±
+let sens = 1.00;     // the sensitivity param — B (field mode) or N (turns mode)
+let mode = 'field';  // 'field' (sens = B, N fixed) | 'turns' (sens = N, B fixed)
+
+const N_FIXED = 100;   // turns, when sens drives the field instead
+const B_FIXED = 1.00;  // field, when sens drives the turns instead
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const curEl = document.getElementById('cur'), curV = document.getElementById('curV');
+const sensEl = document.getElementById('sens'), sensV = document.getElementById('sensV');
+const readout = document.getElementById('readout').firstElementChild;
+const bField = document.getElementById('bField');
+const bTurns = document.getElementById('bTurns');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// the live N and B, resolved from the mode + sensitivity knob.
+function coilN() { return mode === 'turns' ? sens * 100 : N_FIXED; }
+function coilB() { return mode === 'field' ? sens : B_FIXED; }
+
+// the sensitivity constant S = N·A·B / k, and the true deflection θ = S·I.
+// the drawing normalizes so a mid-scale S·I lands cleanly inside ±θmax; the
+// physics below (returned θ) is unnormalized and exact.
+const S_NORM = N_FIXED * AREA * B_FIXED / SPRING;   // reference S at defaults
+function sensS() { return coilN() * AREA * coilB() / SPRING; }
+// θ in the drawing's angle units: scaled so I=1 at default S ≈ THETA_MAX.
+function thetaDraw() { return (sensS() / S_NORM) * I * THETA_MAX; }
+// θ as the readout reports it — a plain linear multiple of I, no clamp.
+function thetaTrue() { return (sensS() / S_NORM) * I; }   // in θmax-units
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the coil in the field + the torque/spring balance.
+// bottom band: the graduated dial with the deflecting pointer.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.40);
+const DIAL_TOP = SCENE_TOP + SCENE_H + 60;
+
+// --- top band: the coil sitting in the radial field ---------------------
+// horizontal field lines (--shade) with pole labels; the rectangular coil
+// drawn edge-on between them, its current direction marked. a torque arc
+// (--mark) shows the magnetic twist, opposed by the spring's restoring arc
+// (--faint). the two balance — that balance IS the equilibrium angle.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const cx = Math.round(W * 0.5);
+  const cy = SCENE_TOP + Math.round(SCENE_H * 0.5);
+
+  // the radial field — horizontal lines streaming N → S across the coil.
+  // density (line count) rises with the field/turns sensitivity so a
+  // stronger sensitivity visibly crowds the gap.
+  ctx.strokeStyle = shade; ctx.lineWidth = 3;
+  const lines = Math.round(4 + (sensS() / S_NORM) * 6);
+  const gapTop = cy - 150, gapBot = cy + 150;
+  for (let i = 0; i < lines; i++) {
+    const y = gapTop + (gapBot - gapTop) * (i + 0.5) / lines;
+    ctx.beginPath(); ctx.moveTo(PAD + 120, y); ctx.lineTo(W - PAD - 120, y); ctx.stroke();
+    // a small arrowhead mid-line to show the field direction
+    arrowHeadAt(cx - 240, y, 1, 0, shade);
+    arrowHeadAt(cx + 260, y, 1, 0, shade);
+  }
+  // pole faces + labels
+  ctx.fillStyle = faint; ctx.font = '40px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('N', PAD + 66, cy + 14);
+  ctx.fillText('S', W - PAD - 66, cy + 14);
+  ctx.font = '20px "Courier New", monospace';
+  ctx.fillText('field B', cx, gapTop - 24);
+
+  // the coil — a rectangle turning about the vertical pivot, tilted by θ so
+  // you see the twist. drawn clamped to ±θmax.
+  const th = Math.max(-THETA_MAX, Math.min(THETA_MAX, thetaDraw()));
+  const cw = 210, chh = 120;   // coil half-width in plan, half-height
+  ctx.save();
+  ctx.translate(cx, cy);
+  // face-on width shrinks with cos(th): the coil rotates about its vertical axis
+  const faceW = cw * Math.cos(th);
+  ctx.strokeStyle = ink; ctx.lineWidth = 5;
+  ctx.strokeRect(-faceW / 2, -chh, faceW, chh * 2);
+  // a couple of inner turns to read "coil of N turns"
+  ctx.lineWidth = 1.5; ctx.strokeStyle = faint;
+  for (let t = 1; t <= 3; t++) {
+    const iw = faceW - t * 14;
+    if (iw > 8) ctx.strokeRect(-iw / 2, -chh + t * 6, iw, chh * 2 - t * 12);
+  }
+  // current-direction dots on the two vertical wires (· out / × in), flipped
+  // with the sign of I so the twist sense reads
+  ctx.fillStyle = mark; ctx.font = '30px "Courier New", monospace'; ctx.textAlign = 'center';
+  const outMark = I >= 0 ? '·' : '×', inMark = I >= 0 ? '×' : '·';
+  ctx.fillText(outMark, -faceW / 2, 8);
+  ctx.fillText(inMark, faceW / 2, 8);
+  ctx.restore();
+
+  // the torque vs spring balance, drawn as two opposing arcs about the pivot.
+  // magnetic torque (--mark) ∝ N·I·A·B; spring torque (--faint) ∝ k·θ. at rest
+  // they are equal and opposite — the needle holds. arc sweep ∝ |θ|.
+  const arcR = 300;
+  const sweep = Math.abs(th) / THETA_MAX * 0.9;   // visual sweep fraction
+  const sgn = th >= 0 ? 1 : -1;
+  // magnetic torque arc — drives the deflection (from top, in the θ sense)
+  ctx.strokeStyle = mark; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(cx, cy, arcR, -Math.PI / 2, -Math.PI / 2 + sgn * sweep, sgn < 0);
+  ctx.stroke();
+  const ta = -Math.PI / 2 + sgn * sweep;
+  arrowHeadAt(cx + arcR * Math.cos(ta), cy + arcR * Math.sin(ta), -sgn * Math.sin(ta), sgn * Math.cos(ta), mark);
+  ctx.fillStyle = mark; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('τ = N·I·A·B', cx + arcR + 16, cy - arcR + 40);
+  // spring restoring arc — opposes, same sweep (they balance at rest)
+  ctx.strokeStyle = faint; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(cx, cy, arcR - 26, -Math.PI / 2, -Math.PI / 2 - sgn * sweep, sgn > 0);
+  ctx.stroke();
+  ctx.fillStyle = faint; ctx.textAlign = 'right';
+  ctx.fillText('spring k·θ', cx - arcR - 16, cy - arcR + 40);
+
+  // a quiet label of the live mode
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText(mode === 'field' ? 'sensitivity: field B  (N fixed at ' + N_FIXED + ')'
+                                : 'sensitivity: turns N  (B fixed at ' + B_FIXED.toFixed(2) + ')',
+               PAD + 6, SCENE_TOP + 4);
+}
+
+// --- bottom band: the graduated scale + the deflecting pointer ----------
+// a semicircular dial marked in current, with 0 at top-centre and ± wings.
+// the pointer swings by θ (clamped to ±θmax = the scale edge). the pointer
+// angle is LINEAR in I: the same I lands at the same tick regardless of
+// sensitivity in current-units — but sensitivity changes how far a fixed I
+// throws, shown by the θ readout, not by re-labelling the scale.
+function drawDial() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  const px = Math.round(W * 0.5);
+  const py = DIAL_TOP + 380;         // pivot near the bottom, needle points up
+  const R = 340;                     // needle length / scale radius
+
+  // the graduated arc — 0 at top, sweeping ±THETA_MAX either side
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(px, py, R, -Math.PI / 2 - THETA_MAX, -Math.PI / 2 + THETA_MAX);
+  ctx.stroke();
+
+  // ticks every 9° across ±45°, longer + labelled at the ends and centre
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  for (let deg = -45; deg <= 45; deg += 9) {
+    const a = -Math.PI / 2 + deg * Math.PI / 180;
+    const major = (deg % 45 === 0) || deg === 0;
+    const r0 = R - (major ? 26 : 14);
+    ctx.strokeStyle = faint; ctx.lineWidth = major ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(px + r0 * Math.cos(a), py + r0 * Math.sin(a));
+    ctx.lineTo(px + R * Math.cos(a), py + R * Math.sin(a));
+    ctx.stroke();
+  }
+  // centre-zero and end labels
+  ctx.textAlign = 'center'; ctx.fillStyle = faint;
+  ctx.fillText('0', px, py - R - 16);
+  ctx.textAlign = 'left';
+  ctx.fillText('+', px + (R + 20) * Math.cos(-Math.PI / 2 + THETA_MAX), py + (R + 20) * Math.sin(-Math.PI / 2 + THETA_MAX) + 6);
+  ctx.textAlign = 'right';
+  ctx.fillText('−', px + (R + 20) * Math.cos(-Math.PI / 2 - THETA_MAX), py + (R + 20) * Math.sin(-Math.PI / 2 - THETA_MAX) + 6);
+
+  // the pointer — swings by θ, clamped to the scale edge (cosmetic clamp;
+  // the readout θ stays the true linear value).
+  const thTrue = thetaTrue() * THETA_MAX;   // true deflection in radians
+  const th = Math.max(-THETA_MAX, Math.min(THETA_MAX, thTrue));
+  const a = -Math.PI / 2 + th;
+  const clamped = Math.abs(thTrue) > THETA_MAX + 1e-9;
+
+  // a faint ghost pointer at the TRUE (unclamped) angle when it runs off scale,
+  // so the "clamped drawing, true physics" split is visible
+  if (clamped) {
+    const ga = -Math.PI / 2 + Math.sign(thTrue) * (THETA_MAX + 0.12);
+    ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([5, 6]);
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + R * Math.cos(ga), py + R * Math.sin(ga)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = faint; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'center';
+    ctx.fillText('off scale', px + (R + 10) * Math.cos(ga), py + (R + 10) * Math.sin(ga));
+  }
+
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + R * Math.cos(a), py + R * Math.sin(a)); ctx.stroke();
+  // the pivot hub + a short counter-tail
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px - 40 * Math.cos(a), py - 40 * Math.sin(a)); ctx.stroke();
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(px, py, 12, 0, TAU); ctx.fill();
+
+  // a caption under the pivot
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('deflection θ ∝ current I', px, py + 46);
+}
+
+// a filled arrowhead at (x,y) pointing along unit (dx,dy)
+function arrowHeadAt(x, y, dx, dy, colour) {
+  const s = 12, a = Math.atan2(dy, dx);
+  ctx.fillStyle = colour;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawDial();
+}
+
+// --- regime read: which way, and on- or off-scale -----------------------
+function regimeOf() {
+  const off = Math.abs(thetaTrue()) > 1;   // beyond ±θmax in normalized units
+  if (Math.abs(I) < 1e-6) return 'no current — needle rests at zero';
+  const side = I > 0 ? 'right (+)' : 'left (−)';
+  return off ? ('deflected ' + side + ' — off scale (θ still linear in I)')
+             : ('deflected ' + side + ' — θ proportional to current');
+}
+
+function updateReadout() {
+  const N = coilN(), B = coilB(), S = sensS();
+  // the two independent computations that must agree: θ from the formula,
+  // and S·I. printed to matching precision.
+  const thByFormula = (N * AREA * B / SPRING) * I;   // raw θ = (NAB/k)·I
+  const thBySI = S * I;                               // S·I, same thing
+  const thDeg = thetaTrue() * 45;                     // shown in scale-degrees
+  const sensName = mode === 'field' ? 'field B' : 'turns N';
+  const sensVal = mode === 'field' ? B.toFixed(2) : N.toFixed(0);
+
+  readout.innerHTML =
+    'current I <b>' + (I >= 0 ? '+' : '') + I.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + sensName + ' <b>' + sensVal + '</b> &nbsp;·&nbsp; '
+    + 'sensitivity S = N·A·B/k <b>' + S.toFixed(1) + '</b>'
+    + '<br>deflection θ <b>' + thDeg.toFixed(1) + '°</b> &nbsp;·&nbsp; '
+    + 'θ = (N·A·B/k)·I = <b>' + thByFormula.toFixed(2) + '</b> = S·I = <b>' + thBySI.toFixed(2) + '</b>'
+    + '<br>θ linear in I: double I → double θ &nbsp;·&nbsp; reverse I → reverse θ'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  curV.textContent = (I >= 0 ? '+' : '') + I.toFixed(2);
+  sensV.textContent = mode === 'field' ? coilB().toFixed(2) : coilN().toFixed(0);
+  updateReadout();
+}
+
+// slider changes take effect live. current and sensitivity feed θ directly;
+// nothing integrates over time — the needle reads the equilibrium at once.
+curEl.oninput = () => { I = curEl.value / 100; refresh(); };
+sensEl.oninput = () => { sens = sensEl.value / 100; refresh(); };
+
+function setMode(m) {
+  mode = m;
+  bField.classList.toggle('on', m === 'field');
+  bTurns.classList.toggle('on', m === 'turns');
+  refresh();
+}
+bField.onclick = () => setMode('field');
+bTurns.onclick = () => setMode('turns');
+
+// reset — current back to zero (needle to rest), sensitivity to mid.
+bReset.onclick = () => {
+  I = 0.40; sens = 1.00;
+  curEl.value = 40; sensEl.value = 100;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: pure redraw (no integration) ------------------------
+// the galvanometer equilibrium is algebraic — θ = S·I — so the loop just
+// keeps the canvas painted against the current knob values.
+function frame() {
+  draw();
+  requestAnimationFrame(frame);
+}
+
+setMode('field');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

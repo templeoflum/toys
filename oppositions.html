@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oppositions</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --mark: #b8603a;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --rule: #8a8270;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .4rem; }
+  .controls { display: flex; gap: .5rem; margin: .8rem 0 1.4rem; flex-wrap: wrap; justify-content: center; }
+  button {
+    font: inherit; font-size: .85rem;
+    background: none; border: 1px solid var(--ink); border-radius: 2px;
+    color: var(--ink); padding: .3rem .8rem; cursor: pointer;
+  }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+
+  #pairs { width: min(560px, 94vw); display: flex; flex-direction: column; gap: .55rem; }
+  .pair {
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch;
+    border: 1.5px solid var(--ink);
+  }
+  .term {
+    padding: .55rem .6rem; text-align: center; cursor: pointer;
+    font-size: 1.05rem; user-select: none; transition: background .15s;
+  }
+  .term:hover { background: var(--shade); }
+  .term.picked { background: var(--ink); color: var(--paper); }
+  .term.contrast { background: var(--pick); }
+  .bar {
+    width: 0; border-left: 1.5px solid var(--ink);
+  }
+  .axis {
+    grid-column: 1 / -1; text-align: center; font-family: 'Courier New', monospace;
+    font-size: .68rem; color: var(--rule); padding: .12rem 0 .25rem;
+    border-top: 1px solid var(--faint);
+  }
+
+  #readout {
+    width: min(560px, 94vw); margin-top: 1.6rem; line-height: 1.85;
+    font-family: 'Courier New', monospace; font-size: .9rem; min-height: 3.4rem;
+  }
+  #relation { color: var(--ink); }
+  #relation b { font-weight: normal; color: var(--mark); border-bottom: 1px solid var(--faint); }
+  #diff { color: var(--rule); font-size: .82rem; margin-top: .5rem; }
+  #teaching {
+    width: min(560px, 94vw); margin-top: 1.2rem; font-style: italic;
+    font-size: .84rem; color: var(--ink); line-height: 1.7;
+  }
+  .hint { margin-top: 1.6rem; font-style: italic; font-size: .8rem; color: var(--faint); text-align: center; }
+</style>
+</head>
+<body>
+  <h1>oppositions</h1>
+  <div class="controls">
+    <button id="mode-pick" class="on">pick a term</button>
+    <button id="mode-classify">classify an item</button>
+    <button id="reset">reset</button>
+  </div>
+  <div id="pairs"></div>
+  <div id="readout">
+    <div id="relation">&nbsp;</div>
+    <div id="diff">&nbsp;</div>
+  </div>
+  <div id="teaching">&nbsp;</div>
+  <div class="hint" id="hint">&nbsp;</div>
+
+<script>
+'use strict';
+// Saussure, Cours de linguistique générale (1916): "in language there are only
+// differences ... without positive terms." A sign has value not in itself but by
+// its contrast with the others — the minimal contrast is a binary opposition.
+// Lévi-Strauss (Mythologiques; "The Structural Study of Myth", 1955) reads myth
+// and kinship as bundles of such oppositions — raw/cooked, nature/culture — and
+// classifies items by which pole of each axis they fall on. That is the second
+// mode below: an item's "meaning" becomes its bundle of +/- feature values.
+//
+// The honest claim we stage: a term signifies through DIFFERENCE from its
+// opposite, not by any content it carries alone. Select "light" and the toy has
+// nothing to show but "not dark" — the meaning IS the contrast. This is ONE
+// theory of meaning (structuralism); flagged as such in the teaching line, not
+// asserted as the whole account of how words mean.
+
+// Each axis is a binary opposition drawn from the standard structuralist stock.
+// `pole` marks the two terms; `plus` names which pole counts as the + feature
+// for the classify mode (the choice of which side is "+" is a convention, not a
+// value judgement — noted in the teaching text).
+const AXES = [
+  { a: 'raw',     b: 'cooked',  plus: 'b', gloss: 'Lévi-Strauss’s culinary triangle: the base nature/culture cut' },
+  { a: 'nature',  b: 'culture', plus: 'b', gloss: 'the master opposition much of his analysis rests on' },
+  { a: 'light',   b: 'dark',    plus: 'a', gloss: 'a perceptual pair — each term is the absence of the other' },
+  { a: 'sacred',  b: 'profane', plus: 'a', gloss: 'Durkheim’s pair, taken up as a structural division' },
+  { a: 'self',    b: 'other',   plus: 'a', gloss: 'identity fixed only against what it is not' },
+];
+
+// Items to drop through the axes in classify mode. Each carries a + / - reading
+// on every axis; the bundle of readings is all the "meaning" the model grants it.
+// (These readings are illustrative structuralist calls, not facts about the world.)
+const ITEMS = [
+  { name: 'roast meat',   vals: [ 1,  1,  0, -1,  0] },
+  { name: 'a wild berry', vals: [-1, -1,  1, -1,  0] },
+  { name: 'a ritual fire',vals: [ 1,  1,  1,  1, -1] },
+  { name: 'a stranger',   vals: [ 0, -1,  0,  0,  1] },
+];
+
+let mode = 'pick';     // 'pick' | 'classify'
+let pick = null;       // {axis, side} when a term is selected
+let item = null;       // index into ITEMS when classifying
+
+const pairsEl = document.getElementById('pairs');
+const relEl = document.getElementById('relation');
+const diffEl = document.getElementById('diff');
+const teachEl = document.getElementById('teaching');
+const hintEl = document.getElementById('hint');
+
+function opp(side) { return side === 'a' ? 'b' : 'a'; }
+
+function render() {
+  pairsEl.innerHTML = '';
+  AXES.forEach((ax, i) => {
+    const pair = document.createElement('div');
+    pair.className = 'pair';
+
+    const left = term(ax.a, i, 'a');
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    const right = term(ax.b, i, 'b');
+    pair.appendChild(left);
+    pair.appendChild(bar);
+    pair.appendChild(right);
+
+    // in classify mode, name the axis and show where the item sits.
+    if (mode === 'classify') {
+      const axis = document.createElement('div');
+      axis.className = 'axis';
+      if (item !== null) {
+        const v = ITEMS[item].vals[i];
+        const feat = ax.plus === 'a' ? ax.a : ax.b;
+        const sign = v > 0 ? '+' : v < 0 ? '−' : '·';
+        const reads = v === 0 ? 'neither pole' :
+          (sign + ' ' + feat + (v > 0 ? '' : '  (leans ' + (ax.plus === 'a' ? ax.b : ax.a) + ')'));
+        axis.textContent = ax.a + ' | ' + ax.b + '   →   ' + reads;
+      } else {
+        axis.textContent = ax.a + ' | ' + ax.b;
+      }
+      pair.appendChild(axis);
+    }
+    pairsEl.appendChild(pair);
+  });
+  highlight();
+  updateChrome();
+}
+
+function term(text, axisIndex, side) {
+  const el = document.createElement('div');
+  el.className = 'term';
+  el.textContent = text;
+  el.dataset.axis = axisIndex;
+  el.dataset.side = side;
+  el.onclick = () => {
+    if (mode !== 'pick') return;
+    pick = { axis: axisIndex, side };
+    render();
+  };
+  return el;
+}
+
+// mark the picked term and its opposite; in classify mode mark the item's pole.
+function highlight() {
+  const terms = pairsEl.querySelectorAll('.term');
+  terms.forEach(t => t.classList.remove('picked', 'contrast'));
+  if (mode === 'pick' && pick) {
+    terms.forEach(t => {
+      if (+t.dataset.axis !== pick.axis) return;
+      if (t.dataset.side === pick.side) t.classList.add('picked');
+      else t.classList.add('contrast');
+    });
+  }
+  if (mode === 'classify' && item !== null) {
+    terms.forEach(t => {
+      const ax = AXES[+t.dataset.axis];
+      const v = ITEMS[item].vals[+t.dataset.axis];
+      if (v === 0) return;
+      const plusSide = ax.plus;   // which side is the + feature
+      const landsOn = v > 0 ? plusSide : opp(plusSide);
+      if (t.dataset.side === landsOn) t.classList.add('picked');
+    });
+  }
+}
+
+function updateChrome() {
+  if (mode === 'pick') {
+    hintEl.textContent = 'click a term — its opposite lights up; the term means only "not that"';
+    if (!pick) {
+      relEl.innerHTML = '&nbsp;';
+      diffEl.innerHTML = '&nbsp;';
+      teachEl.innerHTML =
+        'structuralism (Saussure): "in language there are only differences." ' +
+        'a term carries no meaning on its own — it means by contrast with its opposite.';
+      return;
+    }
+    const ax = AXES[pick.axis];
+    const chosen = pick.side === 'a' ? ax.a : ax.b;
+    const other  = pick.side === 'a' ? ax.b : ax.a;
+    relEl.innerHTML =
+      '<b>' + chosen + '</b> has no content of its own here. all the model can say is: ' +
+      '<b>' + chosen + '</b> = not <b>' + other + '</b>.';
+    diffEl.innerHTML =
+      'the value of ' + chosen + ' is carried by the difference from ' + other +
+      ' — remove the opposite and the term loses its footing. ' + ax.gloss + '.';
+    teachEl.innerHTML =
+      'meaning here is <i>relational</i>: the sign signifies through its difference from ' +
+      'another, and the binary opposition is the smallest such difference.';
+    return;
+  }
+
+  // classify mode
+  hintEl.textContent = 'each item is read + or − on every axis — the bundle is all the meaning it gets';
+  if (item === null) {
+    relEl.innerHTML = 'pick an item below to drop it through the oppositions.';
+    diffEl.innerHTML = '&nbsp;';
+    teachEl.innerHTML = renderItemButtons();
+    return;
+  }
+  const it = ITEMS[item];
+  const bundle = AXES.map((ax, i) => {
+    const v = it.vals[i];
+    const feat = ax.plus === 'a' ? ax.a : ax.b;
+    return (v > 0 ? '+' : v < 0 ? '−' : '0') + feat;
+  }).join('  ');
+  relEl.innerHTML = '<b>' + it.name + '</b> is nothing but where it falls on each axis.';
+  diffEl.innerHTML = 'its bundle: ' + bundle +
+    ' — no term describes it directly; it is a pattern of contrasts.';
+  teachEl.innerHTML = renderItemButtons() +
+    '<br>Lévi-Strauss reads items (foods, kin, myths) exactly this way: a bundle of ' +
+    'oppositional features, meaning = the pattern, not any one term.';
+}
+
+// item chooser lives inline in the teaching slot so classify mode needs no extra chrome.
+function renderItemButtons() {
+  return 'items: ' + ITEMS.map((it, i) =>
+    '<a href="#" data-item="' + i + '" style="color:' +
+    (item === i ? 'var(--mark)' : 'var(--rule)') +
+    ';text-decoration:none;border-bottom:1px solid var(--faint)">' + it.name + '</a>'
+  ).join(' &nbsp;·&nbsp; ');
+}
+
+// delegate clicks on the inline item links (they live in the teaching slot).
+teachEl.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-item]');
+  if (!a) return;
+  e.preventDefault();
+  item = +a.dataset.item;
+  render();
+});
+
+document.getElementById('mode-pick').onclick = () => setMode('pick');
+document.getElementById('mode-classify').onclick = () => setMode('classify');
+document.getElementById('reset').onclick = () => { pick = null; item = null; render(); };
+
+function setMode(m) {
+  mode = m;
+  pick = null; item = null;
+  document.getElementById('mode-pick').classList.toggle('on', m === 'pick');
+  document.getElementById('mode-classify').classList.toggle('on', m === 'classify');
+  render();
+}
+
+render();
+</script>
+</body>
+</html>

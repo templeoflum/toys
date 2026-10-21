@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>anorthoscope</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --shape: #5b6b74;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 3.5rem; text-align: right; }
+  .row span.val { width: 13rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(640px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>anorthoscope</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">slit</span><input type="range" id="slit" min="6" max="300" value="16"><span class="val" id="slitV"></span></div>
+    <div class="row"><span class="name">ghost</span><input type="range" id="ghost" min="0" max="100" value="0"><span class="val" id="ghostV"></span></div>
+  </div>
+  <canvas id="cv" width="640" height="360"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a star drifts past behind a narrow slit &mdash; at any instant only a thin vertical sliver of it shows. yet the eye stitches the slivers together across time into the whole star, seen as if all at once. widen the <b>slit</b> and the shape is simply there, no stitching needed; raise the <b>ghost</b> to lay the whole star faintly over the slit and check what you pieced together.</div>
+
+<script>
+'use strict';
+
+const CX = 320, CY = 165, TOP = 40, BOT = 290;
+const SPAN = 88, SPEED = 0.10;   // star's x-travel = its own half-width, so every slice scans the slit
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const slEl = document.getElementById('slit'), slV = document.getElementById('slitV');
+const ghEl = document.getElementById('ghost'), ghV = document.getElementById('ghostV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let slit = 16;
+let ghost = 0;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function star(cx, cy) {
+  const R = 88, r = 38, N = 5;
+  ctx.beginPath();
+  for (let i = 0; i < N * 2; i++) {
+    const rad = i % 2 ? r : R;
+    const a = -Math.PI / 2 + i * Math.PI / N;
+    const x = cx + rad * Math.cos(a), y = cy + rad * Math.sin(a);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function draw(ts) {
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, 640, 360);
+
+  const sx = CX - SPAN + ((ts * SPEED) % (2 * SPAN));   // shape sweeps across behind the slit
+
+  // show the shape only through the slit
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(CX - slit / 2, TOP, slit, BOT - TOP);
+  ctx.clip();
+  ctx.fillStyle = css('--shape');
+  star(sx, CY); ctx.fill();
+  ctx.restore();
+
+  // slit frame
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1.5;
+  ctx.strokeRect(CX - slit / 2, TOP, slit, BOT - TOP);
+
+  // proof: the whole star, faint, over the slit
+  if (ghost > 0) {
+    ctx.save();
+    ctx.globalAlpha = ghost * 0.5;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+    star(CX, CY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  requestAnimationFrame(draw);
+}
+
+function refresh() {
+  slV.textContent = slit > 250 ? 'wide — whole shape' : slit < 30 ? 'narrow — a sliver' : Math.round(slit) + 'px';
+  ghV.textContent = ghost > 0.98 ? 'star shown' : ghost > 0 ? 'rising' : 'off';
+  readout.innerHTML = slit > 250
+    ? 'the slit is wide &mdash; the whole star is simply there, no stitching.'
+    : ghost > 0.98
+      ? 'the faint star is what your eye pieced together from the slivers.'
+      : 'only a sliver shows at a time, yet you read the whole star from the sequence.';
+}
+
+slEl.oninput = () => { slit = +slEl.value; refresh(); };
+ghEl.oninput = () => { ghost = +ghEl.value / 100; refresh(); };
+refresh();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dart area</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>dart area</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">throw rate</span><input type="range" id="rate" min="20" max="2000" value="400" step="20"><span class="val" id="rateV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="mPause">pause</button>
+        <button id="mReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">throw darts at random into the square and the fraction landing inside the circle measures its area &mdash; so pure randomness becomes a ruler for <b>&pi;</b>. but the error only falls like <b>1/&radic;N</b>, so each fresh decimal costs a hundredfold more darts.<span class="cite">Monte Carlo integration &middot; Metropolis &amp; Ulam 1949 (Buffon&rsquo;s needle, 1777)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// throw rate is darts per second, straight off the slider
+let rate = 400;
+
+// paused holds the sim (the picture + counters freeze) but keeps drawing
+let paused = false;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rateEl = document.getElementById('rate'), rateV = document.getElementById('rateV');
+const readout = document.getElementById('readout').firstElementChild;
+const btnPause = document.getElementById('mPause');
+const btnReset = document.getElementById('mReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- simulation state ---------------------------------------------------
+// the TRUE counters are unbounded numbers — the estimate reads from these.
+let inside = 0;               // darts landing inside the circle
+let total = 0;                // darts thrown
+
+// drawn darts live in a fixed ring buffer so the picture stays cheap while
+// the counters above keep climbing without limit.
+const MAX_DRAWN = 4000;
+const darts = new Array(MAX_DRAWN);   // {x, y, in} in canvas space, or undefined
+let dartHead = 0;                     // next write slot
+let dartCount = 0;                    // how many slots are filled (<= MAX_DRAWN)
+
+// convergence samples: {n, est} pushed as N grows across a geometric ladder,
+// so the log-N plot fills out evenly across the decades.
+let trace = [];
+let nextSampleN = 1;          // push a sample once total crosses this
+const SAMPLE_GROWTH = 1.2;    // ladder step — a sample per ×1.2 in N
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the dartboard (square + inscribed circle). bottom: the trace.
+const SCENE_TOP = 30, SCENE_H = Math.round(H * 0.55);
+const PLOT_TOP = SCENE_H + 90, PLOT_H = H - PLOT_TOP - 40;
+
+// the sampling square, centred in the top band. side = full band height,
+// circle inscribed (radius = half the side, same centre).
+const SQ_SIDE = SCENE_H - 20;
+const SQ_X = Math.round(W / 2 - SQ_SIDE / 2);
+const SQ_Y = SCENE_TOP + 10;
+const CIRC_CX = SQ_X + SQ_SIDE / 2;
+const CIRC_CY = SQ_Y + SQ_SIDE / 2;
+const CIRC_R = SQ_SIDE / 2;
+
+// the convergence plot spans a log-N axis out to Nmax.
+const N_MAX = 1e6;
+const LOG_NMAX = Math.log10(N_MAX);
+const PI = Math.PI;
+const Y_HALF = 0.6;           // plotted window is pi ± Y_HALF
+// envelope half-width const: SE(est) = 4√(p(1−p))/√N with p = pi/4  →  ≈ 1.6422
+const SE_C = 4 * Math.sqrt((PI / 4) * (1 - PI / 4));
+
+// throw `k` darts: uniform points in the square, tested against the circle.
+function throwDarts(k) {
+  for (let i = 0; i < k; i++) {
+    const x = SQ_X + Math.random() * SQ_SIDE;
+    const y = SQ_Y + Math.random() * SQ_SIDE;
+    const dx = x - CIRC_CX, dy = y - CIRC_CY;
+    const isIn = dx * dx + dy * dy <= CIRC_R * CIRC_R;   // inside-test in draw space
+    total += 1;
+    if (isIn) inside += 1;
+    // stash into the ring buffer for the picture
+    darts[dartHead] = { x: x, y: y, in: isIn };
+    dartHead = (dartHead + 1) % MAX_DRAWN;
+    if (dartCount < MAX_DRAWN) dartCount += 1;
+    // record a convergence sample the instant N crosses the next ladder rung —
+    // per-dart (not per-batch) so the early wide wander is faithful at any rate
+    if (total >= nextSampleN && nextSampleN <= N_MAX) {
+      trace.push({ n: total, est: 4 * inside / total });
+      nextSampleN = Math.max(nextSampleN + 1, Math.ceil(nextSampleN * SAMPLE_GROWTH));
+    }
+  }
+}
+
+function reset() {
+  inside = 0; total = 0;
+  dartHead = 0; dartCount = 0;
+  trace = [];
+  nextSampleN = 1;
+}
+
+function stepSim(dt) {
+  if (paused) return;
+  const k = Math.round(rate * dt);
+  if (k > 0) throwDarts(k);
+}
+
+// --- top band: the dartboard --------------------------------------------
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  // the sampling square
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(SQ_X, SQ_Y, SQ_SIDE, SQ_SIDE);
+
+  // the inscribed circle
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(CIRC_CX, CIRC_CY, CIRC_R, 0, TAU); ctx.stroke();
+
+  // the accumulated darts (last MAX_DRAWN only) — inside filled --mark, outside --faint
+  for (let i = 0; i < dartCount; i++) {
+    const d = darts[i];
+    if (!d) continue;
+    ctx.fillStyle = d.in ? mark : faint;
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, 3, 0, TAU);
+    ctx.fill();
+  }
+
+  // a quiet label
+  ctx.fillStyle = faint; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('inside / total', SQ_X, SQ_Y - 14);
+}
+
+// --- bottom band: the convergence trace + 1/sqrt(N) envelope ------------
+// x maps log10(N) across the panel; y maps the estimate around pi.
+function drawPlot() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+  const plotW = W - 2 * PAD;
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD, PLOT_TOP, plotW, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('convergence:  estimate 4·inside/N vs darts N (log scale)', PAD + 6, PLOT_TOP - 12);
+  ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('N = 1', PAD + 4, PLOT_TOP + PLOT_H + 24);
+  ctx.textAlign = 'right';
+  ctx.fillText('N = 1e6', PAD + plotW - 4, PLOT_TOP + PLOT_H + 24);
+  ctx.textAlign = 'left';
+
+  // x: log10 N across the panel;  y: estimate clamped into pi ± Y_HALF
+  const xOf = n => PAD + (Math.log10(Math.max(n, 1)) / LOG_NMAX) * plotW;
+  const yOf = est => {
+    const clamped = Math.max(PI - Y_HALF, Math.min(PI + Y_HALF, est));
+    return PLOT_TOP + PLOT_H - ((clamped - (PI - Y_HALF)) / (2 * Y_HALF)) * (PLOT_H - 2) - 1;
+  };
+
+  // the true-pi reference line
+  const yPi = yOf(PI);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PAD, yPi); ctx.lineTo(PAD + plotW, yPi); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('pi', PAD + 6, yPi - 6);
+
+  // the theoretical error envelope: pi ± 1.6407/sqrt(N), two --mark curves.
+  // 1.6407 = 4·sqrt(p(1−p)) with p = pi/4. clamped to the window with yOf.
+  ctx.strokeStyle = mark; ctx.lineWidth = 1.5;
+  for (const sign of [1, -1]) {
+    ctx.beginPath();
+    let pen = true;
+    for (let px = 0; px <= plotW; px++) {
+      const n = Math.pow(10, (px / plotW) * LOG_NMAX);   // invert the log-x map
+      const se = SE_C / Math.sqrt(n);
+      const x = PAD + px, y = yOf(PI + sign * se);
+      pen ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      pen = false;
+    }
+    ctx.stroke();
+  }
+  ctx.fillStyle = mark; ctx.font = '17px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('±1.64/√N', PAD + plotW - 6, PLOT_TOP + PLOT_H - 8);
+
+  // the running estimate trace — wanders wide early, tightens toward pi
+  if (trace.length) {
+    ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.beginPath();
+    let pen = true;
+    for (const s of trace) {
+      const x = xOf(s.n), y = yOf(s.est);
+      pen ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      pen = false;
+    }
+    // extend the trace to the live point (current N, current estimate)
+    if (total > 0) {
+      ctx.lineTo(xOf(total), yOf(4 * inside / total));
+    }
+    ctx.stroke();
+
+    // the live head marker
+    if (total > 0) {
+      ctx.fillStyle = mark;
+      ctx.beginPath(); ctx.arc(xOf(total), yOf(4 * inside / total), 5, 0, TAU); ctx.fill();
+    }
+  }
+
+  // a subtle reset affordance
+  ctx.fillStyle = faint; ctx.font = '16px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('(or click here)', PAD + plotW - 6, PLOT_TOP + 22);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawPlot();
+}
+
+function updateReadout() {
+  // guard N=0: nothing thrown yet reads as a dash, no NaN/Infinity
+  if (total === 0) {
+    readout.innerHTML =
+      'darts N <b>0</b> &nbsp;·&nbsp; inside <b>0</b>'
+      + '<br>estimate  π ~ 4·inside/N <b>—</b> &nbsp;·&nbsp; true π = <b>3.14159</b>'
+      + '<br><span id="regime">throw some darts</span>';
+    return;
+  }
+
+  const est = 4 * inside / total;
+  const err = Math.abs(est - PI);
+  const se = SE_C / Math.sqrt(total);
+
+  readout.innerHTML =
+    'darts N <b>' + total.toLocaleString('en-US') + '</b> &nbsp;·&nbsp; '
+    + 'inside <b>' + inside.toLocaleString('en-US') + '</b>'
+    + '<br>estimate  π ~ 4·inside/N <b style="color:var(--mark)">' + est.toFixed(5) + '</b>'
+    + ' &nbsp;·&nbsp; true π = <b>' + PI.toFixed(5) + '</b>'
+    + '<br>error = |est − π| <b>' + err.toFixed(5) + '</b>'
+    + ' &nbsp;·&nbsp; SE ~ 1.64/√N <b>' + se.toFixed(5) + '</b>'
+    + '<br><span id="regime">' + (paused ? 'paused' : 'each digit costs ×100 more darts') + '</span>';
+}
+
+function setPaused(p) {
+  paused = p;
+  btnPause.classList.toggle('on', paused);
+  btnPause.textContent = paused ? 'resume' : 'pause';
+  updateReadout();
+}
+
+function refresh() {
+  rateV.textContent = rate;
+  updateReadout();
+}
+
+rateEl.oninput = () => { rate = +rateEl.value; refresh(); };
+btnPause.onclick = () => setPaused(!paused);
+btnReset.onclick = () => { reset(); refresh(); };
+
+// click on the canvas also resets the run (the reset button is the primary path)
+cv.onclick = () => { reset(); refresh(); };
+
+// --- the live loop: small fixed sub-steps for a steady throw rate --------
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  // integrate in small slices so the per-step dart count stays modest
+  const SLICE = 0.02;
+  while (elapsed > 0) {
+    const dt = Math.min(SLICE, elapsed);
+    stepSim(dt);
+    elapsed -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chubb</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(700px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>chubb</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">surround</span><input type="range" id="surround" min="0" max="100" value="100"><span class="val" id="surroundV"></span></div>
+    <div class="row"><span class="name">bridge</span><input type="range" id="bridge" min="0" max="100" value="0"><span class="val" id="bridgeV"></span></div>
+  </div>
+  <canvas id="cv" width="820" height="440"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two centre patches are the exact same speckled texture, the same contrast. the left one sits in a loud, high-contrast surround and reads muted; the right sits in a quiet one and reads crisp &mdash; the eye judges contrast against its neighbourhood, not on its own. fade the <b>surround</b> to a flat field and the patches match; raise the <b>bridge</b> to run a band of that same texture between them.</div>
+
+<script>
+'use strict';
+
+const CELL = 5, MID = 128;
+const SS = 240, PS = 110;                // surround square, patch square
+const PC = 46;                           // patch contrast (fixed, both equal)
+const LC = { x: 235, y: 215 }, RC = { x: 585, y: 215 };
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const sEl = document.getElementById('surround'), sV = document.getElementById('surroundV');
+const bEl = document.getElementById('bridge'), bV = document.getElementById('bridgeV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let surround = 1;   // 0 uniform field (patches equal) -> 1 high vs low surround
+let bridge = 0;     // proof: a band of the same texture links the two patches
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function rnd(n) { const a = new Float32Array(n); for (let i = 0; i < n; i++) a[i] = Math.random(); return a; }
+
+// fixed random fields, generated once so the pattern is stable while contrast changes
+const NS = Math.ceil(SS / CELL), NP = Math.ceil(PS / CELL);
+const sfL = rnd(NS * NS), sfR = rnd(NS * NS), pf = rnd(NP * NP);
+const bridgeF = rnd(Math.ceil((RC.x - LC.x) / CELL) * Math.ceil(60 / CELL));
+
+function noise(x0, y0, cols, rows, field, contrast) {
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    let g = MID + (field[r * cols + c] - 0.5) * 2 * contrast;
+    g = g < 0 ? 0 : g > 255 ? 255 : Math.round(g);
+    ctx.fillStyle = 'rgb(' + g + ',' + g + ',' + g + ')';
+    ctx.fillRect(x0 + c * CELL, y0 + r * CELL, CELL, CELL);
+  }
+}
+function patch(c) { noise(c.x - PS / 2, c.y - PS / 2, NP, NP, pf, PC); }
+
+function draw() {
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, 820, 440);
+
+  // surrounds — left loud, right quiet
+  noise(LC.x - SS / 2, LC.y - SS / 2, NS, NS, sfL, surround * 118);
+  noise(RC.x - SS / 2, RC.y - SS / 2, NS, NS, sfR, surround * 16);
+
+  // proof: a band of the identical patch-texture linking the two
+  if (bridge > 0) {
+    ctx.save();
+    ctx.globalAlpha = bridge;
+    const bx = LC.x, bw = RC.x - LC.x, bcols = Math.ceil(bw / CELL), brows = Math.ceil(60 / CELL);
+    noise(bx, LC.y - 30, bcols, brows, bridgeF, PC);
+    ctx.restore();
+  }
+
+  patch(LC); patch(RC);
+
+  readout.innerHTML = surround < 0.02
+    ? 'flat field &mdash; two identical patches, same contrast, plainly equal.'
+    : bridge > 0.98
+      ? 'one band of the same texture joins them &mdash; the patches are identical.'
+      : 'both patches are the same texture; only the surround around each differs.';
+}
+
+function refresh() {
+  sV.textContent = surround < 0.02 ? 'flat' : Math.round(surround * 100) + '%';
+  bV.textContent = bridge > 0.98 ? 'band joined' : bridge > 0 ? 'rising' : 'off';
+  draw();
+}
+
+sEl.oninput = () => { surround = +sEl.value / 100; refresh(); };
+bEl.oninput = () => { bridge = +bEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

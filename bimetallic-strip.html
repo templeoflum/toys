@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bimetallic strip</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>bimetallic strip</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">temp &Delta;T</span><input type="range" id="dT" min="0" max="200" value="80" step="1"><span class="val" id="dTV"></span></div>
+    <div class="row"><span class="name">mismatch &Delta;&alpha;</span><input type="range" id="da" min="4" max="40" value="20" step="1"><span class="val" id="daV"></span></div>
+    <div class="row"><span class="name">length L</span><input type="range" id="len" min="40" max="140" value="100" step="1"><span class="val" id="lenV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two metals with different <b>thermal expansion</b> bonded into one strip: heat the pair and the higher-expansion metal grows more, so the strip <b>curves</b> toward the slower side &mdash; the more heat, the tighter the bend. curvature grows with the coefficient <b>mismatch</b> and the <b>temperature</b> alike; the tip swings farther as the strip is <b>longer</b>, by the <b>square</b> of its length. a pointer on the tip reads temperature off the bend &mdash; the thermostat.<span class="cite">the bimetallic strip &middot; John Harrison ~1759 (gridiron) &middot; Breguet &middot; curvature &prop; temperature change &middot; field: thermal expansion</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- bimetallic strip ----------------------------------------------------
+// two bonded metal layers, α1 > α2 (e.g. brass over steel). heat them and
+// the high-α layer grows more, so the strip bends toward the low-α side.
+// the exact textbook relations (thin-strip, equal layer thickness t):
+//   curvature   κ = K · Δα · ΔT          (K a fixed geometric constant / t)
+//   tip deflect d = κ · L² / 2
+// so d ∝ Δα · ΔT · L²  — proportional to the coefficient mismatch, to the
+// temperature change, and to the SQUARE of the length. at ΔT = 0 the strip
+// is straight (κ = 0, d = 0). VERIFY: the drawn/reported κ and d must equal
+// K·Δα·ΔT and κ·L²/2 exactly, and both must vanish at ΔT = 0 — that is the
+// load-bearing check.
+const K = 1.0;               // geometric constant (folds in 1/thickness), fixed
+
+// live knob values (raw slider units rescaled below):
+//   Δα in 1e-6 /K units (mismatch of expansion coefficients)
+//   ΔT in K (degrees above the flat reference)
+//   L  in mm (strip length)
+let dT = 80;                 // temperature change ΔT  (K)
+let da = 20;                 // coefficient mismatch Δα (×1e-6 /K)
+let L  = 100;                // strip length L (mm)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const dTEl = document.getElementById('dT'), dTV = document.getElementById('dTV');
+const daEl = document.getElementById('da'), daV = document.getElementById('daV');
+const lenEl = document.getElementById('len'), lenV = document.getElementById('lenV');
+const readout = document.getElementById('readout').firstElementChild;
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the exact model ------------------------------------------------------
+// curvature κ (1/mm, tiny) proportional to mismatch × temperature. the
+// 1e-6 folds Δα's SI units in; K is the fixed geometric constant.
+function curvature() {
+  return K * (da * 1e-6) * dT;      // κ = K · Δα · ΔT
+}
+// tip deflection d (mm) — the small-angle arc drop of a strip of length L.
+function deflection() {
+  const kappa = curvature();
+  return kappa * L * L / 2;         // d = κ · L² / 2  ∝ Δα · ΔT · L²
+}
+// the bend angle swept by the whole strip: φ = κ · L (radians). used only
+// to DRAW the arc; the reported physics is κ and d above.
+function bendAngle() {
+  return curvature() * L;           // φ = κ · L
+}
+
+// --- animated approach to the set temperature ----------------------------
+// the shown ΔT eases toward the slider target so heating/cooling is visible
+// (the strip curls in, the pointer sweeps). the physics is read off the
+// eased value so the picture and the numbers always agree.
+let shownDT = dT;
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+// --- layout of the drawn scene -------------------------------------------
+const PAD = 30;
+// the strip is clamped at the left and curls; a temperature scale arcs under
+// the free tip and a pointer off the tip reads against it.
+const CLAMP_X = Math.round(W * 0.20);
+const CLAMP_Y = Math.round(H * 0.44);
+// pixels per mm for the drawn strip (L in mm → drawn length)
+const MM = 5.0;
+const THICK = 46;            // drawn strip thickness (two 23px layers)
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  arrowHead(x1, y1, Math.cos(a), Math.sin(a));
+}
+function arrowHead(x, y, dx, dy) {
+  const s = 14, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+// --- the strip as a bent circular arc ------------------------------------
+// clamped horizontal at the left, sweeping through φ = κ·L. we walk the
+// centre-line in small steps, offsetting ±THICK/2 to the two layers. the
+// high-α layer sits on the OUTSIDE of the bend (it grew more). when φ = 0
+// the strip is dead straight and the tip drop d = 0.
+function stripCentreline(n) {
+  // returns {pts:[{x,y}], nrm:[{x,y}], tip, tipDir} sampled along the strip.
+  // sweep the eased-temperature curvature so the picture matches the read.
+  const kappa = K * (da * 1e-6) * shownDT;
+  const phiTot = kappa * L;                 // total swept angle (rad)
+  const pts = [], nrm = [];
+  let x = CLAMP_X, y = CLAMP_Y, ang = 0;    // start horizontal, bending down
+  const ds = (L * MM) / n;                  // arc-length step in px
+  const dPhi = phiTot / n;                  // curl per step (bends toward +y)
+  for (let i = 0; i <= n; i++) {
+    pts.push({ x, y });
+    // outward normal (toward the low-α side / centre of curvature is up)
+    nrm.push({ x: Math.sin(ang), y: -Math.cos(ang) });
+    x += Math.cos(ang) * ds;
+    y += Math.sin(ang) * ds;
+    ang += dPhi;
+  }
+  const tip = pts[pts.length - 1];
+  const tipDir = { x: Math.cos(ang - dPhi), y: Math.sin(ang - dPhi) };
+  return { pts, nrm, tip, tipDir };
+}
+
+function drawStrip() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+  const N = 80;
+  const S = stripCentreline(N);
+  const half = THICK / 2;
+
+  // build the two layer polygons from the centre-line ± normal.
+  // outer layer (bend outside) = high-α (brass) tinted --mark-ish;
+  // inner layer = low-α (steel) tinted --shade. flat when ΔT = 0.
+  const outerTop = [], outerBot = [], innerTop = [], innerBot = [];
+  for (let i = 0; i <= N; i++) {
+    const p = S.pts[i], nx = S.nrm[i].x, ny = S.nrm[i].y;
+    // outside of the bend is the +normal side (up), high-α layer
+    outerTop.push({ x: p.x + nx * half,     y: p.y + ny * half });
+    outerBot.push({ x: p.x,                 y: p.y });
+    innerTop.push({ x: p.x,                 y: p.y });
+    innerBot.push({ x: p.x - nx * half,     y: p.y - ny * half });
+  }
+  function fillBand(top, bot, style) {
+    ctx.beginPath();
+    ctx.moveTo(top[0].x, top[0].y);
+    for (let i = 1; i < top.length; i++) ctx.lineTo(top[i].x, top[i].y);
+    for (let i = bot.length - 1; i >= 0; i--) ctx.lineTo(bot[i].x, bot[i].y);
+    ctx.closePath(); ctx.fillStyle = style; ctx.fill();
+  }
+  // high-α layer (grows more, sits on the outside of the curl) — warm --mark
+  fillBand(outerTop, outerBot, mark);
+  // low-α layer (grows less, inside of the curl) — cool --shade
+  fillBand(innerTop, innerBot, shade);
+  // the bond line down the centre
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const p = S.pts[i];
+    i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+  }
+  ctx.stroke();
+
+  // the clamp block at the fixed end
+  ctx.fillStyle = ink;
+  ctx.fillRect(CLAMP_X - 34, CLAMP_Y - half - 20, 34, THICK + 40);
+
+  // layer legend at the clamp
+  ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillStyle = mark;  ctx.fillText('high-α (brass)', CLAMP_X - 44, CLAMP_Y - half - 4);
+  ctx.fillStyle = '#8a7f63'; ctx.fillText('low-α (steel)', CLAMP_X - 44, CLAMP_Y + half + 24);
+
+  // the pointer off the tip, extended along the tip tangent to the scale
+  const tip = S.tip, tdx = S.tipDir.x, tdy = S.tipDir.y;
+  const PLEN = 120;
+  const px = tip.x + tdx * PLEN, py = tip.y + tdy * PLEN;
+  ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineWidth = 4;
+  arrow(tip.x, tip.y, px, py);
+
+  // --- the temperature scale the tip sweeps across -----------------------
+  // an arc gauge centred at the clamp tip: at ΔT = 0 the pointer sits at the
+  // flat (0°) mark; as ΔT rises the tip curls down and the pointer sweeps
+  // along the scale. ticks are placed by the analytic tip position, so the
+  // scale reads true temperature off the bend.
+  drawScale();
+
+  return tip;
+}
+
+// draw the arc scale + the live pointer read against it. the scale marks are
+// the tip positions at a spread of ΔT for the CURRENT Δα, L — so the gauge is
+// exactly the deflection law made visible; reading the pointer gives ΔT back.
+function drawScale() {
+  const faint = css('--faint'), ink = css('--ink'), mark = css('--mark');
+  ctx.font = '18px "Courier New", monospace';
+  // tip vertical drop grows with ΔT; place tick labels along the tip locus.
+  // recompute the tip y for a probe temperature via the same arc walk.
+  function tipAt(probeT) {
+    const kappa = K * (da * 1e-6) * probeT;
+    const phiTot = kappa * L;
+    const N = 60; let x = CLAMP_X, y = CLAMP_Y, ang = 0;
+    const ds = (L * MM) / N, dPhi = phiTot / N;
+    for (let i = 0; i < N; i++) { x += Math.cos(ang) * ds; y += Math.sin(ang) * ds; ang += dPhi; }
+    return { x, y };
+  }
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.fillStyle = faint;
+  ctx.textAlign = 'left';
+  for (let t = 0; t <= 200; t += 40) {
+    const p = tipAt(t);
+    ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, TAU); ctx.stroke();
+    ctx.fillText(t + '°', p.x + 14, p.y + 6);
+  }
+  // the live pointer tick highlighted on the scale
+  const pc = tipAt(shownDT);
+  ctx.fillStyle = mark; ctx.beginPath(); ctx.arc(pc.x, pc.y, 8, 0, TAU); ctx.fill();
+
+  // a quiet heat indicator: the strip warms from paper toward --mark as ΔT
+  // rises. a small swatch + label top-left.
+  const warm = Math.max(0, Math.min(1, shownDT / 200));
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('heat ▸ ' + Math.round(warm * 100) + '%', PAD + 6, PAD + 22);
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(PAD + 160, PAD + 6, 180, 22);
+  ctx.fillStyle = mark; ctx.globalAlpha = 0.15 + warm * 0.85;
+  ctx.fillRect(PAD + 162, PAD + 8, 176 * warm, 18);
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawStrip();
+}
+
+// --- regime read: straight vs bent ---------------------------------------
+function regimeOf() {
+  if (dT <= 0) return 'flat — no temperature change, the strip is straight (d = 0)';
+  const d = deflection();
+  return 'bent — the high-α layer grew more, curling toward the low-α side';
+}
+
+function updateReadout() {
+  const kappa = curvature();
+  const d = deflection();
+  readout.innerHTML =
+    'ΔT <b>' + dT.toFixed(0) + ' K</b> &nbsp;·&nbsp; '
+    + 'mismatch Δα <b>' + da.toFixed(0) + '×10⁻⁶/K</b> &nbsp;·&nbsp; '
+    + 'length L <b>' + L.toFixed(0) + ' mm</b>'
+    + '<br>curvature κ <b>' + (kappa * 1e6).toFixed(3) + '×10⁻⁶/mm</b> &nbsp;·&nbsp; '
+    + 'tip deflection d <b>' + d.toFixed(3) + ' mm</b>'
+    + '<br>κ = K·Δα·ΔT &nbsp;·&nbsp; d = κ·L²/2 &nbsp;∴&nbsp; d ∝ Δα·ΔT·L²'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  dTV.textContent = dT.toFixed(0);
+  daV.textContent = da.toFixed(0);
+  lenV.textContent = L.toFixed(0);
+  updateReadout();
+}
+
+// slider changes take effect live — the target ΔT jumps and the shown curl
+// eases toward it; Δα and L retune the bend immediately.
+dTEl.oninput = () => { dT = +dTEl.value; refresh(); };
+daEl.oninput = () => { da = +daEl.value; refresh(); };
+lenEl.oninput = () => { L = +lenEl.value; refresh(); };
+
+// reset — temperature back to zero (flat strip), watch it curl back up as
+// you raise ΔT again.
+bReset.onclick = () => {
+  dT = 0; dTEl.value = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: ease the shown temperature toward the target ---------
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  if (elapsed > 0.25) elapsed = 0.25;
+  // exponential ease of shownDT toward dT (first-order, no ringing)
+  shownDT += (dT - shownDT) * Math.min(1, elapsed * 4);
+  if (Math.abs(dT - shownDT) < 0.05) shownDT = dT;
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

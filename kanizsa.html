@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kanizsa</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --disc: #2b2a26;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(600px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>kanizsa</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">turn</span><input type="range" id="turn" min="0" max="100" value="0"><span class="val" id="turnV"></span></div>
+    <div class="row"><span class="name">edge</span><input type="range" id="edge" min="0" max="100" value="0"><span class="val" id="edgeV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="620"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">three notched discs face inward and a bright white triangle springs up between them &mdash; with crisp edges and corners, floating over the discs, though no triangle is drawn. your eye completes the shape the notches imply. <b>turn</b> the discs so the notches face outward and the triangle vanishes &mdash; nothing was ever there; or raise the <b>edge</b> to trace where you see a border and find only paper along it.</div>
+
+<script>
+'use strict';
+
+const CENT = { x: 450, y: 330 };        // centroid of the triangle
+const RV = 158;                          // discs sit this far from centroid
+const RP = 54;                           // disc radius
+const HALF = Math.PI / 6;                // mouth half-angle (60 deg opening)
+const VANG = [-Math.PI / 2, Math.PI / 6, 5 * Math.PI / 6];  // top, lower-right, lower-left
+
+let turn = 0;   // 0 => notches inward (triangle vivid); 1 => notches outward (gone)
+let edge = 0;   // proof: trace the illusory border, find only paper
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const tEl = document.getElementById('turn'), tV = document.getElementById('turnV');
+const eEl = document.getElementById('edge'), eV = document.getElementById('edgeV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const verts = VANG.map(a => ({ x: CENT.x + RV * Math.cos(a), y: CENT.y + RV * Math.sin(a) }));
+
+function pacman(v) {
+  // mouth points toward centroid at turn=0, rotates outward toward turn=1
+  const inward = Math.atan2(CENT.y - v.y, CENT.x - v.x);
+  const dir = inward + turn * Math.PI;
+  ctx.beginPath();
+  ctx.arc(v.x, v.y, RP, dir + HALF, dir - HALF + 2 * Math.PI, false);
+  ctx.lineTo(v.x, v.y);
+  ctx.closePath();
+  ctx.fillStyle = css('--disc');
+  ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  for (const v of verts) pacman(v);
+
+  // proof: trace the illusory triangle's edges — there is no ink along them
+  if (edge > 0) {
+    ctx.save();
+    ctx.globalAlpha = edge;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.setLineDash([7, 6]);
+    ctx.beginPath();
+    ctx.moveTo(verts[0].x, verts[0].y);
+    ctx.lineTo(verts[1].x, verts[1].y);
+    ctx.lineTo(verts[2].x, verts[2].y);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = turn > 0.98
+    ? 'the notches face outward &mdash; no triangle. there never was one drawn.'
+    : edge > 0.98
+      ? 'the traced border crosses only paper between the discs &mdash; no edge is drawn.'
+      : 'the white triangle is not drawn &mdash; only three notched discs are.';
+}
+
+function refresh() {
+  tV.textContent = turn > 0.98 ? 'notches out — triangle gone' : turn < 0.02 ? 'notches in' : 'turning';
+  eV.textContent = edge > 0.98 ? 'border traced — only paper' : edge > 0 ? 'rising' : 'off';
+  draw();
+}
+
+tEl.oninput = () => { turn = +tEl.value / 100; refresh(); };
+eEl.oninput = () => { edge = +eEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

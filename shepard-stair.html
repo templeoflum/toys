@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shepard stair</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --field: #d9d5ca;   /* the neutral field the stair climbs through */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  .btns { display: flex; gap: .6rem; flex-wrap: wrap; justify-content: center; }
+  button { font-family: 'Courier New', monospace; font-size: .78rem; color: var(--ink); background: transparent;
+           border: 1px solid var(--faint); border-radius: 3px; padding: .35rem .8rem; cursor: pointer; margin-bottom: 1.1rem; }
+  button:hover { border-color: var(--mark); color: var(--mark); }
+  canvas { width: min(560px, 92vw); height: auto; display: block; border: 1px solid var(--faint); background: var(--field); }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>shepard stair</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">speed</span><input type="range" id="speed" min="0.02" max="0.25" step="0.01" value="0.08"><span class="val" id="speedV"></span></div>
+    <div class="row"><span class="name">voices</span><input type="range" id="voices" min="4" max="10" step="1" value="8"><span class="val" id="voicesV"></span></div>
+  </div>
+  <div class="btns">
+    <button id="play">play</button>
+    <button id="dir">direction: up</button>
+    <button id="follow">follow one voice</button>
+  </div>
+  <canvas id="cv" width="1120" height="800"></canvas>
+  <div id="readout"><span>press play &mdash; headphones help.</span></div>
+  <div class="hint">press <b>play</b> and hold a moment &mdash; the tone climbs (or falls) without ever arriving; drag <b>speed</b> and hear the stair steepen. every voice is a plain sine an octave from its neighbors, sliding under a fixed loudness bell &mdash; what fades out the top re-enters the bottom. <b>follow one voice</b> to catch the loop in the act: the endlessness is the ensemble, not any voice. after roger shepard (1964); the effect is strongest in headphones and varies ear to ear &mdash; this toy plays the true mechanism, your ear supplies the illusion.</div>
+
+<script>
+'use strict';
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const readout = document.getElementById('readout').firstElementChild;
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// vertical axis = log2 frequency: F0 at the bottom, F0*2^N at the top
+const F0 = 27.5;                                  // low A, so octave lines read A0, A1, ...
+const ML = 96, MR = 36, MT = 64, MB = 30;
+const PW = W-ML-MR, PH = H-MT-MB, PB = H-MB;
+const BARMAX = PW*0.88;                           // bar tips trace the bell at full gain
+
+let speed = 0.08, Nv = 8, dir = 1, follow = false;
+let pos = 0;                                      // conveyor position in octaves, wraps mod Nv
+let playing = false, rafId = 0, lastT = 0;
+let actx = null, master = null, bank = [];
+
+const expOf = i => (i + pos) % Nv;                // component exponent, [0, Nv)
+const env = x => Math.exp(-Math.pow(x - Nv/2, 2) / (2*Math.pow(Nv/4.5, 2)));  // the fixed bell
+const yOf = e => PB - (e/Nv)*PH;
+
+function buildVoices(){                           // (re)build the oscillator bank
+  for (const v of bank){ v.osc.stop(); v.osc.disconnect(); v.g.disconnect(); }
+  bank = [];
+  for (let i=0;i<Nv;i++){
+    const osc = actx.createOscillator(), g = actx.createGain();
+    osc.type = 'sine';
+    const e = expOf(i);
+    osc.frequency.value = F0*Math.pow(2, e);
+    g.gain.value = 0;
+    osc.connect(g); g.connect(master); osc.start();
+    bank.push({ osc, g, prev: e });
+  }
+}
+
+function updateAudio(){
+  const t = actx.currentTime, exps = [], gains = [];
+  let sum = 0;
+  for (let i=0;i<Nv;i++){
+    const e = expOf(i); let g = env(e);
+    if (follow && i===0) g *= 2.5;                // boost before normalize
+    exps.push(e); gains.push(g); sum += g;
+  }
+  for (let i=0;i<Nv;i++){
+    const v = bank[i], f = F0*Math.pow(2, exps[i]);
+    if (Math.abs(exps[i] - v.prev) > Nv/2) v.osc.frequency.setValueAtTime(f, t);  // wrapped top<->bottom: snap
+    else v.osc.frequency.setTargetAtTime(f, t, 0.03);
+    v.g.gain.setTargetAtTime(gains[i]/sum, t, 0.03);   // sum-normalized, loudness holds
+    v.prev = exps[i];
+  }
+}
+
+function drawFrame(){
+  ctx.fillStyle = css('--field'); ctx.fillRect(0,0,W,H);
+
+  // octave ruler
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1; ctx.globalAlpha = 0.55;
+  for (let k=0;k<=Nv;k++){ const y = yOf(k);
+    ctx.beginPath(); ctx.moveTo(ML,y); ctx.lineTo(W-MR,y); ctx.stroke(); }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#6d6653'; ctx.font = '15px "Courier New", monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let k=0;k<=Nv;k++) ctx.fillText('A'+k, ML-12, yOf(k));
+
+  // the fixed bell, rotated vertical: gain grows rightward
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let s=0;s<=220;s++){ const e = (s/220)*Nv, x = ML + env(e)*BARMAX, y = yOf(e);
+    if (s) ctx.lineTo(x,y); else ctx.moveTo(x,y); }
+  ctx.stroke();
+
+  // one bar per voice, riding the conveyor
+  ctx.fillStyle = css('--mark');
+  for (let i=0;i<Nv;i++){
+    const e = expOf(i), g = env(e), y = yOf(e), em = follow && i===0;
+    ctx.globalAlpha = em ? 1 : 0.25 + 0.75*g;
+    ctx.fillRect(ML, y-7, g*BARMAX, 14);
+    if (em){ ctx.beginPath(); ctx.arc(ML + g*BARMAX, y, 8, 0, Math.PI*2); ctx.fill(); }
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#6d6653'; ctx.font = '17px "Courier New", monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(Nv+' voices, octave-spaced · fixed loudness bell · the conveyor never ends', 20, 36);
+}
+
+function fmtT(t){ const r = Math.round(t*10)/10; return r % 1 ? r.toFixed(1) : String(r); }
+
+function updateReadout(){
+  let s = 'phase <b>'+(pos%1).toFixed(2)+'</b> &middot; every voice loops one octave in <b>'
+        + fmtT(1/speed)+' s</b> &middot; the ear hears a stair with no '+(dir>0?'top':'bottom');
+  if (follow) s += ' &middot; following voice 1 &mdash; hear it fall silent and return.';
+  readout.innerHTML = s;
+}
+
+function loop(now){
+  const dt = Math.min(0.1, (now-lastT)/1000); lastT = now;
+  pos = (pos + dir*speed*dt) % Nv; if (pos < 0) pos += Nv;
+  updateAudio(); drawFrame(); updateReadout();
+  rafId = requestAnimationFrame(loop);
+}
+
+const playBtn = document.getElementById('play');
+playBtn.addEventListener('click', ()=>{
+  if (!playing){
+    if (!actx){                                   // audio exists only after the first press
+      actx = new (window.AudioContext || window.webkitAudioContext)();
+      master = actx.createGain(); master.gain.value = 0.25; master.connect(actx.destination);
+      buildVoices();
+    }
+    actx.resume();
+    playing = true; playBtn.textContent = 'stop';
+    lastT = performance.now(); rafId = requestAnimationFrame(loop);
+  } else {
+    playing = false; cancelAnimationFrame(rafId); actx.suspend();
+    playBtn.textContent = 'play';
+    readout.innerHTML = 'press play &mdash; headphones help.';
+  }
+});
+
+const dirBtn = document.getElementById('dir');
+dirBtn.addEventListener('click', ()=>{ dir = -dir; dirBtn.textContent = 'direction: '+(dir>0?'up':'down'); });
+
+const followBtn = document.getElementById('follow');
+followBtn.addEventListener('click', ()=>{ follow = !follow;
+  followBtn.textContent = follow ? 'following voice 1' : 'follow one voice';
+  if (!playing) drawFrame(); });
+
+function bind(id, vid, fn, fmt){ const e=document.getElementById(id), v=document.getElementById(vid);
+  const upd = ()=>{ fn(+e.value); v.textContent = fmt(e.value); }; e.oninput = upd; upd(); }
+bind('speed','speedV', v=>speed=v, v=>(+v).toFixed(2)+' oct/s');
+bind('voices','voicesV', v=>{ Nv=v; pos = pos % Nv;
+  if (actx) buildVoices(); if (!playing) drawFrame(); }, v=>v+' voices');
+
+drawFrame();
+</script>
+</body>
+</html>

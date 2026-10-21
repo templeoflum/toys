@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>time deals</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --field: #d9d5ca;   /* the neutral field the wheels slide across */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  input[type=date] { font-family: 'Courier New', monospace; font-size: .78rem; color: var(--ink);
+                     background: transparent; border: 1px solid var(--faint); border-radius: 3px; padding: .25rem .5rem; }
+  button { font-family: 'Courier New', monospace; font-size: .78rem; color: var(--ink); background: transparent;
+           border: 1px solid var(--faint); border-radius: 3px; padding: .35rem .8rem; cursor: pointer; margin-bottom: 1.1rem; }
+  button:hover { border-color: var(--mark); color: var(--mark); }
+  .row button { margin-bottom: 0; }
+  canvas { width: min(560px, 92vw); height: auto; display: block; border: 1px solid var(--faint); background: var(--field); }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>time deals</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">moment</span><input type="date" id="moment"></div>
+    <div class="row"><span class="name"></span>
+      <button id="ym">&minus;1 year</button>
+      <button id="dm">&minus;1 day</button>
+      <button id="td">today</button>
+      <button id="dp">+1 day</button>
+      <button id="yp">+1 year</button>
+    </div>
+  </div>
+  <canvas id="cv" width="1120" height="800"></canvas>
+  <div id="readout"><span id="dealt">&nbsp;</span><br>this day-pair returns in 260 days &middot; the year-sign in 60 years &middot; the sun-sign in ~1 year &mdash; the full hand, almost never.</div>
+  <div class="hint">pick a moment &mdash; a birthday works &mdash; and read the hand the wheels deal it; step a day and the day-wheels slide while the year-wheel holds; step a year and the year-wheel clicks while the day-pairs land 105 cells over. every wheel is a real count: tzolk&rsquo;in anchored 21 dec 2012 = 4 ahau (GMT correlation); tonalpohualli anchored 13 aug 1521 (julian) = 1 coatl (Caso correlation); the chinese year approximates its lunisolar boundary at feb 4; the sun-sign is tropical, cusps shift a day with the year. the auguries and personalities are the traditions&rsquo; overlay &mdash; this toy deals only the count.</div>
+
+<script>
+'use strict';
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const NX = W / 2;                       // the needle — the moment
+const BH = 110, CW = 150;               // band height, cell width
+const BAND_Y = [82, 268, 454, 640];     // band tops; caption sits just above each
+const dealt = document.getElementById('dealt');
+const el = document.getElementById('moment');
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function mod(a,n){ return ((a%n)+n)%n; }
+
+// gregorian calendar date -> julian day number (pure calendar, no timezone)
+function jdnOf(y, m, d){
+  const a = Math.floor((14-m)/12), y2 = y+4800-a, m2 = m+12*a-3;
+  return d + Math.floor((153*m2+2)/5) + 365*y2 + Math.floor(y2/4) - Math.floor(y2/100) + Math.floor(y2/400) - 32045;
+}
+
+const T_SIGNS = ['imix','ik','akbal','kan','chicchan','cimi','manik','lamat','muluc','oc',
+                 'chuen','eb','ben','ix','men','cib','caban','etznab','cauac','ahau'];
+const A_SIGNS = ['cipactli','ehecatl','calli','cuetzpalin','coatl','miquiztli','mazatl','tochtli','atl','itzcuintli',
+                 'ozomatli','malinalli','acatl','ocelotl','cuauhtli','cozcacuauhtli','ollin','tecpatl','quiahuitl','xochitl'];
+const C_ANIMALS = ['rat','ox','tiger','rabbit','dragon','snake','horse','goat','monkey','rooster','dog','pig'];
+const C_STEMS  = ['jia','yi','bing','ding','wu','ji','geng','xin','ren','gui'];
+const C_BRANCH = ['zi','chou','yin','mao','chen','si','wu','wei','shen','you','xu','hai'];
+const C_ELEM   = ['wood','wood','fire','fire','earth','earth','metal','metal','water','water'];
+const S_SIGNS = ['aries','taurus','gemini','cancer','leo','virgo','libra','scorpio','sagittarius','capricorn','aquarius','pisces'];
+const S_ELEM  = ['fire','earth','air','water'];
+const S_START = [[3,21],[4,20],[5,21],[6,21],[7,23],[8,23],[9,23],[10,23],[11,22],[12,22],[1,20],[2,19]];
+
+// which sign holds this jdn, and how far through its span
+function sunPos(jdn, y){
+  let idx = 0, startJ = -Infinity;
+  for (let i=0;i<12;i++) for (const yy of [y-1, y, y+1]){
+    const j = jdnOf(yy, S_START[i][0], S_START[i][1]);
+    if (j <= jdn && j > startJ){ startJ = j; idx = i; }
+  }
+  const ni = (idx+1)%12; let nextJ = Infinity;
+  for (const yy of [y-1, y, y+1]){
+    const j = jdnOf(yy, S_START[ni][0], S_START[ni][1]);
+    if (j > startJ && j < nextJ) nextJ = j;
+  }
+  return { idx, frac: (jdn - startJ) / (nextJ - startJ) };
+}
+
+function pad(n){ return String(n).padStart(2,'0'); }
+function setInput(dt){ el.value = dt.getFullYear() + '-' + pad(dt.getMonth()+1) + '-' + pad(dt.getDate()); }
+function parseMoment(){
+  if (!el.value) return null;
+  const p = el.value.split('-').map(Number);
+  if (p.length !== 3 || !p[0] || !p[1] || !p[2]) return null;
+  return { y: p[0], m: p[1], d: p[2] };
+}
+function step(days, years){
+  const c = parseMoment(); if (!c) return;
+  const dt = new Date(c.y, c.m-1, c.d);
+  dt.setFullYear(c.y);   // keep years < 100 literal (Date maps them to 19xx)
+  if (years) dt.setFullYear(dt.getFullYear() + years);
+  if (days) dt.setDate(dt.getDate() + days);
+  setInput(dt); render();
+}
+
+// shrink-to-fit label so long names stay inside their cell
+function fitFill(t, x, base, px, maxW){
+  let s = px; ctx.font = s + 'px "Courier New", monospace';
+  while (s > 10 && ctx.measureText(t).width > maxW){ s--; ctx.font = s + 'px "Courier New", monospace'; }
+  ctx.fillText(t, x, base);
+}
+
+// one strip of cells sliding under the needle; frac = needle's position within cell 0
+function band(y, caption, frac, labelFn){
+  ctx.textAlign = 'left'; ctx.fillStyle = '#6d6653'; ctx.font = '17px "Courier New", monospace';
+  ctx.fillText(caption, 12, y - 9);
+  ctx.textAlign = 'center';
+  for (let j = -5; j <= 5; j++){
+    const x = NX + (j - frac) * CW;
+    if (x > W || x + CW < 0) continue;
+    if (j === 0){
+      ctx.globalAlpha = 0.14; ctx.fillStyle = css('--mark');
+      ctx.fillRect(x, y, CW, BH); ctx.globalAlpha = 1;
+    }
+    ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, CW, BH);
+    const L = labelFn(j), ink = j === 0 ? css('--ink') : '#6d6653';
+    ctx.fillStyle = ink;
+    fitFill(L.top, x + CW/2, y + 47, 20, CW - 14);
+    ctx.fillStyle = L.botFaint ? '#6d6653' : ink;
+    fitFill(L.bot, x + CW/2, y + 75, L.botFaint ? 16 : 20, CW - 14);
+  }
+}
+
+function render(){
+  const c = parseMoment(); if (!c) return;
+  const jdn = jdnOf(c.y, c.m, c.d);
+
+  const dnT = jdn - 2456283;   // anchor: 21 dec 2012 = 4 ahau (GMT correlation)
+  const dnA = jdn - 2276828;   // anchor: 13 aug 1521 julian = 1 coatl (Caso correlation)
+  const eff = (c.m < 2 || (c.m === 2 && c.d < 4)) ? c.y - 1 : c.y;   // feb 4 approximates the lunisolar boundary
+  const yA = jdnOf(eff, 2, 4), yB = jdnOf(eff + 1, 2, 4);
+  const sun = sunPos(jdn, c.y);
+
+  ctx.fillStyle = css('--field'); ctx.fillRect(0, 0, W, H);
+
+  band(BAND_Y[0], "tzolk'in (maya) — 13 × 20, coprime → 260 days", 0.5,
+    j => ({ top: String(1 + mod(3 + dnT + j, 13)), bot: T_SIGNS[mod(19 + dnT + j, 20)] }));
+  band(BAND_Y[1], "tonalpohualli (aztec) — 13 × 20, coprime → 260 days", 0.5,
+    j => ({ top: String(1 + mod(dnA + j, 13)), bot: A_SIGNS[mod(4 + dnA + j, 20)] }));
+  band(BAND_Y[2], "year (chinese) — 10 stems × 12 branches → 60 years", (jdn - yA) / (yB - yA),
+    j => { const Y = eff + j; return { top: C_ELEM[mod(Y-4, 10)], bot: C_ANIMALS[mod(Y-4, 12)] }; });
+  band(BAND_Y[3], "sun (western, tropical) — 12 signs / solar year", sun.frac,
+    j => { const i = mod(sun.idx + j, 12); return { top: S_SIGNS[i], bot: S_ELEM[i % 4], botFaint: true }; });
+
+  // the needle spans all four bands plus a little overhang; translucent so labels read through it
+  ctx.globalAlpha = 0.45; ctx.fillStyle = css('--mark');
+  ctx.fillRect(NX - 1, BAND_Y[0] - 14, 2, (BAND_Y[3] + BH + 14) - (BAND_Y[0] - 14));
+  ctx.globalAlpha = 1;
+
+  const stI = mod(eff - 4, 10), brI = mod(eff - 4, 12);
+  dealt.innerHTML = 'dealt: <b>' + (1 + mod(3 + dnT, 13)) + ' ' + T_SIGNS[mod(19 + dnT, 20)]
+    + '</b> &middot; <b>' + (1 + mod(dnA, 13)) + ' ' + A_SIGNS[mod(4 + dnA, 20)]
+    + '</b> &middot; <b>' + C_ELEM[stI] + ' ' + C_ANIMALS[brI] + '</b> (' + C_STEMS[stI] + C_BRANCH[brI]
+    + ') &middot; <b>' + S_SIGNS[sun.idx] + '</b> (' + S_ELEM[sun.idx % 4] + ')';
+}
+
+el.addEventListener('input', render);
+document.getElementById('ym').onclick = () => step(0, -1);
+document.getElementById('dm').onclick = () => step(-1, 0);
+document.getElementById('td').onclick = () => { setInput(new Date()); render(); };
+document.getElementById('dp').onclick = () => step(1, 0);
+document.getElementById('yp').onclick = () => step(0, 1);
+
+setInput(new Date()); render();
+</script>
+</body>
+</html>

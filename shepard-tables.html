@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shepard's tables</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --table: #7a6a58;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 3.5rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(640px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>shepard's tables</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">turn</span><input type="range" id="turn" min="0" max="100" value="0"><span class="val" id="turnV"></span></div>
+    <div class="row"><span class="name">over</span><input type="range" id="over" min="0" max="100" value="0"><span class="val" id="overV"></span></div>
+  </div>
+  <canvas id="cv" width="920" height="560"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the two tabletops are the exact same parallelogram &mdash; same size, same shape. seen at different angles, one looks long and narrow, the other broad and square; the eye reads them as tables in a room and stretches each to fit. <b>turn</b> the right one to the same angle as the left and they match; then slide it <b>over</b> to stack them and see one shape.</div>
+
+<script>
+'use strict';
+
+// one parallelogram, points relative to its centre
+const P = [[-45, -150], [115, -110], [45, 150], [-115, 110]];
+const A = { x: 275, y: 300 }, B = { x: 645, y: 300 };
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const tEl = document.getElementById('turn'), tV = document.getElementById('turnV');
+const oEl = document.getElementById('over'), oV = document.getElementById('overV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let turn = 0;   // rotate B toward A's orientation
+let over = 0;   // slide B onto A
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function table(cx, cy, ang, fill, stroke) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  ctx.beginPath();
+  P.forEach(([px, py], i) => {
+    const x = cx + px * c - py * s, y = cy + px * s + py * c;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.stroke(); }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // left table fixed at angle 0; right table starts 90 deg off, turns to match, slides over
+  const angB = (1 - turn) * Math.PI / 2;
+  const bx = B.x + (A.x - B.x) * over;
+  const by = B.y + (A.y - B.y) * over;
+
+  table(A.x, A.y, 0, css('--table'), null);
+  table(bx, by, angB, css('--table'), null);
+
+  readout.innerHTML = over > 0.98 && turn > 0.98
+    ? 'stacked exactly &mdash; one parallelogram. the two tables are identical.'
+    : turn > 0.98
+      ? 'turned to the same angle &mdash; the very same parallelogram.'
+      : 'the two tabletops look nothing alike &mdash; yet they are the identical shape.';
+}
+
+function refresh() {
+  tV.textContent = turn > 0.98 ? 'matched angle' : turn > 0 ? 'turning' : 'off — as tables';
+  oV.textContent = over > 0.98 ? 'stacked' : over > 0 ? 'sliding' : 'off';
+  draw();
+}
+
+tEl.oninput = () => { turn = +tEl.value / 100; refresh(); };
+oEl.oninput = () => { over = +oEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

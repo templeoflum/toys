@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blur-scale</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --orig: #c9bfa6;   /* the signal as given */
+    --mark: #b8603a;   /* the signal at this scale */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .8rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 8rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  .controls { display: flex; gap: .5rem; margin-bottom: 1.2rem; justify-content: center; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  canvas { width: min(760px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 42rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .orig { color: var(--orig); }
+  .mark { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>blur-scale</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">blur &sigma;</span><input type="range" id="sig" min="0" max="600" value="0"><span class="val" id="sigV"></span></div>
+  </div>
+  <div class="controls"><button id="reset">reset</button></div>
+  <canvas id="cv" width="1400" height="640"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the signal carries features at three widths &mdash; a slow swell, a middle ripple, and two <span class="mark">sharp spikes</span>. raise <b>&sigma;</b> to blur it by degrees. blurring is a low-pass: a feature of width <i>w</i> is erased once &sigma; grows to about <i>w</i>. so the spikes wash out first, the ripple next, and the slow swell survives to the end &mdash; a scale keeps only what is broader than itself.</div>
+
+<script>
+'use strict';
+
+const N = 700;                 // samples across the signal
+const PLOT = { L: 90, R: 1310, T: 60, B: 560 };  // signal plot box in canvas px
+
+// feature widths in SAMPLES (used both to build the signal and to report survival)
+const W_SWELL  = 260;          // slow swell — the coarse feature
+const W_RIPPLE = 32;           // middle ripple — one period
+const W_SPIKE  = 6;            // sharp spikes — the fine feature
+
+let sigma = 0;                 // blur scale, in samples
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const sigEl = document.getElementById('sig'), sigV = document.getElementById('sigV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// the given signal: a sum of features at three scales, sampled on [0, N)
+const signal = new Float64Array(N);
+(function build() {
+  for (let i = 0; i < N; i++) {
+    const x = i / N;                                    // [0,1)
+    let v = 0;
+    v += 0.55 * Math.sin(Math.PI * x);                  // slow swell, ~half a period across
+    v += 0.22 * Math.sin(2 * Math.PI * (N / W_RIPPLE) * x); // middle ripple, period W_RIPPLE
+    signal[i] = v;
+  }
+  // two sharp spikes: each a narrow triangular tent of half-width W_SPIKE
+  const tents = [Math.round(N * 0.34), Math.round(N * 0.66)];
+  for (const c of tents) {
+    for (let d = -W_SPIKE; d <= W_SPIKE; d++) {
+      const i = c + d;
+      if (i < 0 || i >= N) continue;
+      signal[i] += 0.85 * (1 - Math.abs(d) / (W_SPIKE + 1));
+    }
+  }
+})();
+
+// discrete Gaussian blur: convolve `src` with a normalized Gaussian kernel of the
+// given sigma (in samples). kernel radius = ceil(3*sigma) so the tails are covered;
+// weights are normalized to sum to 1 so the blur conserves the signal's level.
+// boundary: samples off the ends are clamped to the nearest edge value.
+function gaussianBlur(src, sig) {
+  const n = src.length;
+  const out = new Float64Array(n);
+  if (sig < 0.5) { out.set(src); return out; }          // below one sample: no visible blur
+  const rad = Math.max(1, Math.ceil(3 * sig));
+  const k = new Float64Array(2 * rad + 1);
+  const inv2s2 = 1 / (2 * sig * sig);
+  let sum = 0;
+  for (let d = -rad; d <= rad; d++) {
+    const w = Math.exp(-d * d * inv2s2);
+    k[d + rad] = w;
+    sum += w;
+  }
+  for (let d = 0; d < k.length; d++) k[d] /= sum;        // normalize kernel to sum 1
+  for (let i = 0; i < n; i++) {
+    let acc = 0;
+    for (let d = -rad; d <= rad; d++) {
+      let j = i + d;
+      if (j < 0) j = 0; else if (j >= n) j = n - 1;      // clamp-to-edge boundary
+      acc += k[d + rad] * src[j];
+    }
+    out[i] = acc;
+  }
+  return out;
+}
+
+// fixed vertical scale so shrinking amplitude is visible (not re-normalized per frame)
+const AMP = 1.9;
+function yOf(v) {
+  const mid = (PLOT.T + PLOT.B) / 2;
+  const half = (PLOT.B - PLOT.T) / 2;
+  return mid - (v / AMP) * half;
+}
+function xOf(i) { return PLOT.L + (i / (N - 1)) * (PLOT.R - PLOT.L); }
+
+function plotCurve(arr, color, width, alpha) {
+  ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width;
+  ctx.beginPath();
+  for (let i = 0; i < arr.length; i++) {
+    const x = xOf(i), y = yOf(arr[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, W, H);
+
+  // baseline
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PLOT.L, yOf(0)); ctx.lineTo(PLOT.R, yOf(0)); ctx.stroke();
+
+  // the given signal, faint underneath
+  plotCurve(signal, css('--orig'), 2, 0.9);
+
+  // the signal at this scale
+  const blurred = gaussianBlur(signal, sigma);
+  plotCurve(blurred, css('--mark'), 3, 1);
+
+  // legend
+  ctx.font = "italic 20px Georgia"; ctx.textAlign = 'left';
+  ctx.fillStyle = css('--orig'); ctx.fillText('the signal as given', PLOT.L, PLOT.B + 44);
+  ctx.fillStyle = css('--mark'); ctx.fillText('at scale sigma = ' + sigma, PLOT.L + 300, PLOT.B + 44);
+}
+
+// a feature of width w is "erased" once sigma is comparable to w (low-pass law).
+// call it gone at sigma >= w, fading as sigma approaches w.
+function survives(w) { return sigma < w; }
+function state(w) {
+  if (sigma >= w) return 'gone';
+  if (sigma >= 0.5 * w) return 'fading';
+  return 'kept';
+}
+
+function refresh() {
+  sigV.textContent = sigma < 0.5 ? '0 (no blur)' : sigma + ' samples';
+  draw();
+
+  const s = { spike: state(W_SPIKE), ripple: state(W_RIPPLE), swell: state(W_SWELL) };
+  const survivors = [
+    survives(W_SPIKE) ? 'spikes (w&asymp;' + W_SPIKE + ')' : null,
+    survives(W_RIPPLE) ? 'ripple (w&asymp;' + W_RIPPLE + ')' : null,
+    survives(W_SWELL) ? 'swell (w&asymp;' + W_SWELL + ')' : null
+  ].filter(Boolean);
+
+  readout.innerHTML =
+    'spikes <b>' + s.spike + '</b> &nbsp;·&nbsp; ripple <b>' + s.ripple + '</b> &nbsp;·&nbsp; swell <b>' + s.swell + '</b>'
+    + '<br><b>' + (sigma < 0.5
+        ? 'no blur &mdash; every scale is still here'
+        : survivors.length
+          ? 'at &sigma;=' + sigma + ' this scale keeps: ' + survivors.join(', ')
+          : 'at &sigma;=' + sigma + ' even the swell is washing out &mdash; nothing narrower survives')
+    + '</b>';
+}
+
+sigEl.oninput = () => { sigma = +sigEl.value / 10; sigma = Math.round(sigma); refresh(); };
+
+document.getElementById('reset').onclick = () => {
+  sigma = 0; sigEl.value = 0; refresh();
+};
+
+refresh();
+</script>
+</body>
+</html>

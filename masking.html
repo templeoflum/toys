@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>masking</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --field: #d9d5ca;   /* the neutral field the skirt falls through */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 9rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  .btns { display: flex; gap: .6rem; flex-wrap: wrap; justify-content: center; }
+  button { font-family: 'Courier New', monospace; font-size: .78rem; color: var(--ink); background: transparent;
+           border: 1px solid var(--faint); border-radius: 3px; padding: .35rem .8rem; cursor: pointer; margin-bottom: 1.1rem; }
+  button:hover { border-color: var(--mark); color: var(--mark); }
+  canvas { width: min(560px, 92vw); height: auto; display: block; border: 1px solid var(--faint); background: var(--field); }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>masking</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">masker</span><input type="range" id="masker" min="0" max="100" step="0.5" value="16.5"><span class="val" id="maskerV"></span></div>
+    <div class="row"><span class="name">level</span><input type="range" id="level" min="0" max="100" step="1" value="70"><span class="val" id="levelV"></span></div>
+  </div>
+  <div class="btns">
+    <button id="play">play</button>
+    <button id="target">target: on</button>
+  </div>
+  <canvas id="cv" width="1120" height="800"></canvas>
+  <div id="readout"><span>press play &mdash; headphones help. the target is the thin steady tone at 1000 hz.</span></div>
+  <div class="hint">press <b>play</b>, hear the thin steady tone at 1000 hz, then steer the louder band toward it &mdash; somewhere on the approach the tone drops out of the world, though its own level never moved; steer past and it returns. try the two sides: a band parked just BELOW 1000 hz hides it harder than one just above &mdash; masking spreads upward, low hides high. this is wegel &amp; lane's 1924 measurement and the experiment behind fletcher's critical band (1940) &mdash; and the reason mp3 files are small: coders spend no bits on what the masker already hides. the drawn skirt is a schematic guide; the real threshold lives in your ears.</div>
+
+<script>
+'use strict';
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const readout = document.getElementById('readout').firstElementChild;
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// horizontal axis = log2 frequency: 125 Hz at the left edge, 8000 Hz at the right
+const F0 = 125, OCT = 6;
+const ML = 60, MR = 60, MT = 64, MB = 66;
+const PW = W-ML-MR, PH = H-MT-MB, PB = H-MB;
+const TF = 1000, TH = 0.18;                       // the target: fixed frequency, fixed quiet height
+const TGAIN = 0.03;                               // the target's fixed quiet gain
+
+let mv = 16.5, level = 70;                        // raw slider values
+let playing = false, targetOn = true;
+let rafId = 0, lastDraw = 0;
+let actx = null, tGain = null, mGain = null, filt = null;
+
+const fMask = () => F0*Math.pow(2, (mv/100)*OCT); // log slider -> Hz
+const xOf = f => ML + (Math.log2(f/F0)/OCT)*PW;
+const yOf = h => PB - h*PH;                       // h in fractions of plot height
+const maskGain = () => Math.pow(level/100, 1.5)*2.0;  // makeup gain for the narrow band
+const peakH = () => (level/100)*0.70;             // hump peak, fraction of plot height
+const hiSpread = () => 2.2*(level/100);           // upward reach of the skirt, in octaves
+
+function skirtH(f){                               // schematic masked-threshold height at f
+  const d = Math.log2(f/fMask());
+  const run = d >= 0 ? d/Math.max(hiSpread(), 1e-6) : -d/0.7;
+  return Math.max(0, peakH()*(1 - run));
+}
+const masked = () => skirtH(TF) > TH;
+
+function buildAudio(){                            // runs once, on the first press of play
+  const master = actx.createGain();
+  master.gain.value = 0.9; master.connect(actx.destination);
+
+  const osc = actx.createOscillator();            // the target tone
+  osc.type = 'sine'; osc.frequency.value = TF;
+  tGain = actx.createGain(); tGain.gain.value = targetOn ? TGAIN : 0;
+  osc.connect(tGain); tGain.connect(master); osc.start();
+
+  const len = 2*actx.sampleRate;                  // the masker: looped white noise, banded
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const ch = buf.getChannelData(0);
+  for (let i=0;i<len;i++) ch[i] = Math.random()*2 - 1;
+  const src = actx.createBufferSource(); src.buffer = buf; src.loop = true;
+  filt = actx.createBiquadFilter();
+  filt.type = 'bandpass'; filt.frequency.value = fMask(); filt.Q.value = 6;
+  mGain = actx.createGain(); mGain.gain.value = maskGain();
+  src.connect(filt); filt.connect(mGain); mGain.connect(master); src.start();
+}
+
+function updateAudio(){                           // short ramps: no zipper, no clicks
+  if (!actx) return;
+  const t = actx.currentTime;
+  filt.frequency.setTargetAtTime(fMask(), t, 0.05);
+  mGain.gain.setTargetAtTime(maskGain(), t, 0.05);
+}
+
+function drawFrame(){
+  ctx.fillStyle = css('--field'); ctx.fillRect(0,0,W,H);
+
+  // octave ruler along the floor
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+  ctx.fillStyle = '#6d6653'; ctx.font = '15px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let k=0;k<=OCT;k++){
+    const f = F0*Math.pow(2,k), x = xOf(f);
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.moveTo(x,MT); ctx.lineTo(x,PB); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillText(f >= 1000 ? (f/1000)+'k' : String(f), x, PB+12);
+  }
+  ctx.globalAlpha = 0.55;
+  ctx.beginPath(); ctx.moveTo(ML,PB); ctx.lineTo(W-MR,PB); ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  const fm = fMask(), xm = xOf(fm), pk = peakH();
+
+  if (pk > 0){
+    ctx.save();
+    ctx.beginPath(); ctx.rect(ML, MT, PW, PH); ctx.clip();
+
+    // the masker: a hump of banded noise, ±1/3 octave wide
+    ctx.beginPath();
+    for (let s=0;s<=60;s++){
+      const dd = -1/3 + (s/60)*(2/3);
+      const x = xOf(fm*Math.pow(2,dd)), y = yOf(pk*Math.pow(Math.cos(dd*1.5*Math.PI),2));
+      if (s) ctx.lineTo(x,y); else ctx.moveTo(x,y);
+    }
+    ctx.fillStyle = css('--mark'); ctx.globalAlpha = 0.30; ctx.fill();
+    ctx.globalAlpha = 1; ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.stroke();
+
+    if (playing){                                 // the band is alive: fresh flecks each pass
+      ctx.globalAlpha = 0.12; ctx.lineWidth = 1;
+      for (let i=0;i<42;i++){
+        const dd = (Math.random()*2-1)/3;
+        const x = xOf(fm*Math.pow(2,dd));
+        ctx.beginPath(); ctx.moveTo(x,PB);
+        ctx.lineTo(x, yOf(pk*Math.pow(Math.cos(dd*1.5*Math.PI),2)*Math.random()));
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // the skirt: steep below the hump, shallow and long above it
+    ctx.strokeStyle = css('--ink'); ctx.globalAlpha = 0.5; ctx.lineWidth = 2;
+    ctx.setLineDash([8,7]);
+    ctx.beginPath();
+    ctx.moveTo(xOf(fm*Math.pow(2,-0.7)), PB);
+    ctx.lineTo(xm, yOf(pk));
+    ctx.lineTo(xOf(fm*Math.pow(2,hiSpread())), PB);
+    ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  // the target: a thin steady tone at 1000 Hz, ghosted when the skirt tops it
+  const xt = xOf(TF), yt = yOf(TH), hid = masked();
+  ctx.strokeStyle = css('--ink'); ctx.fillStyle = css('--ink');
+  ctx.globalAlpha = hid ? 0.3 : 1;
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(xt,PB); ctx.lineTo(xt,yt); ctx.stroke();
+  ctx.beginPath(); ctx.arc(xt, yt, 7, 0, Math.PI*2);
+  if (hid){ ctx.lineWidth = 2; ctx.stroke(); } else ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#6d6653'; ctx.font = '17px "Courier New", monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  if (pk > 0){                                    // label rides the upper flank
+    const dl = Math.max(0.45, hiSpread()*0.55);
+    const txt = 'the skirt spreads upward';
+    let lx = xOf(fm*Math.pow(2,dl)) + 6;
+    lx = Math.min(lx, W - 12 - ctx.measureText(txt).width);
+    ctx.fillText(txt, lx, yOf(Math.max(0.06, skirtH(fm*Math.pow(2,dl)))) - 10);
+  }
+  ctx.fillText('a quiet tone at 1000 hz · a louder band you can steer · the skirt is schematic — your ears decide', 20, 36);
+}
+
+function updateReadout(){
+  if (!playing){
+    readout.innerHTML = 'press play &mdash; headphones help. the target is the thin steady tone at 1000 hz.';
+    return;
+  }
+  let s = masked()
+    ? 'target <b>under the skirt</b> &mdash; listen: it\'s gone, though nothing about it changed.'
+    : 'target <b>clear of the skirt</b> &mdash; listen: the thin tone is there.';
+  if (!targetOn) s += ' &middot; target is OFF &mdash; flip it on to have something to lose.';
+  readout.innerHTML = s;
+}
+
+function loop(now){                               // slow pulse: keeps the band's flecks alive
+  if (now - lastDraw > 90){ lastDraw = now; drawFrame(); }
+  rafId = requestAnimationFrame(loop);
+}
+
+const playBtn = document.getElementById('play');
+playBtn.addEventListener('click', ()=>{
+  if (!playing){
+    if (!actx){                                   // audio exists only after the first press
+      actx = new (window.AudioContext || window.webkitAudioContext)();
+      buildAudio();
+    }
+    actx.resume();
+    playing = true; playBtn.textContent = 'stop';
+    lastDraw = 0; rafId = requestAnimationFrame(loop);
+  } else {
+    playing = false; cancelAnimationFrame(rafId); actx.suspend();
+    playBtn.textContent = 'play';
+    drawFrame();
+  }
+  updateReadout();
+});
+
+const targetBtn = document.getElementById('target');
+targetBtn.addEventListener('click', ()=>{
+  targetOn = !targetOn;
+  targetBtn.textContent = 'target: ' + (targetOn ? 'on' : 'off');
+  if (actx) tGain.gain.setTargetAtTime(targetOn ? TGAIN : 0, actx.currentTime, 0.02);
+  updateReadout();
+});
+
+function bind(id, vid, fn, fmt){ const e=document.getElementById(id), v=document.getElementById(vid);
+  const upd = ()=>{ fn(+e.value); v.textContent = fmt(e.value); }; e.oninput = upd; upd(); }
+bind('masker','maskerV', v=>{ mv=v; updateAudio(); drawFrame(); updateReadout(); },
+     v=>Math.round(125*Math.pow(2,(+v/100)*6))+' hz');
+bind('level','levelV', v=>{ level=v; updateAudio(); drawFrame(); updateReadout(); },
+     v=>v+' %');
+
+drawFrame();
+</script>
+</body>
+</html>

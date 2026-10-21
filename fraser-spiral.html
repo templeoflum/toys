@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fraser spiral</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --checkA: #9c968a;
+    --checkB: #bcb6a8;
+    --cordD: #1d1c19;
+    --cordL: #f4f1e8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(560px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>fraser spiral</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">twist</span><input type="range" id="twist" min="0" max="100" value="100"><span class="val" id="twistV"></span></div>
+    <div class="row"><span class="name">trace</span><input type="range" id="trace" min="0" max="100" value="0"><span class="val" id="traceV"></span></div>
+  </div>
+  <canvas id="cv" width="620" height="620"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">this looks like a single cord spiralling inward &mdash; but it is a set of separate, closed circles. each is a rope of little dark-and-light bars, and because every bar is tilted the same way against the checkered ground, the eye strings them into a spiral that isn't there. straighten the <b>twist</b> and the bars align with the circles, and the rings snap flat; or raise the <b>trace</b> to run one true circle over a ring.</div>
+
+<script>
+'use strict';
+
+const CX = 310, CY = 310;
+const RINGS = [70, 120, 170, 220, 270];
+const CELL = 42;                        // checkerboard cell
+const CORD = 26, CW = 9;                // cord bar length and width
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const twEl = document.getElementById('twist'), twV = document.getElementById('twistV');
+const trEl = document.getElementById('trace'), trV = document.getElementById('traceV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let twist = 1;   // 0 => bars along the tangent, rings read flat
+let trace = 0;   // proof: one true circle laid over a ring
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  // checkered ground
+  const a = css('--checkA'), b = css('--checkB');
+  for (let y = 0; y < cv.height; y += CELL)
+    for (let x = 0; x < cv.width; x += CELL) {
+      ctx.fillStyle = ((x / CELL + y / CELL) & 1) ? a : b;
+      ctx.fillRect(x, y, CELL, CELL);
+    }
+
+  const tilt = twist * (Math.PI / 4);   // up to 45 deg off the tangent
+  const D = css('--cordD'), L = css('--cordL');
+
+  for (const r of RINGS) {
+    const M = Math.max(10, Math.round(2 * Math.PI * r / 34));
+    for (let i = 0; i < M; i++) {
+      const th = i * 2 * Math.PI / M;
+      const px = CX + r * Math.cos(th), py = CY + r * Math.sin(th);
+      const axis = th + Math.PI / 2 + tilt;          // cord direction: tangent + twist
+      const ca = Math.cos(axis), sa = Math.sin(axis);
+      const nx = -sa, ny = ca;                       // across the cord
+      // two-tone bar: dark half and light half, split along the cord's length
+      ctx.fillStyle = D;
+      quad(px - ca * CORD / 2, py - sa * CORD / 2, px, py, nx, ny, CW);
+      ctx.fillStyle = L;
+      quad(px, py, px + ca * CORD / 2, py + sa * CORD / 2, nx, ny, CW);
+    }
+  }
+
+  if (trace > 0) {
+    ctx.save();
+    ctx.globalAlpha = trace;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2.5; ctx.setLineDash([8, 7]);
+    ctx.beginPath(); ctx.arc(CX, CY, 220, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = twist < 0.02
+    ? 'the bars lie along the circles &mdash; separate, closed rings, no spiral.'
+    : trace > 0.98
+      ? 'the true circle closes on itself &mdash; the ring is a circle, not a spiral.'
+      : 'it reads as one inward spiral &mdash; but every ring is a separate closed circle.';
+}
+
+// a bar half: rectangle from (x1,y1) to (x2,y2) with width w across (nx,ny)
+function quad(x1, y1, x2, y2, nx, ny, w) {
+  ctx.beginPath();
+  ctx.moveTo(x1 + nx * w / 2, y1 + ny * w / 2);
+  ctx.lineTo(x2 + nx * w / 2, y2 + ny * w / 2);
+  ctx.lineTo(x2 - nx * w / 2, y2 - ny * w / 2);
+  ctx.lineTo(x1 - nx * w / 2, y1 - ny * w / 2);
+  ctx.closePath(); ctx.fill();
+}
+
+function refresh() {
+  twV.textContent = twist < 0.02 ? 'flat — rings' : Math.round(twist * 100) + '%';
+  trV.textContent = trace > 0.98 ? 'circle traced' : trace > 0 ? 'rising' : 'off';
+  draw();
+}
+
+twEl.oninput = () => { twist = +twEl.value / 100; refresh(); };
+trEl.oninput = () => { trace = +trEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

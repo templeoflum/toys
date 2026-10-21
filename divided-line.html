@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the divided line</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .4rem; }
+  .controls { display: flex; gap: .5rem; margin: .8rem 0 1.6rem; flex-wrap: wrap; justify-content: center; }
+  button {
+    font: inherit; font-size: .85rem;
+    background: none; border: 1px solid var(--ink); border-radius: 2px;
+    color: var(--ink); padding: .3rem .8rem; cursor: pointer;
+  }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  #stack { width: min(680px, 94vw); display: flex; flex-direction: column; gap: 2.2rem; }
+  .strip { position: relative; }
+  .cells { display: flex; height: 64px; border: 1.5px solid var(--ink); }
+  .cell {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem; cursor: pointer; border-left: 1.5px solid var(--ink);
+    user-select: none; transition: background .15s;
+  }
+  .cell:first-child { border-left: none; }
+  .cell:hover { background: var(--shade); }
+  .cell.picked { background: var(--pick); }
+  .span-label {
+    position: absolute; top: -1.15rem; font-size: .72rem; color: var(--ink);
+    font-family: 'Courier New', monospace; white-space: nowrap;
+  }
+  .span-label.right { right: 0; }
+  .wire {
+    height: 2.2rem; width: 100%; pointer-events: none; display: block;
+    margin: -2.2rem 0 0; position: absolute; top: 100%; left: 0;
+  }
+  .marker, .ghost {
+    position: absolute; top: -8px; bottom: -8px; width: 0;
+    border-left: 2px solid var(--ink); pointer-events: none;
+  }
+  .ghost { border-left: 2px dashed var(--faint); }
+  .marker::after, .ghost::after {
+    content: ''; position: absolute; left: -4px; top: -6px;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ink);
+  }
+  .ghost::after { background: var(--faint); }
+  #readout {
+    margin-top: 2.4rem; text-align: center; line-height: 1.9;
+    font-family: 'Courier New', monospace; font-size: .95rem;
+  }
+  #address { font-size: 1.6rem; letter-spacing: .35em; }
+  #interval, #ratio { color: #6d6653; font-size: .85rem; }
+  .hint { margin-top: 1.8rem; font-style: italic; font-size: .8rem; color: var(--faint); }
+</style>
+</head>
+<body>
+  <h1>the divided line</h1>
+  <div class="controls">
+    <button id="dress-o" class="on">0 1 2</button>
+    <button id="dress-b">&minus; 0 +</button>
+    <button id="dress-s">&#9675; &#9633; &#9651;</button>
+    <span style="width:1.2rem"></span>
+    <button id="mirror">mirror</button>
+    <button id="back">back</button>
+    <button id="clear">clear</button>
+  </div>
+  <div id="stack"></div>
+  <div id="readout">
+    <div id="address">&nbsp;</div>
+    <div id="interval">the whole line</div>
+    <div id="ratio">[0, 1)</div>
+  </div>
+  <div class="hint">press a third &mdash; it divides again, the same way, all the way down</div>
+
+<script>
+'use strict';
+const DEPTH = 3;
+const DRESSES = {
+  o: ['0', '1', '2'],
+  b: ['−', '0', '+'],
+  s: ['○', '□', '△'],
+};
+let digits = [];
+let dress = 'o';
+
+const stack = document.getElementById('stack');
+const addrEl = document.getElementById('address');
+const intEl = document.getElementById('interval');
+const ratioEl = document.getElementById('ratio');
+
+function low(ds) { return ds.reduce((a, d, i) => a + d / 3 ** (i + 1), 0); }
+
+function render() {
+  stack.innerHTML = '';
+  const shown = Math.min(digits.length + 1, DEPTH);
+  for (let level = 0; level < shown; level++) {
+    const pre = digits.slice(0, level);
+    const l = low(pre), w = 3 ** -level;
+    const strip = document.createElement('div');
+    strip.className = 'strip';
+
+    const lab = document.createElement('div');
+    lab.className = 'span-label';
+    lab.textContent = fmtFrac(pre);
+    strip.appendChild(lab);
+    const labR = document.createElement('div');
+    labR.className = 'span-label right';
+    labR.textContent = fmtFracEnd(pre);
+    strip.appendChild(labR);
+
+    const cells = document.createElement('div');
+    cells.className = 'cells';
+    for (let d = 0; d < 3; d++) {
+      const c = document.createElement('div');
+      c.className = 'cell' + (digits[level] === d ? ' picked' : '');
+      c.textContent = DRESSES[dress][d];
+      c.onclick = () => { digits = pre.concat(d); render(); };
+      cells.appendChild(c);
+    }
+    strip.appendChild(cells);
+
+    if (level === 0 && digits.length) {
+      const center = low(digits) + 3 ** -digits.length / 2;
+      const m = document.createElement('div');
+      m.className = 'marker';
+      m.style.left = (center * 100) + '%';
+      cells.appendChild(m);
+      const g = document.createElement('div');
+      g.className = 'ghost';
+      g.style.left = ((1 - center) * 100) + '%';
+      cells.appendChild(g);
+    }
+    stack.appendChild(strip);
+  }
+
+  const ds = digits;
+  addrEl.innerHTML = ds.length
+    ? ds.map(d => DRESSES[dress][d]).join('')
+    : '&nbsp;';
+  if (ds.length) {
+    const n = ds.length, den = 3 ** n;
+    const num = ds.reduce((a, d, i) => a + d * 3 ** (n - 1 - i), 0);
+    intEl.textContent = num + '/' + den + '  …  ' + (num + 1) + '/' + den;
+    ratioEl.textContent = '[' + (num / den).toFixed(4) + ', ' + ((num + 1) / den).toFixed(4) + ')';
+  } else {
+    intEl.textContent = 'the whole line';
+    ratioEl.textContent = '[0, 1)';
+  }
+}
+
+function fmtFrac(pre) {
+  if (!pre.length) return '0';
+  const den = 3 ** pre.length;
+  const num = pre.reduce((a, d, i) => a + d * 3 ** (pre.length - 1 - i), 0);
+  return num + '/' + den;
+}
+function fmtFracEnd(pre) {
+  if (!pre.length) return '1';
+  const den = 3 ** pre.length;
+  const num = pre.reduce((a, d, i) => a + d * 3 ** (pre.length - 1 - i), 0);
+  return (num + 1) + '/' + den;
+}
+
+document.getElementById('mirror').onclick = () => { digits = digits.map(d => 2 - d); render(); };
+document.getElementById('back').onclick = () => { digits.pop(); render(); };
+document.getElementById('clear').onclick = () => { digits = []; render(); };
+for (const k of ['o', 'b', 's']) {
+  document.getElementById('dress-' + k).onclick = (e) => {
+    dress = k;
+    for (const j of ['o', 'b', 's'])
+      document.getElementById('dress-' + j).classList.toggle('on', j === k);
+    render();
+  };
+}
+render();
+</script>
+</body>
+</html>

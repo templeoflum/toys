@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>epicycles</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .4rem; }
+  .controls { display: flex; gap: .5rem; margin: .8rem 0 1.2rem; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button {
+    font: inherit; font-size: .85rem;
+    background: none; border: 1px solid var(--ink); border-radius: 2px;
+    color: var(--ink); padding: .3rem .8rem; cursor: pointer;
+  }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .sep { width: 1.2rem; }
+  .count { font-family: 'Courier New', monospace; font-size: .9rem; min-width: 5.6rem; text-align: center; }
+  .sweep { display: flex; align-items: center; gap: .5rem; margin-bottom: 1.4rem; font-size: .78rem; color: #6d6653; font-family: 'Courier New', monospace; }
+  input[type=range] { accent-color: var(--ink); width: min(420px, 80vw); }
+  canvas { width: min(760px, 96vw); height: auto; display: block; }
+  #readout {
+    margin-top: 1.6rem; text-align: center; line-height: 1.8;
+    font-family: 'Courier New', monospace; font-size: .9rem; color: #6d6653;
+  }
+  #readout b { color: var(--ink); font-weight: normal; }
+  .hint { margin-top: 1.6rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 34rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>epicycles</h1>
+  <div class="controls">
+    <button id="t-square" class="on">square</button>
+    <button id="t-saw">sawtooth</button>
+    <button id="t-tri">triangle</button>
+    <span class="sep"></span>
+    <button id="fewer">&minus;</button>
+    <span class="count" id="count">1 cycle</span>
+    <button id="more">+</button>
+    <span class="sep"></span>
+    <button id="spin">spin</button>
+  </div>
+  <div class="sweep">
+    <span>sweep</span>
+    <input type="range" id="sweep" min="0" max="1000" value="1000">
+  </div>
+  <canvas id="cv" width="1520" height="740"></canvas>
+  <div id="readout">
+    <span><b id="nshow">1</b> pure <span id="cword">cycle</span> stacked &mdash; surface: <b id="tshow">square</b></span>
+  </div>
+  <div class="hint">the jagged surface is only circles. add a cycle &mdash; watch it sharpen toward the shape. drag the sweep to draw it by hand.</div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// each target is a sine series  S(t) = Σ a_k · sin(k·t).
+// coef(k) returns the amplitude of the k-th harmonic (0 if absent).
+const TARGETS = {
+  square:   { label: 'square',   coef: k => (k % 2 === 1) ? (4 / Math.PI) / k : 0 },
+  saw:      { label: 'sawtooth', coef: k => (2 / Math.PI) * (k % 2 === 1 ? 1 : -1) / k },
+  tri:      { label: 'triangle', coef: k => (k % 2 === 1) ? (8 / (Math.PI * Math.PI)) * (((k - 1) / 2) % 2 === 0 ? 1 : -1) / (k * k) : 0 },
+};
+
+let target = 'square';
+let n = 1;          // how many non-zero harmonics are stacked
+let sweep = 1;      // 0..1, the hand along one period
+let spinning = false;
+let raf = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const countEl = document.getElementById('count');
+const nShow = document.getElementById('nshow');
+const tShow = document.getElementById('tshow');
+const sweepEl = document.getElementById('sweep');
+
+// the first n non-zero harmonics of the current target: [{k, a}]
+function harmonics() {
+  const out = [];
+  let k = 1;
+  while (out.length < n && k < 400) {
+    const a = TARGETS[target].coef(k);
+    if (a !== 0) out.push({ k, a });
+    k++;
+  }
+  return out;
+}
+
+// value of the n-harmonic reconstruction at phase t
+function valueAt(hs, t) {
+  let y = 0;
+  for (const h of hs) y += h.a * Math.sin(h.k * t);
+  return y;
+}
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), pick = css('--pick'), paper = css('--paper');
+  ctx.clearRect(0, 0, W, H);
+
+  const hs = harmonics();
+  const t = sweep * TAU;
+
+  // layout: left square box = the circle machine; right = the unrolled wave.
+  const pad = 40;
+  const boxR = H / 2 - pad;              // radius budget for the chain
+  const cx = pad + boxR, cy = H / 2;     // machine center
+  const waveX0 = cx + boxR + 70;         // wave plot left edge
+  const waveX1 = W - pad;                // wave plot right edge
+  const waveW = waveX1 - waveX0;
+  const scale = boxR * 0.62;             // shared vertical scale (amplitude≈1.27 for square)
+
+  // --- the circle machine: chained rotating vectors ---
+  let px = cx, py = cy;
+  ctx.lineWidth = 1;
+  for (const h of hs) {
+    const r = Math.abs(h.a) * scale;
+    // circle
+    ctx.strokeStyle = faint;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, TAU);
+    ctx.stroke();
+    // arm to next point. y-step is negated so the tip's height matches the
+    // wave plotted as cy − value·scale (canvas y grows downward): dot on line.
+    const nx = px + h.a * scale * Math.cos(h.k * t);
+    const ny = py - h.a * scale * Math.sin(h.k * t);
+    ctx.strokeStyle = ink;
+    ctx.beginPath();
+    ctx.moveTo(px, py); ctx.lineTo(nx, ny);
+    ctx.stroke();
+    px = nx; py = ny;
+  }
+  const tipY = py;   // the chain tip's height is the wave value·scale
+
+  // tip dot
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(px, py, 4, 0, TAU); ctx.fill();
+
+  // --- the unrolled wave (surface) on the right ---
+  // axis
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(waveX0, cy); ctx.lineTo(waveX1, cy); ctx.stroke();
+
+  // faint full target (many harmonics) behind
+  const full = [];
+  let kk = 1; while (full.length < 60 && kk < 400) { const a = TARGETS[target].coef(kk); if (a !== 0) full.push({ k: kk, a }); kk++; }
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i <= waveW; i++) {
+    const tt = (i / waveW) * TAU;
+    const y = cy - valueAt(full, tt) * scale;
+    i === 0 ? ctx.moveTo(waveX0 + i, y) : ctx.lineTo(waveX0 + i, y);
+  }
+  ctx.stroke();
+
+  // solid n-harmonic reconstruction, drawn up to the sweep
+  const upto = Math.round(sweep * waveW);
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i <= upto; i++) {
+    const tt = (i / waveW) * TAU;
+    const y = cy - valueAt(hs, tt) * scale;
+    i === 0 ? ctx.moveTo(waveX0 + i, y) : ctx.lineTo(waveX0 + i, y);
+  }
+  ctx.stroke();
+
+  // connector: chain tip -> current wave point (same height)
+  const curX = waveX0 + upto;
+  ctx.strokeStyle = pick; ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath(); ctx.moveTo(px, tipY); ctx.lineTo(curX, tipY); ctx.stroke();
+  ctx.setLineDash([]);
+  // current point dot
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.arc(curX, tipY, 4, 0, TAU); ctx.fill();
+
+  nShow.textContent = String(n);
+}
+
+function refresh() {
+  countEl.textContent = n + (n === 1 ? ' cycle' : ' cycles');
+  nShow.textContent = String(n);
+  document.getElementById('cword').textContent = n === 1 ? 'cycle' : 'cycles';
+  tShow.textContent = TARGETS[target].label;
+  draw();
+}
+
+// controls
+for (const [id, key] of [['t-square', 'square'], ['t-saw', 'saw'], ['t-tri', 'tri']]) {
+  document.getElementById(id).onclick = () => {
+    target = key;
+    for (const j of ['t-square', 't-saw', 't-tri'])
+      document.getElementById(j).classList.toggle('on', j === id);
+    refresh();
+  };
+}
+document.getElementById('more').onclick = () => { n = Math.min(12, n + 1); refresh(); };
+document.getElementById('fewer').onclick = () => { n = Math.max(1, n - 1); refresh(); };
+sweepEl.oninput = () => { sweep = sweepEl.value / 1000; draw(); };
+
+const spinBtn = document.getElementById('spin');
+spinBtn.onclick = () => {
+  spinning = !spinning;
+  spinBtn.classList.toggle('on', spinning);
+  if (spinning) {
+    let last = performance.now();
+    const step = (now) => {
+      if (!spinning) return;
+      sweep += (now - last) / 6000;   // one period ≈ 6s
+      last = now;
+      if (sweep > 1) sweep -= 1;
+      sweepEl.value = Math.round(sweep * 1000);
+      draw();
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  } else {
+    cancelAnimationFrame(raf);
+  }
+};
+
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>barometer</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>barometer</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">pressure P</span><input type="range" id="press" min="950" max="1050" value="1013" step="1"><span class="val" id="pressV"></span></div>
+    <div class="row"><span class="name">density</span>
+      <span class="modes">
+        <button id="bMerc">mercury</button>
+        <button id="bMid">mid fluid</button>
+        <button id="bWater">water</button>
+      </span>
+    </div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">reset</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a tube closed at the top stands in a dish open to the <b>air</b>. the atmosphere presses on the dish and holds up a <b>column</b> of fluid; above it hangs a <b>vacuum</b> &mdash; the Torricelli void. the column stands exactly where its weight per area balances the pressure: <b>h = P / (&rho;g)</b>. higher pressure &rarr; taller column. dense mercury needs only ~760&nbsp;mm where water would need ~10.3&nbsp;m.<span class="cite">the mercury barometer &middot; Evangelista Torricelli 1643 &middot; h = P/(&rho;g), the atmosphere balances the column &middot; field: fluid statics / atmospheric pressure</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the mercury barometer ----------------------------------------------
+// a tube closed at the top with a vacuum (the Torricelli void) above,
+// standing in a dish of fluid open to the air. the atmosphere pushes down
+// on the dish surface and holds up a column of fluid of height h. the column
+// stands exactly where the fluid's weight per area balances the pressure:
+//   P = ρ·g·h    ⇒    h = P / (ρ·g)
+// with g = 9.81 m/s². column height ∝ pressure, inversely ∝ density.
+// VERIFY (load-bearing): at P = 101325 Pa, ρ = 13595 kg/m³ (mercury),
+//   h = 101325 / (13595 · 9.81) = 0.7597 m ≈ 760 mm.
+// with water (ρ = 1000) the same pressure gives h ≈ 10.33 m — which is why
+// barometers use dense mercury. the drawn column and the readout must land
+// on h = P/(ρg) exactly — that is the check.
+const G = 9.81;                 // m/s²
+
+// the three fluids — mercury, a mid fluid, water — by density (kg/m³).
+const FLUIDS = {
+  mercury: { rho: 13595, label: 'mercury' },
+  mid:     { rho:  6000, label: 'mid fluid' },
+  water:   { rho:  1000, label: 'water' },
+};
+
+let P_hPa = 1013;               // atmospheric pressure, hectopascals (mbar)
+let fluid = 'mercury';          // 'mercury' | 'mid' | 'water'
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const pressEl = document.getElementById('press'), pressV = document.getElementById('pressV');
+const readout = document.getElementById('readout').firstElementChild;
+const bMerc = document.getElementById('bMerc');
+const bMid = document.getElementById('bMid');
+const bWater = document.getElementById('bWater');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// pressure in pascals (1 hPa = 100 Pa) and the live fluid density.
+function pressPa() { return P_hPa * 100; }
+function rho() { return FLUIDS[fluid].rho; }
+
+// the balanced-column height in metres: h = P / (ρ·g). this is the invariant.
+function columnH() { return pressPa() / (rho() * G); }
+
+// --- the animated column: it eases toward its balanced height -----------
+// hDrawn tracks the true balanced height columnH() so a slider move shows the
+// column rising or falling to its new balance rather than snapping.
+let hDrawn = columnH();
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// the tube stands on the left of centre; the readout scale runs beside it.
+const TUBE_X = Math.round(W * 0.40);   // tube centre x
+const TUBE_W = 120;                     // tube bore width
+const DISH_Y = H - 200;                 // fluid surface in the dish
+const TUBE_TOP = 80;                    // closed top of the tube (vacuum sits below)
+
+// the plotted height ceiling — mercury at max pressure is the tallest column
+// we ever draw, so it maps to the top of the tube. everything scales to that.
+const H_PLOT = FLUIDS.mercury.rho ? (1050 * 100) / (FLUIDS.water.rho * G) * 0 + 0.90 : 0.90;
+// H_PLOT ≈ 0.90 m of mercury-equivalent full scale (water would blow past it,
+// which is the whole point — a water column would run right off the tube).
+
+// map a column height (metres) to a y on the tube (dish surface = bottom).
+function yOfH(h) {
+  const frac = Math.max(0, Math.min(1, h / H_PLOT));
+  return DISH_Y - frac * (DISH_Y - TUBE_TOP);
+}
+
+// --- the scene: tube, dish, column, vacuum, height scale ----------------
+// the tube is closed at TUBE_TOP; the fluid column rises to hDrawn with the
+// Torricelli void (vacuum) between the column top and the closed top. the dish
+// spreads at the base, its surface open to the atmosphere pressing down.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const bore = TUBE_W;
+  const left = TUBE_X - bore / 2, right = TUBE_X + bore / 2;
+  const colY = yOfH(hDrawn);
+
+  // the dish of fluid at the base — a wide shallow reservoir
+  const dishL = TUBE_X - 320, dishR = TUBE_X + 200, dishBot = DISH_Y + 90;
+  ctx.fillStyle = shade;
+  ctx.beginPath();
+  ctx.moveTo(dishL, DISH_Y);
+  ctx.lineTo(dishR, DISH_Y);
+  ctx.lineTo(dishR - 30, dishBot);
+  ctx.lineTo(dishL + 30, dishBot);
+  ctx.closePath(); ctx.fill();
+  // the dish fluid surface line
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(dishL, DISH_Y); ctx.lineTo(dishR, DISH_Y); ctx.stroke();
+
+  // the fluid column inside the tube — from the dish surface up to colY
+  ctx.fillStyle = shade;
+  ctx.fillRect(left, colY, bore, DISH_Y - colY);
+  ctx.fillStyle = pick;
+  ctx.fillRect(left, colY, bore, Math.min(28, DISH_Y - colY));   // meniscus band
+
+  // the vacuum (Torricelli void) — the empty span above the column, paper
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(left, TUBE_TOP, bore, colY - TUBE_TOP);
+  ctx.fillStyle = faint; ctx.font = 'italic 22px Georgia'; ctx.textAlign = 'center';
+  if (colY - TUBE_TOP > 40) ctx.fillText('vacuum', TUBE_X, (TUBE_TOP + colY) / 2);
+
+  // the tube outline — closed at the top, open at the dish
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(left, DISH_Y);
+  ctx.lineTo(left, TUBE_TOP);
+  ctx.lineTo(right, TUBE_TOP);
+  ctx.lineTo(right, DISH_Y);
+  ctx.stroke();
+
+  // the column-top surface line (meniscus)
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(left, colY); ctx.lineTo(right, colY); ctx.stroke();
+
+  // the atmosphere pressing down on the dish surface — a rank of arrows
+  ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineWidth = 3;
+  for (let ax = dishL + 40; ax <= dishR - 20; ax += 80) {
+    if (ax > left - 40 && ax < right + 40) continue;   // skip the tube mouth
+    arrow(ax, DISH_Y - 90, ax, DISH_Y - 18);
+  }
+  ctx.fillStyle = ink; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('atmosphere P', dishR + 20, DISH_Y - 60);
+
+  // --- the graduated height scale beside the tube (mm) -------------------
+  // ticks every 100 mm up the right of the tube, labelled; a --mark tick at
+  // the live column top reads the height straight off the scale.
+  const scaleX = right + 40;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(scaleX, yOfH(0)); ctx.lineTo(scaleX, yOfH(H_PLOT)); ctx.stroke();
+  ctx.font = '18px "Courier New", monospace';
+  for (let mm = 0; mm <= H_PLOT * 1000; mm += 100) {
+    const ty = yOfH(mm / 1000);
+    const major = (mm % 500 === 0);
+    ctx.strokeStyle = faint; ctx.lineWidth = major ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(scaleX, ty); ctx.lineTo(scaleX + (major ? 26 : 14), ty); ctx.stroke();
+    if (major) {
+      ctx.fillStyle = faint; ctx.textAlign = 'left';
+      ctx.fillText(mm + ' mm', scaleX + 34, ty + 6);
+    }
+  }
+  // the live column-top marker on the scale
+  const hmm = hDrawn * 1000;
+  const my = yOfH(hDrawn);
+  ctx.strokeStyle = mark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(scaleX - 26, my); ctx.lineTo(scaleX + 30, my); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  const offScale = hDrawn > H_PLOT;
+  ctx.fillText('h = ' + hmm.toFixed(0) + ' mm' + (offScale ? '  (off scale)' : ''),
+               scaleX + 70, my + 7);
+
+  // a quiet fluid label at the top
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('fluid: ' + FLUIDS[fluid].label + '  (ρ = ' + rho() + ' kg/m³)', PAD + 6, 40);
+}
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  arrowHead(x1, y1, Math.cos(a), Math.sin(a));
+}
+function arrowHead(x, y, dx, dy) {
+  const s = 14, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+}
+
+// --- regime read: rising / falling / balanced ---------------------------
+function regimeOf() {
+  const target = columnH();
+  const d = target - hDrawn;
+  if (Math.abs(d) < 0.0005) return 'balanced — weight per area equals the pressure';
+  return d > 0 ? 'rising — pressure exceeds the column weight' : 'falling — column weight exceeds the pressure';
+}
+
+function updateReadout() {
+  const h = columnH();               // the true balanced height (invariant)
+  const r = rho();
+  readout.innerHTML =
+    'pressure P <b>' + P_hPa + ' hPa</b> &nbsp;·&nbsp; '
+    + '<b>' + pressPa().toLocaleString('en-US') + ' Pa</b>'
+    + '<br>fluid <b>' + FLUIDS[fluid].label + '</b> &nbsp;·&nbsp; '
+    + 'density ρ <b>' + r + ' kg/m³</b> &nbsp;·&nbsp; '
+    + 'height h <b>' + (h * 1000).toFixed(0) + ' mm</b>'
+    + '<br>h = P/(ρg) = ' + pressPa().toLocaleString('en-US') + ' / ('
+    + r + '·' + G + ') = <b>' + h.toFixed(4) + ' m</b>'
+    + '<br>high pressure → taller column &nbsp;·&nbsp; mercury ~760 mm where water needs ~10.3 m'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  pressV.textContent = P_hPa;
+  updateReadout();
+}
+
+// slider changes take effect live — the balanced height jumps and the drawn
+// column eases toward it. moving P raises/lowers the column; the readout
+// height always reads the exact h = P/(ρg).
+pressEl.oninput = () => { P_hPa = +pressEl.value; refresh(); };
+
+function setFluid(f) {
+  fluid = f;
+  bMerc.classList.toggle('on', f === 'mercury');
+  bMid.classList.toggle('on', f === 'mid');
+  bWater.classList.toggle('on', f === 'water');
+  refresh();
+}
+bMerc.onclick = () => setFluid('mercury');
+bMid.onclick = () => setFluid('mid');
+bWater.onclick = () => setFluid('water');
+
+// reset — pressure back to standard-ish 1013 hPa, mercury, column snapped
+// to its balanced height, watch the ease from there on the next move.
+bReset.onclick = () => {
+  P_hPa = 1013;
+  pressEl.value = 1013;
+  fluid = 'mercury';
+  hDrawn = columnH();
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  setFluid('mercury');
+};
+
+// --- the live loop: ease the drawn column toward its balanced height -----
+// hDrawn approaches columnH() with a simple first-order relax, so a slider
+// move shows the column travelling to its new balance. the readout always
+// reports the exact invariant height, not the eased draw height.
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;         // guard against tab-switch jumps
+  const target = columnH();
+  hDrawn += (target - hDrawn) * Math.min(1, dt * 6);
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+setFluid('mercury');
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tension-release</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>tension release</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">load</span><input type="range" id="load" min="0" max="100" value="0" step="1"><span class="val" id="loadV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bRelease">release</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">turn the <b>load</b> knob and a spring winds slowly &mdash; potential energy piles into the store while the transmitted <b>force stays at zero</b>: nothing moves, the give is held. hit <b>release</b> and the whole store dumps in a single frame &mdash; force <b>spikes</b>, the gauge empties at once, the mass launches, then friction bleeds it back to rest. storing is slow and continuous; the release is instant. that asymmetry &mdash; a long fill and a sudden snap &mdash; is the whole thing.<span class="cite">tension &amp; release &middot; store-then-snap &middot; conservation of energy (E_kinetic = E_potential at release)</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- tension & release ---------------------------------------------------
+// a spring store of stiffness k. the load knob winds it to a displacement x,
+// so the stored potential is U = ½·k·x². while LOADING the store is inert:
+// the transmitted force reads 0 — the give is held, nothing moves, energy
+// only piles up. on RELEASE the entire store dumps into one launched mass
+// (m) in a single frame: the mass leaves with the kinetic energy that the
+// store held, so its launch speed is set by
+//   ½·m·v0² = U = ½·k·x²   →   v0 = x·√(k/m)
+// and the peak transmitted force is the full spring force F = k·x at that
+// instant. after launch the mass coasts and a linear drag bleeds it to rest.
+// VERIFY: the kinetic energy the mass carries at the release instant must
+// equal the potential the store held — E_kinetic = E_potential, i.e.
+// ½·m·v0² = ½·k·x². that conservation is the load-bearing check; the numeric
+// launch must land on it exactly (no loss is modelled AT the release itself —
+// the decay afterward is separate, explicit drag).
+const K_SPRING = 40.0;   // spring stiffness (force per unit displacement)
+const MASS = 1.0;        // launched mass
+const DRAG = 1.6;        // linear drag that bleeds the launched mass to rest
+
+// the load knob is 0..100; scaled to a displacement in abstract units.
+const X_MAX = 1.0;       // full-wind displacement at load = 1
+let load = 0.0;          // knob 0..1 — how far the spring is wound
+let stored = 0.0;        // live stored potential U = ½·k·x²  (tracks the load)
+
+// the launched mass, live only after a release.
+let mv = 0;              // mass velocity (0 at rest)
+let mx = 0;              // mass displacement from its home
+let released = false;    // true while the mass is coasting back to rest
+let peakF = 0;           // the force spike captured at the release instant
+let lastF = 0;           // the force reading shown right now (spikes then falls)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const loadEl = document.getElementById('load'), loadV = document.getElementById('loadV');
+const readout = document.getElementById('readout').firstElementChild;
+const bRelease = document.getElementById('bRelease');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// the displacement the current load winds the spring to, and the potential
+// that displacement stores. U = ½·k·x² — the store the release will dump.
+function windX() { return load * X_MAX; }
+function potentialOf(x) { return 0.5 * K_SPRING * x * x; }
+// the full spring force at a wound displacement — the force the release spikes to.
+function springForce(x) { return K_SPRING * x; }
+
+// --- the scrolling force trace ------------------------------------------
+// a rolling record of the transmitted force over the last WINDOW seconds.
+// newest at the right, like feedback's timeline. through the whole slow load
+// it stays flat on the floor (0) — the store is inert — then jumps to a lone
+// spike at the release frame and falls back, so the store-then-snap shape is
+// drawn as a dead-flat run and a single needle.
+let simT = 0;
+const WINDOW = 10;           // visible trace span (seconds)
+let trace = [];             // {t, f} samples
+
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function stepSim(dt) {
+  simT += dt;
+
+  // the launched mass, if one is in flight: coast + linear drag to rest.
+  // no force is added here — the mass carries only the kinetic energy the
+  // release handed it. small fixed sub-steps keep the decay clean.
+  if (released) {
+    const accel = -DRAG * mv / MASS;   // linear drag opposing the motion
+    mv += accel * dt;
+    mx += mv * dt;
+    if (Math.abs(mv) < 0.002 && Math.abs(mx) < 0.002) { released = false; mv = 0; mx = 0; }
+    if (!isFinite(mv)) { released = false; mv = 0; mx = 0; }
+  }
+
+  // the transmitted force reading: 0 while merely loading (the store is
+  // inert), the captured spike decaying with the flying mass once released.
+  // the spike lives for one frame then bleeds with the mass speed so the
+  // trace shows a needle, not a step.
+  lastF = released ? springForce(windX()) * (mv > 0 ? mv / launchV0 : 0) : 0;
+  if (!released) lastF = 0;
+
+  trace.push({ t: simT, f: lastF });
+  const cut = simT - WINDOW;
+  while (trace.length && trace[0].t < cut) trace.shift();
+}
+
+// the launch speed captured at the release instant, kept so the decaying
+// force trace can scale against it (force falls as the mass slows).
+let launchV0 = 1;
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the spring store + gauge + launched mass. bottom band: the force trace.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.40);
+const PLOT_TOP = SCENE_TOP + SCENE_H + 110;
+const PLOT_H = H - PLOT_TOP - 40;
+
+const PLOT_LEFT = PAD + 20;
+const PLOT_RIGHT = W - PAD - 20;
+const PLOT_W = PLOT_RIGHT - PLOT_LEFT;
+
+// force plot vertical span — headroom above the full spike so the needle at
+// release sits comfortably. the max spike is the full spring force.
+const F_MAX = springForce(X_MAX) * 1.15;
+
+// map a sim-time to an x on the scrolling trace (now = right edge)
+function xOfTime(t) {
+  const frac = (t - (simT - WINDOW)) / WINDOW;   // 0 at left edge, 1 at now
+  return PLOT_LEFT + frac * PLOT_W;
+}
+// map a force in [0..F_MAX] to a y in the plot band (up = larger)
+function yOfForce(f) {
+  const frac = Math.max(0, Math.min(1, f / F_MAX));
+  return PLOT_TOP + PLOT_H - frac * PLOT_H;
+}
+
+// --- top band: the spring store, the potential gauge, the launched mass --
+// on the left a spring winds tighter as load rises (its coils compress, it
+// warms toward --mark as the store fills). a vertical gauge fills with the
+// stored potential U. on the right a mass sits at home while loading — no
+// force reaches it — then launches on release and coasts back as drag bleeds
+// it out. the whole scene reads: slow fill on the left, sudden throw on the right.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const cy = SCENE_TOP + Math.round(SCENE_H * 0.50);
+  const x = windX();
+  const U = stored;
+  const Umax = potentialOf(X_MAX);
+  const fillFrac = Umax > 0 ? Math.min(1, U / Umax) : 0;
+
+  // --- the spring on the left: coils that compress as the load winds ------
+  const springHomeX = PAD + 120;
+  const springLen = 260;
+  const springRight = springHomeX + springLen;
+  const wallX = springHomeX - 30;
+  // a fixed anchor wall at the spring's left
+  ctx.fillStyle = faint;
+  ctx.fillRect(wallX - 24, cy - 90, 24, 180);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5;
+  for (let hy = cy - 90; hy < cy + 90; hy += 18) {
+    ctx.beginPath(); ctx.moveTo(wallX - 24, hy); ctx.lineTo(wallX - 44, hy + 18); ctx.stroke();
+  }
+
+  // the coil warms toward --mark as the store fills, and the coils pack
+  // tighter (more turns in the same span) as the load winds them down.
+  const coilColor = mixToMark(ink, mark, fillFrac);
+  const turns = 6 + Math.round(x * 8);            // more turns as it winds
+  const compressed = springRight - x * springLen * 0.5;  // free end pulls in
+  ctx.strokeStyle = coilColor; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(wallX, cy);
+  const span = compressed - wallX;
+  for (let i = 0; i <= turns; i++) {
+    const t = i / turns;
+    const px = wallX + t * span;
+    const py = cy + (i % 2 === 0 ? -34 : 34) * (i === 0 || i === turns ? 0 : 1);
+    ctx.lineTo(px, py);
+  }
+  ctx.lineTo(compressed, cy);
+  ctx.stroke();
+  // the spring's free-end plate (where the store's force would push)
+  ctx.fillStyle = coilColor;
+  ctx.fillRect(compressed, cy - 46, 12, 92);
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('spring store  (winding)', wallX - 24, cy - 108);
+
+  // --- the potential gauge: a vertical bar that fills with U --------------
+  const gX = W * 0.44, gW = 60, gTop = cy - 150, gH = 300;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(gX, gTop, gW, gH);
+  // the fill rises from the bottom, warming to --mark as it nears full
+  const fillH = gH * fillFrac;
+  ctx.fillStyle = mixToMark(shade, mark, fillFrac);
+  ctx.fillRect(gX + 1, gTop + gH - fillH + 1, gW - 2, fillH - 2);
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('potential U', gX + gW / 2, gTop - 14);
+  ctx.fillStyle = ink; ctx.font = '18px "Courier New", monospace';
+  ctx.fillText(U.toFixed(1), gX + gW / 2, gTop + gH + 26);
+
+  // --- the transmitted-force arrow off the store -------------------------
+  // while loading it reads exactly 0 (the store is inert — the give is held).
+  // it only becomes a real force at the release frame, where it spikes.
+  const fArrowX = gX + gW + 60;
+  if (released && lastF > 0.5) {
+    const fLen = Math.min(220, 30 + lastF * 3);
+    ctx.strokeStyle = mark; ctx.fillStyle = mark; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(fArrowX, cy); ctx.lineTo(fArrowX + fLen, cy); ctx.stroke();
+    arrowHead(fArrowX + fLen, cy, 1, 0);
+    ctx.textAlign = 'left'; ctx.font = '22px "Courier New", monospace';
+    ctx.fillText('F spike', fArrowX + fLen + 10, cy - 8);
+  } else {
+    ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+    ctx.fillText('F = 0  (inert — storing)', fArrowX, cy - 8);
+  }
+
+  // --- the launched mass on the right ------------------------------------
+  // a ball at its home while loading (nothing reaches it); on release it
+  // leaps right by mx and coasts back as drag bleeds it to rest.
+  const massHomeX = W * 0.72;
+  const massX = massHomeX + mx * 260;
+  const massR = 30;
+  // a faint home tick the mass launches from
+  ctx.strokeStyle = shade; ctx.lineWidth = 2; ctx.setLineDash([4, 8]);
+  ctx.beginPath(); ctx.moveTo(massHomeX, cy - 120); ctx.lineTo(massHomeX, cy + 120); ctx.stroke();
+  ctx.setLineDash([]);
+  // a motion streak behind the mass, length ∝ its speed
+  const streak = Math.min(mv * 120, 160);
+  if (streak > 3) {
+    ctx.strokeStyle = mark; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(massX - massR, cy); ctx.lineTo(massX - massR - streak, cy); ctx.stroke();
+  }
+  ctx.fillStyle = released ? mark : ink;
+  ctx.beginPath(); ctx.arc(massX, cy, massR, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('mass', massHomeX, cy - 132);
+
+  // --- a fill-vs-snap bar under the scene --------------------------------
+  // the left portion fills continuously with the slow load; a lone --mark
+  // needle at the divider marks the instant of release (the snap).
+  const barY = SCENE_TOP + 14, barL = PAD + 20, barW = W - 2 * (PAD + 20), barH = 26;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(barL, barY, barW, barH);
+  const upFrac = 0.78;                       // the bar's left 78% = the slow load
+  ctx.fillStyle = mixToMark(shade, mark, fillFrac);
+  ctx.fillRect(barL + 1, barY + 1, (barW - 2) * upFrac * fillFrac, barH - 2);
+  // the load / release divider tick
+  ctx.strokeStyle = ink; ctx.lineWidth = 1.5;
+  const divX = barL + barW * upFrac;
+  ctx.beginPath(); ctx.moveTo(divX, barY - 6); ctx.lineTo(divX, barY + barH + 6); ctx.stroke();
+  // once released, a --mark needle flares in the right portion, fading with the mass
+  if (released) {
+    ctx.fillStyle = mark;
+    const needleH = barH * Math.min(1, mv / Math.max(0.001, launchV0));
+    ctx.fillRect(divX + 6, barY + (barH - needleH) / 2, 10, needleH);
+  }
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('slow load (store fills)', barL, barY - 10);
+  ctx.textAlign = 'center';
+  ctx.fillText('release', divX, barY - 10);
+  ctx.textAlign = 'right';
+  ctx.fillText('instant snap', barL + barW, barY - 10);
+  ctx.textAlign = 'left';
+}
+
+// a colour blend from a→b by fraction t (both hex like #rrggbb)
+function mixToMark(a, b, t) {
+  const pa = hex(a), pb = hex(b);
+  const r = Math.round(pa[0] + (pb[0] - pa[0]) * t);
+  const g = Math.round(pa[1] + (pb[1] - pa[1]) * t);
+  const bl = Math.round(pa[2] + (pb[2] - pa[2]) * t);
+  return 'rgb(' + r + ',' + g + ',' + bl + ')';
+}
+function hex(h) {
+  h = h.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+function arrowHead(x, y, dx, dy) {
+  const s = 14, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+// --- bottom band: the transmitted force over time -----------------------
+// F(t) scrolling right-to-left, newest at the right. it stays dead flat on
+// the floor (0) through the whole slow load — the store is inert — then jumps
+// to a single spike the instant release fires and falls back as the mass
+// bleeds out. a --faint dashed line marks the zero floor. the shape is the
+// asymmetry itself: a long flat run, then a lone needle.
+function drawTrace() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('transmitted force over the last ' + WINDOW + 's — flat while storing, a lone spike at release', PLOT_LEFT + 6, PLOT_TOP - 14);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('now', PLOT_RIGHT, PLOT_TOP - 14);
+  ctx.textAlign = 'left';
+
+  // the zero floor — the inert line the force pins to while merely storing.
+  const zeroY = yOfForce(0);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(PLOT_LEFT, zeroY); ctx.lineTo(PLOT_RIGHT, zeroY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('inert floor  F = 0  (store filling)', PLOT_LEFT + 6, zeroY - 8);
+
+  // the force trace — flat on the floor through the load, a needle at release.
+  // drawn --mark on the spike, --faint on the dead run, so the store and the
+  // snap read distinctly.
+  ctx.lineWidth = 2; ctx.strokeStyle = ink;
+  let prev = null;
+  for (const p of trace) {
+    const px = xOfTime(p.t), py = yOfForce(p.f);
+    if (prev) {
+      ctx.strokeStyle = p.f > 0.5 ? mark : faint;
+      ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(px, py); ctx.stroke();
+    }
+    prev = { x: px, y: py };
+  }
+
+  // the live head dot at the right edge
+  if (trace.length) {
+    const p = trace[trace.length - 1];
+    ctx.fillStyle = p.f > 0.5 ? mark : faint;
+    ctx.beginPath(); ctx.arc(xOfTime(p.t), yOfForce(p.f), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawTrace();
+}
+
+// --- regime read: is the store filling, or has it snapped? --------------
+function regimeOf() {
+  if (released) return 'released — the whole store dumped in one frame, the mass is coasting out';
+  if (stored > 0.01) return 'storing — potential piling up, force held at zero (nothing moves yet)';
+  return 'at rest — the store is empty, waiting on the load';
+}
+
+function updateReadout() {
+  const x = windX();
+  const U = stored;
+  const kinetic = 0.5 * MASS * mv * mv;   // the mass's live kinetic energy
+
+  readout.innerHTML =
+    'load <b>' + load.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'stored potential U <b>' + U.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'force F <b>' + lastF.toFixed(2) + '</b>'
+    + '<br>kinetic <b>' + kinetic.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'peak spike <b>' + peakF.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'launch v0 <b>' + (released ? launchV0.toFixed(2) : '0.00') + '</b>'
+    + '<br>E_kinetic = E_potential at release  —  ½·m·v0² = ½·k·x²'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  loadV.textContent = load.toFixed(2);
+  updateReadout();
+}
+
+// the load knob winds the spring live — the store tracks it continuously.
+// winding does NOT move the mass and transmits no force; it only fills U.
+// (loading while a release is still coasting is fine — it re-fills the store.)
+loadEl.oninput = () => { load = loadEl.value / 100; stored = potentialOf(windX()); refresh(); };
+
+// release — dump the WHOLE store into the mass in one frame. conservation
+// sets the launch speed: ½·m·v0² = U, so v0 = √(2U/m). the store empties
+// instantly (load knob returns to 0), the force spikes to the full spring
+// force, and the mass coasts out under drag. VERIFY holds: the kinetic energy
+// handed to the mass (½·m·v0²) equals the potential U the store held.
+bRelease.onclick = () => {
+  if (stored <= 0.0001) return;         // nothing stored, nothing to dump
+  const U = stored;
+  launchV0 = Math.sqrt(2 * U / MASS);   // ½·m·v0² = U  →  v0 = √(2U/m)
+  mv = launchV0;
+  mx = 0;
+  released = true;
+  peakF = springForce(windX());         // the spike = the full spring force at release
+  lastF = peakF;
+  // the store empties in this single frame — the knob snaps back to 0.
+  stored = 0;
+  load = 0;
+  loadEl.value = 0;
+  bRelease.classList.add('on');
+  setTimeout(() => bRelease.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: small fixed sub-steps for a stable integration -------
+// SLICE small so the launched mass's drag decay is a clean exponential
+// (accel·dt well below the speed each step) — the coast reads smooth, not
+// stepped. the load and store are quasi-static (a direct read of the knob);
+// only the flying mass and the scrolling trace need the sub-stepped clock.
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  const SLICE = 0.005;
+  let e = elapsed;
+  while (e > 0) {
+    const dt = Math.min(SLICE, e);
+    stepSim(dt);
+    e -= dt;
+  }
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

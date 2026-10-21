@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the wheel</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --ring: #4a6670;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .5rem; margin-bottom: .8rem; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .row { display: flex; align-items: center; gap: .5rem; margin-bottom: 1.2rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  input[type=range] { accent-color: var(--ink); width: min(300px, 66vw); }
+  canvas { width: min(820px, 96vw); height: auto; display: block; cursor: pointer; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.7; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--mark); font-size: 1.15rem; }
+  #readout .sub { display: block; font-size: .82rem; color: #6d6653; margin-top: .35rem; }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the wheel</h1>
+  <div class="controls">
+    <button data-t="none" class="on">bare ring</button>
+    <button data-t="frostwood">the frostwood errand</button>
+    <button data-t="saltmarket">the salt-market girl</button>
+    <button data-t="downwell">down the well</button>
+  </div>
+  <div class="row"><span>walk</span><input type="range" id="walk" min="0" max="100" value="0"></div>
+  <canvas id="cv" width="1440" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the monomyth is a ring of twelve stations &mdash; <b style="color:var(--mark)">depart</b>, be <b style="color:var(--ring)">initiated</b>, <b style="color:var(--mark)">return</b>. two thresholds cut it: crossing <i>out</i> into the special world near the top-right, crossing <i>back</i> near the bottom-left. pick a tale and drag <b>walk</b> to send it clockwise around the wheel; each beat lights the station it lands on. it is one lens &mdash; a template many tales fit, not a law that all stories must.<span class="cite">the monomyth &middot; Campbell 1949 gave the three arcs (departure &middot; initiation &middot; return); the popular twelve stations are Vogler's 1992 restatement &middot; field: comparative mythology</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// The popular twelve-station hero's-journey (Vogler 1992) restating Campbell's monomyth (1949), clockwise from the top (Ordinary World at 12 o'clock).
+// arc: departure (0-4), initiation (5-8), return (9-11).
+const STATIONS = [
+  { name: 'Ordinary World',        fn: 'home, before the story',                 arc: 'depart' },
+  { name: 'Call to Adventure',     fn: 'the disturbance, the summons',           arc: 'depart' },
+  { name: 'Refusal of the Call',   fn: 'fear holds the hero back',               arc: 'depart' },
+  { name: 'Meeting the Mentor',    fn: 'a guide, a gift, a nerve',               arc: 'depart' },
+  { name: 'Crossing the Threshold',fn: 'stepping into the special world',        arc: 'depart', gate: 'out' },
+  { name: 'Tests, Allies, Enemies',fn: 'learning the rules of the new place',    arc: 'initiate' },
+  { name: 'Approach',              fn: 'nearing the deep place',                 arc: 'initiate' },
+  { name: 'Ordeal',                fn: 'the abyss — a death and its dread',      arc: 'initiate' },
+  { name: 'Reward',                fn: 'seizing the thing sought',               arc: 'initiate' },
+  { name: 'The Road Back',         fn: 'turning toward home, pursued',           arc: 'return', gate: 'back' },
+  { name: 'Resurrection',          fn: 'a final test — remade by it',            arc: 'return' },
+  { name: 'Return with the Elixir',fn: 'home again, bearing the boon',           arc: 'return' },
+];
+
+// Tales are placeholder walks: each names which station its beats touch, in order.
+// A tale need not hit all twelve — that is the honest part.
+const TALES = {
+  frostwood: {
+    name: 'the frostwood errand',
+    beats: [
+      { s: 0,  t: 'Wend keeps the woodpile.' },
+      { s: 1,  t: 'A frost-bird taps the pane: fetch fire from the far wood.' },
+      { s: 2,  t: 'He bars the door — the far wood eats travellers.' },
+      { s: 3,  t: 'The old ash-woman hands him a coal that will not die.' },
+      { s: 4,  t: 'He crosses the white treeline.' },
+      { s: 5,  t: 'Snow-wolves test him; a lame fox befriends him.' },
+      { s: 7,  t: 'The frost-king freezes his coal, and near his heart.' },
+      { s: 8,  t: 'He thaws it on the king’s own breath and takes the flame.' },
+      { s: 9,  t: 'The wood closes behind him as he runs.' },
+      { s: 11, t: 'Wend lights every hearth in the valley.' },
+    ],
+  },
+  saltmarket: {
+    name: 'the salt-market girl',
+    beats: [
+      { s: 0,  t: 'Mira sells salt she does not own.' },
+      { s: 1,  t: 'A cracked coin buys nothing and everything: a map inside it.' },
+      { s: 3,  t: 'A blind ferryman reads her the map by touch.' },
+      { s: 4,  t: 'She poles out past the last buoy.' },
+      { s: 5,  t: 'Reef-folk barter, cheat, and finally trust her.' },
+      { s: 6,  t: 'She dives toward the sunken toll-house.' },
+      { s: 7,  t: 'The water takes her breath; she lets it, and does not drown.' },
+      { s: 8,  t: 'She surfaces holding the toll-keeper’s ledger.' },
+      { s: 9,  t: 'The tide turns hard against her boat.' },
+      { s: 10, t: 'On shore she is named a thief — and clears every debt in the book.' },
+      { s: 11, t: 'The market opens free of the toll.' },
+    ],
+  },
+  downwell: {
+    name: 'down the well',
+    beats: [
+      { s: 0,  t: 'A dry village, a dry well.' },
+      { s: 1,  t: 'The well speaks once: come down.' },
+      { s: 2,  t: 'No one will.' },
+      { s: 4,  t: 'A child ties the rope and climbs in.' },
+      { s: 7,  t: 'The dark bottom is a door that will only open closed-eyed.' },
+      { s: 8,  t: 'Beyond it: the spring, cupped and carried up.' },
+      { s: 11, t: 'The village drinks; the child keeps the rope.' },
+    ],
+  },
+};
+
+let tale = 'none';
+let walk = 0;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const walkEl = document.getElementById('walk');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// station i sits at angle: 12 o'clock is -90°, going clockwise.
+function angleOf(i) { return -Math.PI / 2 + (i / STATIONS.length) * TAU; }
+
+const CX = () => cv.width * 0.5;
+const CY = () => cv.height * 0.5;
+const R  = () => Math.min(cv.width, cv.height) * 0.32;
+
+// how many beats of the current tale are revealed by the walk slider
+function revealed() {
+  if (tale === 'none') return -1;
+  const b = TALES[tale].beats;
+  return Math.round((walk / 100) * b.length);
+}
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), ringC = css('--ring'), markC = css('--mark'), shade = css('--shade'), paper = css('--paper');
+  ctx.clearRect(0, 0, W, H);
+  const cx = CX(), cy = CY(), r = R();
+
+  // the ring
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
+
+  // the two threshold cuts — spokes at the crossings
+  ctx.strokeStyle = markC; ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
+  for (const gi of STATIONS.map((s, i) => s.gate ? i : -1).filter(i => i >= 0)) {
+    const a = angleOf(gi);
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * (r - 34), cy + Math.sin(a) * (r - 34));
+    ctx.lineTo(cx + Math.cos(a) * (r + 34), cy + Math.sin(a) * (r + 34));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  const rev = revealed();
+  const beats = tale === 'none' ? [] : TALES[tale].beats;
+  const litSet = new Set(beats.slice(0, Math.max(rev, 0)).map(b => b.s));
+  const current = rev > 0 ? beats[Math.min(rev, beats.length) - 1] : null;
+
+  // draw the walk path so far: a clockwise poly-line through touched stations
+  if (rev > 0) {
+    ctx.strokeStyle = markC; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    beats.slice(0, rev).forEach((b, k) => {
+      const a = angleOf(b.s);
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      k ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  // the stations
+  ctx.font = '20px Georgia';
+  STATIONS.forEach((st, i) => {
+    const a = angleOf(i);
+    const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+    const lit = litSet.has(i);
+    const isCur = current && current.s === i;
+    const arcC = st.arc === 'return' ? ringC : markC;   // return arc tinted ring-blue, depart/initiate mark-rust
+
+    // node
+    ctx.fillStyle = lit ? (isCur ? markC : arcC) : paper;
+    ctx.strokeStyle = lit ? arcC : faint;
+    ctx.lineWidth = isCur ? 4 : 2;
+    ctx.beginPath(); ctx.arc(x, y, isCur ? 13 : 9, 0, TAU); ctx.fill(); ctx.stroke();
+
+    // label, pushed outward, aligned by side of the ring
+    const lx = cx + Math.cos(a) * (r + 30), ly = cy + Math.sin(a) * (r + 30);
+    ctx.fillStyle = lit ? ink : faint;
+    const cosA = Math.cos(a);
+    ctx.textAlign = Math.abs(cosA) < 0.25 ? 'center' : (cosA > 0 ? 'left' : 'right');
+    ctx.textBaseline = Math.sin(a) > 0.6 ? 'top' : (Math.sin(a) < -0.6 ? 'bottom' : 'middle');
+    // wrap the longer names onto two lines
+    const words = st.name.split(' ');
+    if (words.length > 2) {
+      const half = Math.ceil(words.length / 2);
+      ctx.fillText(words.slice(0, half).join(' '), lx, ly - 11);
+      ctx.fillText(words.slice(half).join(' '), lx, ly + 11);
+    } else {
+      ctx.fillText(st.name, lx, ly);
+    }
+  });
+  ctx.textBaseline = 'alphabetic';
+
+  // three arc words at the hub
+  ctx.textAlign = 'center'; ctx.font = 'italic 22px Georgia';
+  ctx.fillStyle = markC; ctx.fillText('depart', cx, cy - 16);
+  ctx.fillStyle = ringC; ctx.fillText('initiate', cx, cy + 12);
+  ctx.fillStyle = markC; ctx.fillText('return', cx, cy + 40);
+  // threshold markers pulled INWARD along their spoke (station names sit outward at r+30, so inside the ring is clear)
+  ctx.font = '17px Georgia'; ctx.fillStyle = faint;
+  ctx.fillText('cross out', cx + Math.cos(angleOf(4)) * (r - 62), cy + Math.sin(angleOf(4)) * (r - 62));
+  ctx.fillText('cross back', cx + Math.cos(angleOf(9)) * (r - 62), cy + Math.sin(angleOf(9)) * (r - 62));
+
+  // readout
+  if (tale === 'none') {
+    readout.innerHTML = 'the bare ring &mdash; twelve stations, three arcs'
+      + '<span class="sub">pick a tale above, then drag <b style="font-size:.82rem;color:#6d6653">walk</b> to send it round</span>';
+  } else if (!current) {
+    readout.innerHTML = TALES[tale].name + ' &mdash; at the gate'
+      + '<span class="sub">drag <b style="font-size:.82rem;color:#6d6653">walk</b> clockwise to begin the journey</span>';
+  } else {
+    const st = STATIONS[current.s];
+    readout.innerHTML = '<b>' + st.name + '</b> &mdash; <i>' + st.fn + '</i>'
+      + '<span class="sub">' + current.t + '</span>';
+  }
+}
+
+// clicking a tale button; clicking the ring is not needed — walk drives the reveal
+for (const b of document.querySelectorAll('.controls button')) {
+  b.onclick = () => {
+    tale = b.dataset.t;
+    for (const o of document.querySelectorAll('.controls button')) o.classList.toggle('on', o === b);
+    walk = tale === 'none' ? 0 : 100;   // land a fresh tale fully walked; slider re-scrubs
+    walkEl.value = walk;
+    draw();
+  };
+}
+walkEl.oninput = () => { walk = +walkEl.value; draw(); };
+draw();
+</script>
+</body>
+</html>

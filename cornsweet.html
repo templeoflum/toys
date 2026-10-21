@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cornsweet</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 3.5rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>cornsweet</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">edge</span><input type="range" id="edge" min="0" max="100" value="100"><span class="val" id="edgeV"></span></div>
+    <div class="row"><span class="name">mask</span><input type="range" id="mask" min="0" max="100" value="0"><span class="val" id="maskV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="400"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the left half and the right half are the exact same flat gray. only at the seam in the middle does one side cusp light and the other cusp dark &mdash; and the eye carries that single edge across both whole halves, so the left reads lighter and the right darker. drop the <b>edge</b> to none and the whole field is one flat gray; or raise the <b>mask</b> to cover the seam and watch the two halves fall into the same gray.</div>
+
+<script>
+'use strict';
+
+const BX = 160, BR = 840, BT = 90, BH = 220;   // the field rectangle
+const XB = (BX + BR) / 2;                        // the seam
+const W = 95;                                    // cusp half-width
+const G = 150;                                   // the shared flat gray
+const AMAX = 78;                                 // full cusp amplitude
+
+let edge = 1;   // 0 => no cusp, one flat gray
+let mask = 0;   // proof: cover the seam, the halves match
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const eEl = document.getElementById('edge'), eV = document.getElementById('edgeV');
+const mEl = document.getElementById('mask'), mV = document.getElementById('maskV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function grayAt(x) {
+  const A = edge * AMAX;
+  if (x >= XB - W && x < XB) return G + A * (1 - (XB - x) / W);   // left cusps up to the seam
+  if (x > XB && x <= XB + W) return G - A * (1 - (x - XB) / W);   // right cusps down to the seam
+  return G;                                                        // both plateaus are G
+}
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  for (let x = BX; x < BR; x++) {
+    const g = Math.round(grayAt(x));
+    ctx.fillStyle = 'rgb(' + g + ',' + g + ',' + g + ')';
+    ctx.fillRect(x, BT, 1, BH);
+  }
+
+  // proof: a paper strip over the seam — with the edge hidden, the flats are plainly equal
+  if (mask > 0) {
+    ctx.save();
+    ctx.globalAlpha = mask;
+    ctx.fillStyle = css('--paper');
+    ctx.fillRect(XB - (W + 8), BT - 14, 2 * (W + 8), BH + 28);   // cover the whole cusp, not just the seam
+    ctx.restore();
+  }
+
+  readout.innerHTML = edge < 0.02
+    ? 'no cusp &mdash; one flat gray field, rgb(150,150,150) throughout.'
+    : mask > 0.98
+      ? 'the seam is covered &mdash; both halves are the same flat gray, rgb(150,150,150).'
+      : 'left reads lighter, right darker &mdash; but both flats are the same gray, rgb(150,150,150).';
+}
+
+function refresh() {
+  eV.textContent = edge < 0.02 ? 'off — one flat gray' : Math.round(edge * 100) + '%';
+  mV.textContent = mask > 0.98 ? 'seam covered' : mask > 0 ? 'rising' : 'off';
+  draw();
+}
+
+eEl.oninput = () => { edge = +eEl.value / 100; refresh(); };
+mEl.oninput = () => { mask = +mEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

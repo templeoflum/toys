@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chevreul</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(680px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>chevreul</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">contrast</span><input type="range" id="contrast" min="0" max="100" value="100"><span class="val" id="contrastV"></span></div>
+    <div class="row"><span class="name">gap</span><input type="range" id="gap" min="0" max="100" value="0"><span class="val" id="gapV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="360"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">each vertical band is a single flat gray. yet every band looks scalloped &mdash; brighter along the edge that meets a darker neighbour, darker along the edge that meets a lighter one. the eye sharpens every border it finds. drop the <b>contrast</b> to none and the steps vanish into one gray; or raise the <b>gap</b> to part the bands and watch each one go flat.</div>
+
+<script>
+'use strict';
+
+const N = 9;                             // number of bands
+const BX = 130, BW = 82, BT = 90, BH = 200;
+const MID = 142, SPAN = 78;             // band gray = MID +/- up to SPAN, scaled by contrast
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const cEl = document.getElementById('contrast'), cV = document.getElementById('contrastV');
+const gEl = document.getElementById('gap'), gV = document.getElementById('gapV');
+const readout = document.getElementById('readout').firstElementChild;
+
+let contrast = 1;   // 0 => all bands one gray, no steps
+let gap = 0;        // proof: paper gaps isolate each band, the scallop dies
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  const gpx = gap * 12;                  // gap width between bands
+  for (let i = 0; i < N; i++) {
+    const t = (i / (N - 1)) - 0.5;       // -0.5 .. +0.5, light to dark
+    const g = Math.round(MID - contrast * SPAN * 2 * t);
+    ctx.fillStyle = 'rgb(' + g + ',' + g + ',' + g + ')';
+    ctx.fillRect(BX + i * BW + gpx / 2, BT, BW - gpx, BH);
+  }
+
+  readout.innerHTML = contrast < 0.02
+    ? 'no steps &mdash; one flat gray, no scallops.'
+    : gap > 0.98
+      ? 'the bands are parted &mdash; each one is plainly flat and uniform.'
+      : 'each band is a single flat gray; the scalloping is the eye sharpening the borders.';
+}
+
+function refresh() {
+  cV.textContent = contrast < 0.02 ? 'off — one gray' : Math.round(contrast * 100) + '%';
+  gV.textContent = gap > 0.98 ? 'parted — bands flat' : gap > 0 ? 'rising' : 'off — abutting';
+  draw();
+}
+
+cEl.oninput = () => { contrast = +cEl.value / 100; refresh(); };
+gEl.oninput = () => { gap = +gEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

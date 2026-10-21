@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ehrenstein</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --spoke: #2b2a26;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(620px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>ehrenstein</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">spokes</span><input type="range" id="spokes" min="0" max="100" value="100"><span class="val" id="spokesV"></span></div>
+    <div class="row"><span class="name">probe</span><input type="range" id="probe" min="0" max="100" value="0"><span class="val" id="probeV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="600"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">spokes point at the centre but stop short of it, and a faint bright disk seems to hover in the gap &mdash; brighter than the page, though nothing is drawn there. your eye completes a surface where the lines all aim. fade the <b>spokes</b> to nothing and the disk goes with them; raise the <b>probe</b> to ring the gap and see the paper inside is the same as the paper outside.</div>
+
+<script>
+'use strict';
+
+const CX = 450, CY = 300;
+const RGAP = 68;                 // spokes stop here — the illusory disk fills this
+const ROUT = 190;                // spokes reach out to here
+const NSPOKE = 12;
+
+let spokes = 1;   // 0 => spokes gone, no disk
+let probe = 0;    // proof: ring the gap, name the paper both sides
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const sEl = document.getElementById('spokes'), sV = document.getElementById('spokesV');
+const pEl = document.getElementById('probe'), pV = document.getElementById('probeV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // radial spokes, aimed at the centre but stopping at RGAP
+  if (spokes > 0.005) {
+    ctx.save();
+    ctx.globalAlpha = spokes;
+    ctx.strokeStyle = css('--spoke'); ctx.lineWidth = 7; ctx.lineCap = 'butt';
+    for (let i = 0; i < NSPOKE; i++) {
+      const a = i * 2 * Math.PI / NSPOKE;
+      const c = Math.cos(a), s = Math.sin(a);
+      line(CX + RGAP * c, CY + RGAP * s, CX + ROUT * c, CY + ROUT * s);
+    }
+    ctx.restore();
+  }
+
+  // proof: outline the gap where the disk seems to be — nothing is filled there
+  if (probe > 0) {
+    ctx.save();
+    ctx.globalAlpha = probe;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2.5; ctx.setLineDash([6, 5]);
+    ctx.beginPath(); ctx.arc(CX, CY, RGAP, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = spokes < 0.02
+    ? 'no spokes &mdash; and no disk. the centre is plain paper.'
+    : probe > 0.98
+      ? 'inside the ring and outside it: the same paper (#f6f2e8). no disk is drawn.'
+      : 'the bright disk in the middle is not drawn &mdash; only the spokes are.';
+}
+
+function refresh() {
+  sV.textContent = spokes < 0.02 ? 'off — disk gone' : Math.round(spokes * 100) + '%';
+  pV.textContent = probe > 0.98 ? 'gap ringed — paper both sides' : probe > 0 ? 'rising' : 'off';
+  draw();
+}
+
+sEl.oninput = () => { spokes = +sEl.value / 100; refresh(); };
+pEl.oninput = () => { probe = +pEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

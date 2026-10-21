@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the queue</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>the queue</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">arrivals &lambda;</span><input type="range" id="lam" min="10" max="300" value="80" step="5"><span class="val" id="lamV"></span></div>
+    <div class="row"><span class="name">service &mu;</span><input type="range" id="mu" min="10" max="300" value="140" step="5"><span class="val" id="muV"></span></div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">arrivals come at rate <b>&lambda;</b>, one server clears them at rate <b>&mu;</b>. their ratio <b>&rho; = &lambda;/&mu;</b> is the whole story: below <b>1</b> the line settles; as it nears <b>1</b> the wait explodes (<b>L = &rho;/(1&minus;&rho;)</b>); at <b>1</b> and above the server can never catch up and the line grows forever. the town&rsquo;s own dispatch &mdash; papers arriving faster than they&rsquo;re signed.<span class="cite">M/M/1 queue &middot; Kendall 1953</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// rates are per second; slider is scaled by 100 (0.10 .. 3.00)
+let lam = 0.8;   // arrival rate  λ
+let mu = 1.4;    // service rate  μ
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const lamEl = document.getElementById('lam'), lamV = document.getElementById('lamV');
+const muEl = document.getElementById('mu'), muV = document.getElementById('muV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- simulation state ---------------------------------------------------
+// N = true number in system (waiting + the one in service). unbounded.
+let N = 0;
+let inService = false;   // is the server currently working a customer
+let served = 0;          // cumulative departures (for pace/flavor only)
+// a served token briefly animates out to the right
+let exiting = [];        // {t: 0..1} fade timers
+
+// visual pacing: a slow, watched clock. one real second = SIM_SPEED sim-seconds.
+const SIM_SPEED = 1.0;
+let last = performance.now();
+
+function stepSim(dt) {
+  // Poisson arrivals: probability λ·dt of one arrival this slice (dt kept small)
+  if (Math.random() < lam * dt) N += 1;
+  // exponential service: server busy iff N>0; finishes with prob μ·dt per slice
+  inService = N > 0;
+  if (inService && Math.random() < mu * dt) {
+    N -= 1;
+    served += 1;
+    exiting.push({ t: 0 });
+  }
+  // advance exit animations
+  for (const e of exiting) e.t += dt * 1.6;
+  exiting = exiting.filter(e => e.t < 1);
+}
+
+// --- layout of the drawn scene ------------------------------------------
+const PAD = 30;
+// top band: the live line + server. bottom band: the L-vs-ρ curve.
+const SCENE_TOP = 30, SCENE_H = Math.round(H * 0.52);
+const CURVE_TOP = SCENE_H + 90, CURVE_H = H - CURVE_TOP - 30;
+
+const SERVER_W = 150, SERVER_H = 150;
+const TOKEN_R = 20;
+const TOKEN_GAP = 52;                       // horizontal spacing of queued tokens
+const LINE_Y = SCENE_TOP + Math.round(SCENE_H * 0.45);
+const SERVER_X = W - PAD - SERVER_W;        // server box sits at the right
+const SERVER_Y = LINE_Y - SERVER_H / 2;
+const LINE_LEFT = PAD + 20;
+// how many waiting tokens fit before the server; extras become "…+N more"
+const MAX_DRAWN = Math.max(1, Math.floor((SERVER_X - 40 - LINE_LEFT) / TOKEN_GAP));
+
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        paper = css('--paper'), shade = css('--shade');
+
+  // waiting count = N minus the one in service (if any)
+  const waiting = inService ? N - 1 : N;
+  const drawn = Math.min(waiting, MAX_DRAWN);
+  const overflow = waiting - drawn;
+
+  // the server box on the right
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.strokeRect(SERVER_X, SERVER_Y, SERVER_W, SERVER_H);
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('server', SERVER_X + SERVER_W / 2, SERVER_Y - 14);
+
+  // the customer currently in service — filled, seated inside the box
+  if (inService) {
+    ctx.fillStyle = mark;
+    ctx.beginPath();
+    ctx.arc(SERVER_X + SERVER_W / 2, SERVER_Y + SERVER_H / 2, TOKEN_R, 0, TAU);
+    ctx.fill();
+  }
+
+  // the waiting line — tokens queued left-to-right, feeding toward the server
+  ctx.fillStyle = ink;
+  for (let i = 0; i < drawn; i++) {
+    // index 0 is nearest the server (front of the line)
+    const x = SERVER_X - 40 - i * TOKEN_GAP;
+    ctx.beginPath();
+    ctx.arc(x, LINE_Y, TOKEN_R, 0, TAU);
+    ctx.fill();
+  }
+
+  // overflow tally when the line runs off the visible width
+  if (overflow > 0) {
+    const x = SERVER_X - 40 - (drawn - 0.4) * TOKEN_GAP;
+    ctx.fillStyle = mark;
+    ctx.font = '30px Georgia'; ctx.textAlign = 'right';
+    ctx.fillText('… +' + overflow + ' more', x, LINE_Y + 10);
+  }
+
+  // served tokens drifting out the right edge
+  for (const e of exiting) {
+    const x = SERVER_X + SERVER_W + 20 + e.t * 120;
+    ctx.globalAlpha = 1 - e.t;
+    ctx.fillStyle = ink;
+    ctx.beginPath();
+    ctx.arc(x, LINE_Y, TOKEN_R, 0, TAU);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // a quiet label for the live count
+  ctx.fillStyle = faint; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('in system  N = ' + N, LINE_LEFT, SCENE_TOP + 20);
+}
+
+// L = ρ/(1−ρ) for ρ in [0,1), with the vertical asymptote at ρ=1
+function drawCurve(rho) {
+  const faint = css('--faint'), mark = css('--mark'), ink = css('--ink');
+  const plotW = W - 2 * PAD;
+  // clip the plotted L so the asymptote is visible without running to infinity
+  const L_MAX = 12;
+
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD, CURVE_TOP, plotW, CURVE_H);
+
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('theory:  mean line length  L = ρ/(1−ρ)', PAD + 6, CURVE_TOP - 12);
+  ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('ρ = 0', PAD + 4, CURVE_TOP + CURVE_H + 24);
+  ctx.textAlign = 'right';
+  ctx.fillText('ρ = 1', PAD + plotW - 4, CURVE_TOP + CURVE_H + 24);
+  ctx.textAlign = 'left';
+
+  const xOf = p => PAD + p * plotW;
+  const yOf = L => CURVE_TOP + CURVE_H - Math.min(L, L_MAX) / L_MAX * (CURVE_H - 2) - 1;
+
+  // the curve itself
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.beginPath();
+  let startpen = true;
+  for (let px = 0; px <= plotW; px++) {
+    const p = px / plotW * 0.999;   // stop just shy of 1 (the asymptote)
+    const L = p / (1 - p);
+    if (L > L_MAX) break;
+    const x = xOf(p), y = yOf(L);
+    startpen ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    startpen = false;
+  }
+  ctx.stroke();
+
+  // the asymptote line at ρ = 1
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.moveTo(xOf(1), CURVE_TOP); ctx.lineTo(xOf(1), CURVE_TOP + CURVE_H); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // the moving marker at the current ρ
+  const pm = Math.min(rho, 1);
+  const mx = xOf(pm);
+  ctx.strokeStyle = mark; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(mx, CURVE_TOP - 6); ctx.lineTo(mx, CURVE_TOP + CURVE_H + 6); ctx.stroke();
+  if (rho < 1) {
+    const Lnow = rho / (1 - rho);
+    ctx.fillStyle = mark;
+    ctx.beginPath(); ctx.arc(mx, yOf(Lnow), 6, 0, TAU); ctx.fill();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const rho = lam / mu;
+  drawScene();
+  drawCurve(rho);
+}
+
+function updateReadout() {
+  const rho = lam / mu;
+  const stable = rho < 1;
+  const Ltxt = stable ? (rho / (1 - rho)).toFixed(2) : '∞';
+  const Wtxt = stable ? (1 / (mu - lam)).toFixed(2) + ' s' : '∞';
+
+  let regime;
+  if (rho < 0.8) regime = 'settled — the server keeps up';
+  else if (rho < 1) regime = 'straining — the line piles near the cliff';
+  else regime = 'UNSTABLE — arrivals outrun the server, the line never clears';
+
+  const tail = stable
+    ? 'L <b>' + Ltxt + '</b> &nbsp;·&nbsp; W <b>' + Wtxt + '</b>'
+    : 'L <b>∞</b> &nbsp;·&nbsp; W <b>∞</b> &mdash; the line never clears';
+
+  readout.innerHTML =
+    'λ <b>' + lam.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'μ <b>' + mu.toFixed(2) + '</b> &nbsp;·&nbsp; '
+    + 'ρ = λ/μ <b>' + rho.toFixed(2) + '</b>'
+    + '<br>' + tail
+    + '<br><span id="regime">' + regime + '</span>';
+}
+
+function refresh() {
+  lamV.textContent = lam.toFixed(2);
+  muV.textContent = mu.toFixed(2);
+  updateReadout();
+}
+
+lamEl.oninput = () => { lam = lamEl.value / 100; refresh(); };
+muEl.oninput = () => { mu = muEl.value / 100; refresh(); };
+
+// --- the live loop: small fixed sub-steps for stable Poisson slices ------
+function frame(now) {
+  let elapsed = (now - last) / 1000 * SIM_SPEED;
+  last = now;
+  // guard against tab-switch jumps
+  if (elapsed > 0.25) elapsed = 0.25;
+  // integrate in small slices so λ·dt, μ·dt stay well below 1
+  const SLICE = 0.02;
+  while (elapsed > 0) {
+    const dt = Math.min(SLICE, elapsed);
+    stepSim(dt);
+    elapsed -= dt;
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

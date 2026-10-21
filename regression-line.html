@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>regression line</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --line: #4a6670;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .4rem; margin-bottom: 1.2rem; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  .sep { width: 1rem; }
+  canvas { width: min(720px, 96vw); height: auto; display: block; cursor: crosshair; }
+  canvas.drag { cursor: grabbing; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 2; font-family: 'Courier New', monospace; font-size: .9rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #readout .fit b { color: var(--line); font-size: 1.1rem; }
+  #readout .sse b { color: var(--mark); font-size: 1.1rem; }
+  #readout .least { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>regression line</h1>
+  <div class="controls">
+    <button id="bFit" class="on">best fit</button>
+    <button id="bWiggle">wiggle the line</button>
+    <span class="sep"></span>
+    <button id="bSquares" class="on">show squares</button>
+    <button id="bClear">clear</button>
+    <button id="bReset">reset</button>
+  </div>
+  <canvas id="cv" width="1440" height="1080"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a scatter of <b style="color:var(--mark)">points</b>. click empty plane to add one, drag one to move it, click a point to remove it. the <b style="color:var(--line)">line</b> y = a + b&middot;x is fitted by ordinary least squares &mdash; it sits where the sum of the <b>squared vertical misses</b> is as small as it can be. each miss is drawn as a vertical <b>residual</b>; its square is a literal square whose area is that miss squared. move the line off the fit and the total area only grows.<span class="cite">ordinary least squares &middot; b = &Sigma;(x&minus;x&#772;)(y&minus;y&#772;) / &Sigma;(x&minus;x&#772;)&sup2; &middot; a = y&#772; &minus; b&middot;x&#772; &middot; SSE = &Sigma;(y&minus;(a+b&middot;x))&sup2;</span></div>
+
+<script>
+'use strict';
+
+// --- the one invariant: ordinary least squares ---------------------------
+// given points (xᵢ, yᵢ), fit the straight line y = a + b·x that MINIMISES the
+// sum of squared vertical residuals SSE = Σ (yᵢ − (a + b·xᵢ))². setting the two
+// partial derivatives to zero gives the closed form (the "normal equations"):
+//   b = Σ (xᵢ − x̄)(yᵢ − ȳ) / Σ (xᵢ − x̄)²        (slope)
+//   a = ȳ − b·x̄                                    (intercept)
+// where x̄, ȳ are the means. no iteration — this pair is the exact minimiser.
+// a residual is rᵢ = yᵢ − (a + b·xᵢ): the signed VERTICAL gap from point to
+// line. SSE is the sum of rᵢ². drawing rᵢ² as a square of that area makes the
+// "least squares" literal: the fit is the line making the total square area
+// smallest. moving the line any way (wiggle mode) can only raise that total.
+// VERIFY (load-bearing): the denominator Σ(xᵢ−x̄)² is the x-spread; it is 0
+// exactly when every xᵢ is equal (a vertical stack) — then no slope is defined
+// and we fall back to the flat mean line. fewer than 2 points cannot define a
+// line at all.
+
+const plane = { xmin: 0, xmax: 10, ymin: 0, ymax: 10 };
+
+// the scatter — the reality. each point is (x, y) in plane units.
+const HOME = [
+  [1.2, 2.0], [2.4, 2.9], [3.1, 4.4], [4.0, 3.8],
+  [5.3, 6.1], [6.2, 5.5], [7.4, 7.9], [8.1, 7.2], [9.0, 9.3]
+];
+let pts = HOME.map(p => p.slice());
+
+let mode = 'fit';          // fit | wiggle
+let showSquares = true;
+// wiggle line, in plane units — used only in wiggle mode. seeded from the fit.
+let wa = 0, wb = 1;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const PAD = 90;                                   // canvas margin around the plane
+const PW = W - 2 * PAD, PH = H - 2 * PAD;
+
+// plane units → canvas pixels (y up)
+function sx(x) { return PAD + (x - plane.xmin) / (plane.xmax - plane.xmin) * PW; }
+function sy(y) { return H - PAD - (y - plane.ymin) / (plane.ymax - plane.ymin) * PH; }
+function toPlaneX(cx) { return plane.xmin + (cx - PAD) / PW * (plane.xmax - plane.xmin); }
+function toPlaneY(cy) { return plane.ymin + (H - PAD - cy) / PH * (plane.ymax - plane.ymin); }
+// one plane y-unit measured in canvas pixels — squares are drawn using x-pixels
+// for width and this for height, so a square of side |r| reads as r² in area.
+function unitPx() { return PW / (plane.xmax - plane.xmin); }
+
+// --- the least-squares fit -----------------------------------------------
+// returns {a, b, ok, vertical}. ok=false when < 2 points. vertical=true when
+// the x-spread is 0 (all xᵢ equal) — then b is undefined and we return the
+// flat mean line b=0, a=ȳ, the best a horizontal line can do.
+function fit() {
+  const n = pts.length;
+  if (n < 2) return { a: 0, b: 0, ok: false, vertical: false };
+  let mx = 0, my = 0;
+  for (const [x, y] of pts) { mx += x; my += y; }
+  mx /= n; my /= n;
+  let sxy = 0, sxx = 0;
+  for (const [x, y] of pts) { sxy += (x - mx) * (y - my); sxx += (x - mx) * (x - mx); }
+  if (sxx < 1e-9) return { a: my, b: 0, ok: true, vertical: true };  // vertical stack
+  const b = sxy / sxx;
+  const a = my - b * mx;
+  return { a, b, ok: true, vertical: false };
+}
+
+// the line currently drawn: the fit, or the manual wiggle line.
+function activeLine() {
+  if (mode === 'wiggle') return { a: wa, b: wb, ok: pts.length > 0, vertical: false };
+  return fit();
+}
+
+// SSE for a given line against the current scatter.
+function sseOf(a, b) {
+  let s = 0;
+  for (const [x, y] of pts) { const r = y - (a + b * x); s += r * r; }
+  return s;
+}
+
+// --- the drawn plane ------------------------------------------------------
+function drawGrid() {
+  const faint = css('--faint'), ink = css('--ink');
+  ctx.lineWidth = 1; ctx.strokeStyle = faint; ctx.globalAlpha = 0.22;
+  for (let x = plane.xmin; x <= plane.xmax + 1e-9; x++) {
+    ctx.beginPath(); ctx.moveTo(sx(x), sy(plane.ymin)); ctx.lineTo(sx(x), sy(plane.ymax)); ctx.stroke();
+  }
+  for (let y = plane.ymin; y <= plane.ymax + 1e-9; y++) {
+    ctx.beginPath(); ctx.moveTo(sx(plane.xmin), sy(y)); ctx.lineTo(sx(plane.xmax), sy(y)); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // axes
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(sx(plane.xmin), sy(plane.ymin)); ctx.lineTo(sx(plane.xmax), sy(plane.ymin)); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(sx(plane.xmin), sy(plane.ymin)); ctx.lineTo(sx(plane.xmin), sy(plane.ymax)); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '24px Georgia';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+  ctx.fillText('x', sx(plane.xmax) - 6, sy(plane.ymin) + 12);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('y', sx(plane.xmin) + 10, sy(plane.ymax) - 4);
+}
+
+// --- residuals + their literal squares -----------------------------------
+// for each point, the vertical drop to the line is the residual; the square
+// hangs off that drop (to the left, so it doesn't cover the point) with side
+// = |r| in plane units, so its area is r². shaded so the total ink is SSE.
+function drawResiduals(a, b) {
+  const mark = css('--mark');
+  const u = unitPx();
+  for (const [x, y] of pts) {
+    const yl = a + b * x;                 // line height under this x
+    const r = y - yl;                     // signed residual
+    const px = sx(x), pyPt = sy(y), pyLn = sy(yl);
+    // the vertical residual segment, point → line
+    ctx.strokeStyle = mark; ctx.lineWidth = 2; ctx.globalAlpha = 0.9;
+    ctx.beginPath(); ctx.moveTo(px, pyPt); ctx.lineTo(px, pyLn); ctx.stroke();
+    ctx.globalAlpha = 1;
+    // the literal square of side |r|, drawn to the left of the segment
+    if (showSquares && Math.abs(r) > 1e-6) {
+      const side = Math.abs(r) * u;       // |r| plane-units in pixels
+      const top = Math.min(pyPt, pyLn);   // the square spans the residual's height
+      ctx.fillStyle = mark; ctx.globalAlpha = 0.14;
+      ctx.fillRect(px - side, top, side, side);
+      ctx.strokeStyle = mark; ctx.globalAlpha = 0.4; ctx.lineWidth = 1;
+      ctx.strokeRect(px - side, top, side, side);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// --- the fitted (or wiggled) line ----------------------------------------
+function drawLine(a, b, vertical) {
+  const line = css('--line');
+  ctx.strokeStyle = line; ctx.lineWidth = 3;
+  const x0 = plane.xmin, x1 = plane.xmax;
+  ctx.beginPath();
+  ctx.moveTo(sx(x0), sy(a + b * x0));
+  ctx.lineTo(sx(x1), sy(a + b * x1));
+  ctx.stroke();
+  if (vertical) {
+    ctx.fillStyle = line; ctx.font = '22px Georgia'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText('x-spread is 0 — flat mean line', (sx(x0) + sx(x1)) / 2, sy(a) - 14);
+  }
+}
+
+// --- the scatter points ---------------------------------------------------
+function drawPoints() {
+  const mark = css('--mark'), paper = css('--paper');
+  for (const [x, y] of pts) {
+    ctx.fillStyle = mark;
+    ctx.beginPath(); ctx.arc(sx(x), sy(y), 11, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = paper; ctx.lineWidth = 2; ctx.stroke();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawGrid();
+  const L = activeLine();
+  if (L.ok) {
+    drawResiduals(L.a, L.b);
+    drawLine(L.a, L.b, L.vertical);
+  }
+  drawPoints();
+}
+
+// --- the readout: the fit coefficients and the SSE -----------------------
+function updateReadout() {
+  const L = activeLine();
+  if (pts.length < 2) {
+    readout.innerHTML = '<span class="least">add at least 2 points — a line needs two to lean on</span>';
+    return;
+  }
+  const sse = sseOf(L.a, L.b);
+  const best = fit();
+  const bestSse = sseOf(best.a, best.b);
+  const bTxt = L.vertical ? 'undefined (vertical)' : L.b.toFixed(3);
+
+  let tail;
+  if (mode === 'wiggle') {
+    const excess = sse - bestSse;
+    tail = excess < 1e-6
+      ? '<span class="least">you are on the least-squares line — this is the floor</span>'
+      : '<span class="least">SSE is ' + excess.toFixed(2) + ' above the least-squares floor ('
+        + bestSse.toFixed(2) + ') — the fit is lower</span>';
+  } else {
+    tail = '<span class="least">this is the line making the total square area smallest</span>';
+  }
+
+  readout.innerHTML =
+      '<span class="fit">line&nbsp; y = <b>' + L.a.toFixed(3) + '</b> + <b>' + bTxt + '</b>&middot;x</span>'
+    + '&nbsp;&nbsp;·&nbsp;&nbsp;'
+    + '<span class="sse">SSE = <b>' + sse.toFixed(2) + '</b></span>'
+    + '&nbsp;&nbsp;·&nbsp;&nbsp;n = ' + pts.length
+    + '<br>' + tail;
+}
+
+function refresh() { draw(); updateReadout(); }
+
+// --- interaction: add / drag / remove points, or drag the wiggle line -----
+let dragIdx = -1;          // index of point being dragged, or -1
+let dragLine = false;      // dragging the wiggle line
+let downAt = null;         // pointer-down position, to tell click from drag
+const HIT = 22;            // grab radius in canvas pixels
+
+function pointer(ev) {
+  const rct = cv.getBoundingClientRect();
+  return [(ev.clientX - rct.left) / rct.width * cv.width,
+          (ev.clientY - rct.top) / rct.height * cv.height];
+}
+
+function nearestPoint(cx, cy) {
+  let best = -1, bd = HIT;
+  pts.forEach(([x, y], i) => {
+    const d = Math.hypot(cx - sx(x), cy - sy(y));
+    if (d < bd) { bd = d; best = i; }
+  });
+  return best;
+}
+
+cv.addEventListener('pointerdown', (ev) => {
+  const [cx, cy] = pointer(ev);
+  downAt = [cx, cy];
+  cv.setPointerCapture(ev.pointerId);
+  const hit = nearestPoint(cx, cy);
+  if (hit >= 0) { dragIdx = hit; cv.classList.add('drag'); return; }
+  // in wiggle mode, empty-space press near the line grabs the line to drag it
+  if (mode === 'wiggle' && pts.length > 0) {
+    const yl = wa + wb * toPlaneX(cx);
+    if (Math.abs(cy - sy(yl)) < 30) { dragLine = true; cv.classList.add('drag'); return; }
+  }
+});
+
+cv.addEventListener('pointermove', (ev) => {
+  const [cx, cy] = pointer(ev);
+  if (dragIdx >= 0) {
+    let x = Math.max(plane.xmin, Math.min(plane.xmax, toPlaneX(cx)));
+    let y = Math.max(plane.ymin, Math.min(plane.ymax, toPlaneY(cy)));
+    pts[dragIdx] = [x, y];
+    refresh();
+  } else if (dragLine && downAt) {
+    // vertical drag shifts the intercept; horizontal drag tilts the slope about x̄
+    let mx = 0; for (const [x] of pts) mx += x; mx /= pts.length;
+    const dyPlane = toPlaneY(cy) - toPlaneY(downAt[1]);
+    const dSlope = (cx - downAt[0]) / PW * 6;   // gentle tilt sensitivity
+    wa += dyPlane; wb += dSlope;
+    wa -= dSlope * mx;                           // pivot the tilt about x̄, not x=0
+    downAt = [cx, cy];
+    refresh();
+  }
+});
+
+function endDrag(ev) {
+  const [cx, cy] = downAt ? pointer(ev) : [0, 0];
+  // a press-release that didn't move much is a CLICK, not a drag
+  const moved = downAt && Math.hypot(cx - downAt[0], cy - downAt[1]) > 5;
+  if (!moved && dragIdx >= 0) {
+    pts.splice(dragIdx, 1);                      // click on a point removes it
+  } else if (!moved && dragIdx < 0 && !dragLine && mode === 'fit') {
+    // click on empty plane adds a point (only in fit mode; wiggle keeps scatter fixed)
+    if (downAt) pts.push([toPlaneX(downAt[0]), toPlaneY(downAt[1])]);
+  }
+  dragIdx = -1; dragLine = false; downAt = null;
+  cv.classList.remove('drag');
+  refresh();
+}
+cv.addEventListener('pointerup', endDrag);
+
+// --- mode + toggles + reset ----------------------------------------------
+function setMode(m) {
+  if (m === 'wiggle') { const f = fit(); wa = f.a; wb = f.vertical ? 0 : f.b; }  // seed from the fit
+  mode = m;
+  document.getElementById('bFit').classList.toggle('on', m === 'fit');
+  document.getElementById('bWiggle').classList.toggle('on', m === 'wiggle');
+  refresh();
+}
+document.getElementById('bFit').onclick = () => setMode('fit');
+document.getElementById('bWiggle').onclick = () => setMode('wiggle');
+
+document.getElementById('bSquares').onclick = () => {
+  showSquares = !showSquares;
+  document.getElementById('bSquares').classList.toggle('on', showSquares);
+  refresh();
+};
+document.getElementById('bClear').onclick = () => { pts = []; setMode('fit'); };
+document.getElementById('bReset').onclick = () => { pts = HOME.map(p => p.slice()); showSquares = true;
+  document.getElementById('bSquares').classList.add('on'); setMode('fit'); };
+
+refresh();
+</script>
+</body>
+</html>

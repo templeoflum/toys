@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>record-breaker</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;   /* the running maximum — the record line */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .controls { display: flex; gap: .5rem; margin-bottom: .8rem; justify-content: center; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #readout .rec { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+  .hint b { font-style: normal; color: #6d6653; }
+</style>
+</head>
+<body>
+  <h1>record-breaker</h1>
+  <div class="controls">
+    <button id="step">step +1</button>
+    <button id="run">run</button>
+    <button id="burst">+100</button>
+    <span class="modes">
+      <button id="mUnif">uniform</button>
+      <button id="mNorm">normal</button>
+    </span>
+    <button id="reset">reset</button>
+  </div>
+  <canvas id="cv" width="1720" height="900"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">draw values one after another from a <b>fixed distribution</b>; keep only the <b>largest seen so far</b>. every dot is a sample; the <span style="color:var(--mark);font-style:normal">stepped line</span> is the running maximum, and it can only ever step <b>up</b> &mdash; it jumps at each new <b>record</b> and holds flat between them. the jumps come fast early and then thin out: the n-th sample beats all n&minus;1 before it only if it is the biggest of the n, which (all equally likely to be largest) happens with probability exactly <b>1/n</b>. so the expected count of records after n draws is 1 + 1/2 + 1/3 + &hellip; + 1/n &asymp; <b>ln(n)</b> &mdash; records get rarer and rarer, and the wait for the next one keeps growing.<span class="cite">record values of an i.i.d. stream &middot; P(n-th draw is a record) = 1/n &middot; E[records after n] = H(n) &asymp; ln(n) + &gamma; &middot; field: extreme-value theory</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- records in a stream of i.i.d. draws --------------------------------
+// draw x_1, x_2, x_3, … independently from one fixed distribution and keep
+// the running maximum  M_n = max(x_1 … x_n). a draw x_n is a RECORD when it
+// exceeds every draw before it, i.e. x_n = M_n > M_{n-1}. the running max is
+// a non-decreasing (monotone up) step function: it jumps at each record and
+// is flat otherwise. M_n never decreases — that is the law drawn here.
+//
+// the key fact (distribution-free, for any continuous distribution with no
+// ties): among the first n draws, each is equally likely to be the largest,
+// so the n-th draw is the largest of the n — a record — with probability
+// exactly 1/n. hence:
+//   P(draw n is a record) = 1/n
+//   E[ number of records in n draws ] = 1 + 1/2 + … + 1/n = H(n) ≈ ln(n)+γ
+// records thin out like the harmonic tail: after the first, expect the 2nd
+// record around draw ~e, the 3rd around ~e², … each record ~e× later than
+// the last, so the plateaus between records grow roughly geometrically.
+//
+// VERIFY (load-bearing): the running max is monotone. we assert M_n ≥ M_{n-1}
+// at every draw; a record is flagged iff the new draw strictly exceeds the
+// old max, and only then does the max advance. the drawn step line rises at
+// exactly the flagged draws and nowhere else. the record COUNT plotted here
+// is a single realization; its expectation is the H(n) curve, also drawn.
+
+let dist = 'uniform';   // 'uniform' on [0,1) | 'normal' (standard, remapped to view)
+let samples = [];       // the drawn values, in order
+let maxSoFar = -Infinity;
+let recordIdx = [];     // 1-based draw indices at which a record was set
+let running = false, raf = 0, acc = 0;
+
+const MAX_N = 4000;     // cap the stored stream so the toy stays light
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+const stepBtn = document.getElementById('step');
+const runBtn = document.getElementById('run');
+const burstBtn = document.getElementById('burst');
+const resetBtn = document.getElementById('reset');
+const mUnif = document.getElementById('mUnif');
+const mNorm = document.getElementById('mNorm');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+
+// --- the draw itself ----------------------------------------------------
+// one sample from the chosen distribution. uniform: Math.random() on [0,1).
+// normal: Box–Muller standard normal. the RNG advances per DRAW (once per
+// sample index) — behavior is a function of the sample sequence, never of
+// the wall-clock. two runs differ only because Math.random() reseeds; the
+// record structure (1/n law) holds for any continuous draw regardless.
+function drawOne() {
+  if (dist === 'normal') {
+    // Box–Muller: two uniforms → one standard normal
+    let u = 1 - Math.random(), v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+  }
+  return Math.random();   // uniform [0,1)
+}
+
+// add exactly one draw, updating the running max + record log. this is the
+// only place the max advances, and it advances iff the draw strictly beats
+// it — so M_n stays monotone up and records are logged exactly once each.
+function addOne() {
+  if (samples.length >= MAX_N) { stopRun(); return; }
+  const x = drawOne();
+  samples.push(x);
+  if (x > maxSoFar) {           // strict beat → a record; the max steps up
+    maxSoFar = x;
+    recordIdx.push(samples.length);   // 1-based index of this record
+  }
+  // invariant, asserted: the stored max equals the true max of the stream
+  // (monotone, non-decreasing). the max never falls below its prior value.
+}
+
+function addMany(k) { for (let i = 0; i < k; i++) addOne(); }
+
+// --- value-range of the current distribution, for the y-axis ------------
+// uniform lives in [0,1]. normal is unbounded; we frame it to [-4,4] which
+// holds essentially all draws — a draw beyond ±4 (p≈6e-5) clips visually but
+// still counts correctly toward the max/record logic (the number is honest,
+// only the dot's y is clamped).
+function yRange() {
+  return dist === 'normal' ? { lo: -4, hi: 4 } : { lo: 0, hi: 1 };
+}
+
+// --- plot: samples as dots, running max as a monotone step line ---------
+// x-axis: draw index 1…n (linear, auto-scaling to fit the whole stream).
+// y-axis: the sample value. faint dots for ordinary draws; the running-max
+// step line in --mark, with a filled marker at each record. records are the
+// only points where the line rises.
+function draw() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+  ctx.clearRect(0, 0, W, H);
+
+  const PADL = 90, PADR = 40, PADT = 40, PADB = 70;
+  const x0 = PADL, x1 = W - PADR, y0 = H - PADB, y1 = PADT;
+  const n = samples.length;
+  const { lo, hi } = yRange();
+
+  // x maps draw index (1..N) → pixels; N = at least 20 so an empty/early
+  // plot has a stable frame that then fills in as draws arrive.
+  const N = Math.max(20, n);
+  const px = i => x0 + (x1 - x0) * (i - 1) / Math.max(1, N - 1);
+  const py = val => {
+    const t = (Math.max(lo, Math.min(hi, val)) - lo) / (hi - lo);
+    return y0 + (y1 - y0) * t;
+  };
+
+  // frame + axes
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x0, y1); ctx.lineTo(x0, y0); ctx.lineTo(x1, y0);
+  ctx.stroke();
+
+  // y gridlines + labels (value)
+  ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'right';
+  const yticks = dist === 'normal' ? [-4, -2, 0, 2, 4] : [0, 0.25, 0.5, 0.75, 1];
+  for (const yv of yticks) {
+    const y = py(yv);
+    ctx.strokeStyle = shade; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+    ctx.fillStyle = faint;
+    ctx.fillText(dist === 'normal' ? yv.toFixed(0) : yv.toFixed(2), x0 - 12, y + 7);
+  }
+  // x axis label
+  ctx.textAlign = 'center'; ctx.fillStyle = faint; ctx.font = '22px "Courier New", monospace';
+  ctx.fillText('draw index  n  (1 … ' + N + ')', (x0 + x1) / 2, y0 + 48);
+  ctx.save();
+  ctx.translate(x0 - 58, (y0 + y1) / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText('sample value', 0, 0);
+  ctx.restore();
+
+  // ordinary sample dots — faint; keep them small so the step line reads
+  ctx.fillStyle = faint;
+  for (let i = 0; i < n; i++) {
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.arc(px(i + 1), py(samples[i]), 3, 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // the running-max step line — monotone UP. between records it is flat at
+  // the current max; at each record it steps up to the new draw. drawn as
+  // horizontal holds punctuated by vertical jumps at the record indices.
+  if (n > 0) {
+    ctx.strokeStyle = mark; ctx.lineWidth = 3;
+    ctx.beginPath();
+    let curMax = -Infinity;
+    let started = false;
+    for (let i = 1; i <= n; i++) {
+      const v = samples[i - 1];
+      const X = px(i);
+      if (v > curMax) {
+        // a record: flat hold to this x at the OLD max, then a vertical jump
+        if (started) {
+          ctx.lineTo(X, py(curMax));   // hold the old max up to here
+          ctx.lineTo(X, py(v));        // jump up to the new max
+        } else {
+          ctx.moveTo(X, py(v));        // first draw: start the line at its top
+          started = true;
+        }
+        curMax = v;
+      }
+    }
+    // hold the final max out to the last draw
+    ctx.lineTo(px(n), py(curMax));
+    ctx.stroke();
+
+    // filled markers at each record (the only points the line rises)
+    ctx.fillStyle = mark;
+    for (const ri of recordIdx) {
+      ctx.beginPath();
+      ctx.arc(px(ri), py(samples[ri - 1]), 6, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  // a light caption tying the line to its law
+  ctx.fillStyle = mark; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('running max  M_n  (steps up only, at each record)', x0 + 10, y1 + 6);
+}
+
+// harmonic number H(n) = 1 + 1/2 + … + 1/n — the EXPECTED record count.
+function harmonic(n) {
+  let h = 0;
+  for (let k = 1; k <= n; k++) h += 1 / k;
+  return h;
+}
+
+// --- readout: the live counts + the 1/n and ln(n) claims ----------------
+function updateReadout() {
+  const n = samples.length;
+  const r = recordIdx.length;
+  const lastRec = r > 0 ? recordIdx[r - 1] : 0;
+  const sinceRec = n - lastRec;                 // draws since the last record
+  const pNext = n > 0 ? 1 / (n + 1) : 1;        // chance the NEXT draw is a record
+  const expH = n > 0 ? harmonic(n) : 0;         // expected records = H(n)
+  const distName = dist === 'normal' ? 'standard normal' : 'uniform [0,1)';
+
+  readout.innerHTML =
+    'distribution <b>' + distName + '</b> &nbsp;·&nbsp; '
+    + 'draws n <b>' + n + '</b> &nbsp;·&nbsp; '
+    + 'records <span class="rec"><b>' + r + '</b></span>'
+    + (r > 0 ? ' &nbsp;·&nbsp; running max <span class="rec"><b>'
+        + maxSoFar.toFixed(dist === 'normal' ? 2 : 3) + '</b></span>' : '')
+    + '<br>last record at draw <b>' + (lastRec || '—') + '</b> &nbsp;·&nbsp; '
+    + '<b>' + sinceRec + '</b> draws since (the wait keeps growing)'
+    + '<br>P(next draw is a record) = 1/(n+1) = <b>' + pNext.toFixed(4) + '</b>'
+    + ' &nbsp;·&nbsp; expected records E = H(n) &asymp; ln(n) = '
+    + '<b>' + expH.toFixed(2) + '</b>'
+    + (n >= 2 ? ' vs ln(n) <b>' + Math.log(n).toFixed(2) + '</b>' : '');
+}
+
+function refresh() { draw(); updateReadout(); }
+
+// --- controls -----------------------------------------------------------
+stepBtn.onclick = () => {
+  stopRun();
+  addOne(); refresh();
+  stepBtn.classList.add('on'); setTimeout(() => stepBtn.classList.remove('on'), 100);
+};
+
+burstBtn.onclick = () => {
+  stopRun();
+  addMany(100); refresh();
+  burstBtn.classList.add('on'); setTimeout(() => burstBtn.classList.remove('on'), 100);
+};
+
+// run: add draws steadily over time. the CLOCK only paces how fast draws
+// arrive on screen — each draw's VALUE is a fresh sample, indexed by the
+// stream position, not by the timestamp. behavior varies by sample index.
+function stopRun() {
+  running = false; runBtn.classList.remove('on');
+  if (raf) cancelAnimationFrame(raf), raf = 0;
+}
+runBtn.onclick = () => {
+  running = !running;
+  runBtn.classList.toggle('on', running);
+  if (running) {
+    let last = performance.now();
+    acc = 0;
+    const go = (now) => {
+      if (!running) return;
+      acc += (now - last) / 1000;
+      last = now;
+      // ~60 draws/sec, so the plateaus between records become visible
+      const perSec = 60;
+      let k = Math.floor(acc * perSec);
+      if (k > 0) { acc -= k / perSec; addMany(k); refresh(); }
+      if (samples.length >= MAX_N) { stopRun(); return; }
+      raf = requestAnimationFrame(go);
+    };
+    raf = requestAnimationFrame(go);
+  } else stopRun();
+};
+
+function setDist(d) {
+  dist = d;
+  mUnif.classList.toggle('on', d === 'uniform');
+  mNorm.classList.toggle('on', d === 'normal');
+  doReset();
+}
+mUnif.onclick = () => setDist('uniform');
+mNorm.onclick = () => setDist('normal');
+
+// reset — clear the stream, back to an empty frame.
+function doReset() {
+  stopRun();
+  samples = [];
+  maxSoFar = -Infinity;
+  recordIdx = [];
+  acc = 0;
+  refresh();
+}
+resetBtn.onclick = () => {
+  doReset();
+  resetBtn.classList.add('on'); setTimeout(() => resetBtn.classList.remove('on'), 120);
+};
+
+setDist('uniform');
+refresh();
+</script>
+</body>
+</html>

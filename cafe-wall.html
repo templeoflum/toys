@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cafe-wall</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 5rem; text-align: right; }
+  .row span.val { width: 10rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(720px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>cafe-wall</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">offset</span><input type="range" id="offset" min="0" max="50" value="50"><span class="val" id="offsetV"></span></div>
+    <div class="row"><span class="name">mortar</span><input type="range" id="mortar" min="0" max="14" value="7"><span class="val" id="mortarV"></span></div>
+  </div>
+  <canvas id="cv" width="1160" height="820"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">every gray line here is dead horizontal and perfectly parallel &mdash; only the tiles slide. shift alternate rows by a half-tile and your edge-detectors, reading the offset light/dark corners against the gray mortar, infer a tiny tilt at each corner; the tilts sum along the line into a wedge that is not there. drop <b>offset</b> to zero and the lines snap straight; starve the <b>mortar</b> to nothing and the cue that feeds the tilt dies.</div>
+
+<script>
+'use strict';
+
+const BX = 60, BY = 70, BW = 1040, BH = 680;   // board rect
+const TILE = 88, ROWH = 60;                     // tile width, row height
+const BLACK = 20, WHITE = 235, MORTAR = 128;    // luminances
+
+let offsetFrac = 0.5;   // 0 aligned .. 0.5 half-tile
+let mortarPx = 7;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const offEl = document.getElementById('offset'), offV = document.getElementById('offsetV');
+const morEl = document.getElementById('mortar'), morV = document.getElementById('mortarV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+const g = (n) => 'rgb(' + n + ',' + n + ',' + n + ')';
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // mortar is the gray showing through the row gaps: fill the board with it,
+  // then stamp tile rows leaving a mortarPx horizontal gap between them.
+  ctx.save();
+  ctx.beginPath(); ctx.rect(BX, BY, BW, BH); ctx.clip();
+  ctx.fillStyle = g(MORTAR);
+  ctx.fillRect(BX, BY, BW, BH);
+
+  const rowPitch = ROWH + mortarPx;
+  const rows = Math.ceil(BH / rowPitch) + 1;
+  for (let r = 0; r < rows; r++) {
+    const y = BY + r * rowPitch;
+    const shift = (r % 2) * offsetFrac * TILE;   // alternate rows slide
+    // start one tile left of the board so the shift never bares the edge
+    let i = 0;
+    for (let x = BX - TILE + shift - TILE; x < BX + BW; x += TILE, i++) {
+      ctx.fillStyle = g(i % 2 === 0 ? BLACK : WHITE);
+      ctx.fillRect(x, y, TILE, ROWH);
+    }
+  }
+  ctx.restore();
+
+  // a faint frame so the board edge reads as a wall, not a crop
+  ctx.strokeStyle = css('--faint'); ctx.lineWidth = 1;
+  ctx.strokeRect(BX + 0.5, BY + 0.5, BW - 1, BH - 1);
+
+  const pct = Math.round(offsetFrac * 100);
+  readout.innerHTML = offsetFrac < 0.02
+    ? 'aligned &mdash; a plain grid, and the gray lines are plainly straight.'
+    : mortarPx === 0
+      ? 'tiles shifted <b>' + pct + '%</b>, but the mortar is gone &mdash; the wedge starves without it.'
+      : 'tiles shifted a <b>' + pct + '%</b> tile; the gray lines look wedged, yet every one is dead horizontal.';
+}
+
+function refresh() {
+  offV.textContent = offsetFrac < 0.02 ? 'aligned' : Math.round(offsetFrac * 100) + '% tile';
+  morV.textContent = mortarPx === 0 ? 'none' : mortarPx + 'px gray';
+  draw();
+}
+
+offEl.oninput = () => { offsetFrac = +offEl.value / 100; refresh(); };
+morEl.oninput = () => { mortarPx = +morEl.value; refresh(); };
+refresh();
+</script>
+</body>
+</html>

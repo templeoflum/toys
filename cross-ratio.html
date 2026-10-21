@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cross-ratio</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --hold: #4a6670;
+    --break: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; margin-bottom: .7rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 6.5rem; text-align: right; }
+  input[type=range] { accent-color: var(--ink); width: min(440px, 76vw); }
+  .controls { display: flex; gap: .5rem; margin-bottom: 1.2rem; }
+  button { font: inherit; font-size: .85rem; background: none; border: 1px solid var(--ink); border-radius: 2px; color: var(--ink); padding: .3rem .8rem; cursor: pointer; }
+  button:hover { background: var(--shade); }
+  button.on { background: var(--ink); color: var(--paper); }
+  canvas { width: min(820px, 96vw); height: auto; display: block; cursor: ew-resize; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 2; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hold { color: var(--hold); }
+  .brk { color: var(--break); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>cross-ratio</h1>
+  <div class="row"><span class="name">perspective</span><input type="range" id="k" min="0" max="700" value="0"></div>
+  <div class="controls">
+    <button id="m-persp" class="on">a perspective</button>
+    <button id="m-bend">a bend (not a perspective)</button>
+  </div>
+  <canvas id="cv" width="1640" height="560"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">four marks on a line. drag them anywhere. then look at the line from a slant &mdash; a <b>perspective</b> &mdash; and every gap between the marks changes, near ones stretch, far ones crush together. yet one number, the <b>cross-ratio</b> (a ratio of ratios), does not move. it is what a photograph keeps of the real spacing. bend the line by anything that isn&rsquo;t a perspective and even that number goes.</div>
+
+<script>
+'use strict';
+
+// four marks on the unit line
+let t = [0.12, 0.38, 0.58, 0.82];
+let k = 0;          // perspective depth
+let mode = 'persp'; // 'persp' (projective, invariant) | 'bend' (non-projective, breaks)
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const kEl = document.getElementById('k');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// the cross-ratio of four points on a line
+function crossRatio(p) {
+  const [a, b, c, d] = p;
+  return ((a - c) * (b - d)) / ((a - d) * (b - c));
+}
+
+// perspective: a projective (Möbius) map of the line, normalized to keep [0,1].
+// cross-ratio is invariant under it.
+function perspective(x) { return (1 + k) * x / (1 + k * x); }
+// a bend: squaring — NOT projective, so it moves the cross-ratio.
+function bend(x) { const e = 1 + k * 0.5; return Math.pow(x, e); }
+
+function mapT(x) { return mode === 'persp' ? perspective(x) : bend(x); }
+
+const LX = 90, RX = 1550;
+const REAL_Y = 150, SEEN_Y = 400;
+function toX(u) { return LX + u * (RX - LX); }
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  const ink = css('--ink'), faint = css('--faint'), hold = css('--hold'), brk = css('--break');
+  const accent = mode === 'persp' ? hold : brk;
+  ctx.clearRect(0, 0, W, H);
+
+  const seen = t.map(mapT);
+
+  // two lines
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(LX, REAL_Y); ctx.lineTo(RX, REAL_Y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(LX, SEEN_Y); ctx.lineTo(RX, SEEN_Y); ctx.stroke();
+
+  ctx.fillStyle = faint; ctx.font = '22px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('the real line', LX, REAL_Y - 34);
+  ctx.fillText(mode === 'persp' ? 'seen through the perspective' : 'seen through the bend', LX, SEEN_Y - 34);
+
+  // connect real mark i to seen mark i
+  ctx.strokeStyle = accent; ctx.lineWidth = 1; ctx.globalAlpha = 0.35;
+  for (let i = 0; i < 4; i++) {
+    ctx.beginPath(); ctx.moveTo(toX(t[i]), REAL_Y + 10); ctx.lineTo(toX(seen[i]), SEEN_Y - 10); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  const cols = ['#2b2a26', '#4a6670', '#8a6d3b', '#b8603a'];
+  function marks(vals, y, big) {
+    for (let i = 0; i < 4; i++) {
+      const x = toX(vals[i]);
+      ctx.fillStyle = cols[i];
+      ctx.beginPath(); ctx.arc(x, y, big ? 9 : 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+      ctx.fillText(String(i + 1), x, y - 18);
+    }
+  }
+  marks(t, REAL_Y, true);
+  marks(seen, SEEN_Y, false);
+
+  const crReal = crossRatio(t);
+  const crSeen = crossRatio(seen);
+  const same = Math.abs(crReal - crSeen) < 1e-6;
+  const fmt = v => v.toFixed(4);
+  readout.innerHTML =
+    'real cross-ratio <b>' + fmt(crReal) + '</b>  &nbsp;→&nbsp;  '
+    + (mode === 'persp'
+        ? '<span class="hold">through the perspective <b>' + fmt(crSeen) + '</b> — the same, though every gap changed</span>'
+        : '<span class="brk">through the bend <b>' + fmt(crSeen) + '</b> — it moved; a bend is not a perspective</span>');
+}
+
+// drag the real marks
+let drag = -1;
+function pointerX(ev) {
+  const r = cv.getBoundingClientRect();
+  return ((ev.clientX - r.left) / r.width) * cv.width;
+}
+cv.addEventListener('pointerdown', (ev) => {
+  const px = pointerX(ev);
+  let best = -1, bd = 40;
+  for (let i = 0; i < 4; i++) { const d = Math.abs(toX(t[i]) - px); if (d < bd) { bd = d; best = i; } }
+  drag = best;
+  if (drag >= 0) cv.setPointerCapture(ev.pointerId);
+});
+cv.addEventListener('pointermove', (ev) => {
+  if (drag < 0) return;
+  let u = (pointerX(ev) - LX) / (RX - LX);
+  u = Math.max(0.02, Math.min(0.98, u));
+  t[drag] = u;
+  draw();
+});
+cv.addEventListener('pointerup', () => { drag = -1; });
+
+kEl.oninput = () => { k = kEl.value / 100; draw(); };
+document.getElementById('m-persp').onclick = () => { mode = 'persp'; setMode(); };
+document.getElementById('m-bend').onclick = () => { mode = 'bend'; setMode(); };
+function setMode() {
+  document.getElementById('m-persp').classList.toggle('on', mode === 'persp');
+  document.getElementById('m-bend').classList.toggle('on', mode === 'bend');
+  draw();
+}
+draw();
+</script>
+</body>
+</html>

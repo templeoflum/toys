@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>compass-rose</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>compass-rose</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">declination</span><input type="range" id="decl" min="-40" max="40" value="14" step="1"><span class="val" id="declV"></span></div>
+    <div class="row"><span class="name">heading</span><input type="range" id="head" min="0" max="360" value="0" step="1"><span class="val" id="headV"></span></div>
+  </div>
+  <canvas id="cv" width="1000" height="1120"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a <b>true-north</b> ring and a <b>magnetic-north</b> ring share one center, offset by the local <b>declination</b> &mdash; the angle between where the needle points and true north. read the fixed <b>lubber line</b> against each ring and the two bearings differ by exactly that offset: <b>magnetic = true &minus; declination</b> (east positive, west negative). where declination is zero the rings <b>coincide</b> and the compass points true.<span class="cite">magnetic declination (variation) &middot; magnetic bearing = true &minus; declination &middot; Halley's 1701 Atlantic chart (first isogonic lines) &middot; agonic line = zero declination</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- magnetic declination (variation) -----------------------------------
+// two concentric compass rings share one center: a TRUE-north ring and a
+// MAGNETIC-north ring. the magnetic ring is rotated from the true ring by
+// the local DECLINATION δ (east positive, west negative). the needle points
+// to magnetic north; the lubber line is a fixed reading index at the top
+// (the heading direction). rotating the whole rose by the heading swings
+// which bearing sits under the lubber line.
+//   true bearing read at the lubber line  = (heading) mod 360
+//   magnetic bearing read at the lubber   = (true − δ) mod 360
+// VERIFY (load-bearing): at EVERY heading,
+//   magnetic = (true − declination) mod 360   EXACTLY,
+// and the drawn angular offset between the true-N mark and the magnetic-N
+// mark equals the declination δ. δ = 0 → the two marks coincide (agonic),
+// magnetic = true, the compass points true. the numbers must land on this.
+const R_OUTER = 400;   // true ring radius
+const R_INNER = 300;   // magnetic ring radius (concentric, inside)
+
+let decl = 14;    // declination δ in degrees, +E / −W
+let head = 0;     // ship heading (true bearing at the lubber line), 0..360
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const declEl = document.getElementById('decl'), declV = document.getElementById('declV');
+const headEl = document.getElementById('head'), headV = document.getElementById('headV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const CX = W / 2, CY = 480;   // shared center of both rings
+
+// bearings run clockwise from north (0=N, 90=E, 180=S, 270=W). the lubber
+// line is fixed at the top of the canvas. a ring bearing β sits under the
+// lubber line when the ring is rotated so β points up; a mark drawn for
+// bearing β at ring-rotation ρ lands at screen angle:
+//   screenDeg = β − ρ − 90   (−90 puts 0° at the top, clockwise growth)
+// where ρ = the true bearing currently under the lubber line (= heading).
+function mod360(a) { let m = a % 360; return m < 0 ? m + 360 : m; }
+
+// screen position (canvas x,y) of a ring bearing β given the ring's rotation ρ
+function ringPoint(beta, rho, r) {
+  const a = (beta - rho - 90) * Math.PI / 180;   // clockwise-from-top → canvas
+  return [CX + r * Math.cos(a), CY + r * Math.sin(a)];
+}
+
+// --- one graduated compass ring -----------------------------------------
+// draws the 360° graduated circle, cardinal letters, and returns nothing.
+// rho = the bearing currently under the lubber line (rotates the ring).
+// the TRUE ring uses rho = heading; the MAGNETIC ring is rotated an extra
+// −δ so its own north sits δ off the true north — the drawn declination.
+function drawRing(rho, r, colMajor, colMinor, cardinal) {
+  // tick marks every 10°, taller every 30°, tallest at cardinals
+  for (let b = 0; b < 360; b += 10) {
+    const outer = r;
+    const len = (b % 90 === 0) ? 34 : (b % 30 === 0) ? 22 : 12;
+    const [x0, y0] = ringPoint(b, rho, outer);
+    const [x1, y1] = ringPoint(b, rho, outer - len);
+    ctx.strokeStyle = (b % 30 === 0) ? colMajor : colMinor;
+    ctx.lineWidth = (b % 90 === 0) ? 3 : (b % 30 === 0) ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  // the ring circle
+  ctx.strokeStyle = colMinor; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(CX, CY, r, 0, TAU); ctx.stroke();
+
+  // cardinal letters set just inside the ticks
+  if (cardinal) {
+    ctx.fillStyle = colMajor;
+    ctx.font = '26px Georgia'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const marks = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
+    for (const [ch, b] of marks) {
+      const [lx, ly] = ringPoint(b, rho, r - 58);
+      ctx.fillText(ch, lx, ly);
+    }
+  }
+}
+
+// --- the fixed lubber line (reading index) ------------------------------
+// a fixed vertical index at the top, crossing both rings. the bearing you
+// read where it meets each ring is that ring's bearing under the lubber line.
+function drawLubber() {
+  const ink = css('--ink');
+  ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(CX, CY - R_OUTER - 40);
+  ctx.lineTo(CX, CY - R_INNER + 30);
+  ctx.stroke();
+  // a small filled index triangle at the very top
+  ctx.fillStyle = ink;
+  ctx.beginPath();
+  ctx.moveTo(CX, CY - R_OUTER - 40);
+  ctx.lineTo(CX - 12, CY - R_OUTER - 66);
+  ctx.lineTo(CX + 12, CY - R_OUTER - 66);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = css('--faint');
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('lubber', CX, CY - R_OUTER - 74);
+}
+
+// --- the declination wedge ----------------------------------------------
+// the warm --mark wedge from the true-N mark to the magnetic-N mark; its
+// swept angle IS the declination. true-N sits at ring-rotation rho=head;
+// magnetic-N sits an extra −δ around, so the wedge spans exactly δ degrees.
+function drawWedge() {
+  const trueRho = head;              // true ring rotation
+  const magRho = head + decl;        // magnetic ring rotation (its N is −δ off)
+  // screen angle (radians) of true-north mark and magnetic-north mark
+  const aTrue = (0 - trueRho - 90) * Math.PI / 180;
+  const aMag = (0 - magRho - 90) * Math.PI / 180;
+  const rw = R_INNER - 4;
+  ctx.fillStyle = css('--mark') + '55';   // translucent warm fill
+  ctx.beginPath();
+  ctx.moveTo(CX, CY);
+  // sweep the short way from true to magnetic — direction follows δ's sign
+  ctx.arc(CX, CY, rw, aTrue, aMag, decl < 0);
+  ctx.closePath(); ctx.fill();
+}
+
+// --- the north marks + the magnetic needle ------------------------------
+// a --ink pointer to TRUE north on the outer ring, a --mark needle to
+// MAGNETIC north on the inner ring. their angular gap = the declination.
+function drawNeedle() {
+  const ink = css('--ink'), mark = css('--mark');
+  // true-north spoke (outer ring rotation = heading)
+  const [tx, ty] = ringPoint(0, head, R_OUTER - 40);
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(CX, CY); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.fillStyle = ink; ctx.font = '20px Georgia'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('true N', tx * 0.86 + CX * 0.14, ty * 0.86 + CY * 0.14);
+
+  // magnetic needle (inner ring rotation = heading + decl → its N is −δ off)
+  const [mx, my] = ringPoint(0, head + decl, R_INNER - 20);
+  ctx.strokeStyle = mark; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(CX, CY); ctx.lineTo(mx, my); ctx.stroke();
+  // arrowhead on the magnetic needle
+  const a = Math.atan2(my - CY, mx - CX), s = 22;
+  ctx.fillStyle = mark;
+  ctx.beginPath();
+  ctx.moveTo(mx, my);
+  ctx.lineTo(mx - s * Math.cos(a - 0.4), my - s * Math.sin(a - 0.4));
+  ctx.lineTo(mx - s * Math.cos(a + 0.4), my - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+  // the pivot cap
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(CX, CY, 8, 0, TAU); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const faint = css('--faint'), ink = css('--ink'), mark = css('--mark');
+
+  drawWedge();
+  // outer TRUE ring — rotated by the heading; --ink cardinals
+  drawRing(head, R_OUTER, ink, faint, true);
+  // inner MAGNETIC ring — rotated an extra δ so its north sits off true; --mark
+  drawRing(head + decl, R_INNER, mark, faint, true);
+  drawLubber();
+  drawNeedle();
+
+  // quiet ring labels
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('outer: true ring', 30, 40);
+  ctx.fillStyle = mark;
+  ctx.fillText('inner: magnetic ring', 30, 66);
+}
+
+// --- the readings at the lubber line ------------------------------------
+// true bearing = heading (the true ring's bearing under the lubber line).
+// magnetic bearing = (true − δ) mod 360. their difference IS the declination.
+function updateReadout() {
+  const trueB = mod360(head);
+  const magB = mod360(trueB - decl);   // VERIFY: magnetic = true − declination
+  const side = decl > 0 ? 'E' : decl < 0 ? 'W' : '—';
+  const declTxt = decl === 0 ? '0°' : Math.abs(decl) + '° ' + side;
+
+  const agonic = decl === 0;
+  const regime = agonic
+    ? 'agonic — compass points true, rings coincide'
+    : 'magnetic = true − declination  (' + magB.toFixed(0) + '° = ' + trueB.toFixed(0) + '° − (' + decl + '°))';
+
+  readout.innerHTML =
+    'declination <b>' + declTxt + '</b> &nbsp;·&nbsp; '
+    + 'heading <b>' + trueB.toFixed(0) + '°</b>'
+    + '<br>true bearing <b>' + trueB.toFixed(0) + '°</b> &nbsp;·&nbsp; '
+    + 'magnetic bearing <b>' + magB.toFixed(0) + '°</b>'
+    + '<br><span id="regime">' + regime + '</span>';
+}
+
+function refresh() {
+  const side = decl > 0 ? 'E' : decl < 0 ? 'W' : '';
+  declV.textContent = decl === 0 ? '0°' : Math.abs(decl) + side;
+  headV.textContent = mod360(head).toFixed(0) + '°';
+  updateReadout();
+}
+
+// slider changes take effect live. declination rotates the magnetic ring
+// relative to the true ring; heading rotates the whole rose under the lubber.
+declEl.oninput = () => { decl = +declEl.value; refresh(); };
+headEl.oninput = () => { head = +headEl.value; refresh(); };
+
+// --- the live loop: smooth redraw, state driven by the two sliders -------
+// no time integration — the compass is an angular instrument; the loop only
+// keeps the draw crisp. the invariant is the exact identity above, not a sim.
+function frame() {
+  draw();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

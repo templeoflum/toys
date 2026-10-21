@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>plumb bob</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>plumb bob</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">frame tilt &alpha;</span><input type="range" id="tilt" min="-3000" max="3000" value="0" step="1"><span class="val" id="tiltV"></span></div>
+    <div class="row"><span class="name">bob mass</span><input type="range" id="mass" min="20" max="240" value="120" step="1"><span class="val" id="massV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bSettle">let it settle</button>
+        <button id="bReset">plumb it</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">a weighted <b>bob</b> hangs on a <b>line</b> from a pivot. gravity pulls the line to <b>true vertical</b> &mdash; straight down &mdash; whatever the wall behind it does. lean the <b>frame</b> by &alpha; and the line does not follow it: the line stays plumb and the wall swings away from it. the <b>wedge</b> between the still line and the frame edge is the wall's lean, and it equals exactly the tilt you dialled in. the line seeks the fixed reference; you read the wall's deviation <b>from</b> it.<span class="cite">the plumb bob &middot; masons of antiquity &middot; gravity holds the line at true vertical, lean = frame tilt &middot; field: statics / gravimetry</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the plumb bob ------------------------------------------------------
+// a weighted bob hangs on a line from a pivot. gravity pulls the line so it
+// points straight DOWN — true vertical — and it holds there no matter how
+// the frame (wall) behind it is tilted. this is a NULL / REFERENCE gauge:
+// the line seeks a fixed reference (vertical) and you read the frame's
+// deviation FROM it. the frame edge is rotated by the tilt α; the plumb line
+// is NOT — its screen angle is a constant (straight down). so the wedge
+// between the line and the frame edge is exactly the frame's lean:
+//   lean = α        (line angle fixed at vertical; wedge = frame_tilt)
+// VERIFY (load-bearing): the plumb line's screen direction is CONSTANT
+// (the down vector, +90° from the horizontal in screen space) for every α;
+// the drawn frame edge rotates by α about the pivot; the measured wedge
+// between them — computed as (frame edge angle − line angle) — equals α
+// exactly. lean = 0 ⇔ α = 0: the frame edge lies along the plumb line, the
+// wall is plumb. the readout lean and the drawn wedge both come from this one
+// relation — that is the check. (in settle mode the bob SWINGS and damps to
+// vertical like a real pendulum; the readout lean stays the true α, the swing
+// is the transient toward the reference, never the reading.)
+
+// frame tilt slider is α×100 in degrees. mass slider sets the bob weight,
+// which changes the settle inertia/damping feel, never the resting vertical.
+let alphaDeg = 0;    // frame tilt α in degrees (the wall's lean)
+let mass = 120;      // bob mass (arbitrary units) — affects settling, not rest
+let settleMode = false;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const tiltEl = document.getElementById('tilt'), tiltV = document.getElementById('tiltV');
+const massEl = document.getElementById('mass'), massV = document.getElementById('massV');
+const readout = document.getElementById('readout').firstElementChild;
+const bSettle = document.getElementById('bSettle');
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const PAD = 30;
+
+// α in radians. the FRAME edge is drawn at this tilt from vertical; the plumb
+// line is drawn at a constant vertical (0 from vertical) — never at α.
+function alphaRad() { return alphaDeg * Math.PI / 180; }
+
+// --- the plumb line's live angle ----------------------------------------
+// lineAng is the line's departure from true vertical, measured at the pivot.
+// at rest it is 0 (dead plumb). in settle mode it is the transient swing that
+// damps to 0 — the pendulum finding the reference. the READOUT never uses
+// lineAng; the reading is always the frame tilt α. lineAng is drawing-only.
+let lineAng = 0;      // radians from vertical, drawing only (0 = plumb)
+let lineVel = 0;      // angular velocity, for the settle integrator
+
+// --- layout of the drawn scene ------------------------------------------
+// top band: the whole instrument — the pivot, the tilted frame (wall), and
+// the plumb line hanging dead vertical with the bob at its end. the wedge
+// between line and frame reads the lean.
+// bottom band: a close-up of the wedge — a protractor-style read of the angle
+// between the vertical plumb line and the frame edge.
+const SCENE_TOP = 40, SCENE_H = Math.round(H * 0.56);
+const READ_TOP = SCENE_TOP + SCENE_H + 60;
+const READ_H = H - READ_TOP - 50;
+
+// the pivot sits high-centre; the line hangs down from it to the bob.
+const PIV_X = Math.round(W * 0.5);
+const PIV_Y = SCENE_TOP + 70;
+const LINE_LEN = Math.round(SCENE_H * 0.66);   // pivot → bob line length
+
+// --- top band: pivot, tilted frame, and the dead-vertical plumb line ----
+// the frame (wall) is a bar rotated by α about the pivot — it leans with the
+// slider. the plumb line drops straight down from the same pivot (rotated by
+// lineAng, which is 0 at rest), carrying the bob. gravity arrow confirms the
+// line follows DOWN, not the wall. the wedge between them is shaded --mark.
+function drawScene() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const a = alphaRad();
+  const plumb = Math.abs(alphaDeg) < 0.005;
+
+  // the frame / wall — a filled bar hanging from the pivot, rotated by α.
+  // screen "down" is +y; a straight-down edge is the vector (0, +len). the
+  // frame edge is that vector rotated by α about the pivot (positive α leans
+  // the frame's foot to the screen right).
+  const fw = 40, fLen = LINE_LEN + 60;
+  ctx.save();
+  ctx.translate(PIV_X, PIV_Y);
+  ctx.rotate(a);
+  ctx.fillStyle = shade; ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.rect(-fw, 0, fw * 2, fLen); ctx.fill(); ctx.stroke();
+  // a couple of course lines up the wall so the tilt reads
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5;
+  for (let cy = 90; cy < fLen; cy += 120) {
+    ctx.beginPath(); ctx.moveTo(-fw, cy); ctx.lineTo(fw, cy); ctx.stroke();
+  }
+  ctx.restore();
+
+  // the shaded wedge between the plumb line (at lineAng, ~vertical) and the
+  // frame edge (at α), both measured from screen-down at the pivot. this is
+  // the lean made visible — its opening equals |α − lineAng| (= |α| at rest).
+  const downRef = Math.PI / 2;              // screen-down direction in atan2 terms
+  const angLine = downRef + lineAng;        // plumb line screen angle
+  const angFrame = downRef + a;             // frame edge screen angle
+  const wedgeR = LINE_LEN * 0.62;
+  ctx.fillStyle = pick;
+  ctx.beginPath();
+  ctx.moveTo(PIV_X, PIV_Y);
+  ctx.arc(PIV_X, PIV_Y, wedgeR, Math.min(angLine, angFrame), Math.max(angLine, angFrame));
+  ctx.closePath();
+  ctx.globalAlpha = 0.6; ctx.fill(); ctx.globalAlpha = 1;
+
+  // the plumb LINE — a thin taut line from pivot straight down (rotated by
+  // lineAng, which is 0 unless settling). this is the fixed reference; it does
+  // NOT rotate with the frame. drawn last so it sits over the wedge/frame.
+  const bx = PIV_X + Math.cos(angLine) * LINE_LEN;
+  const by = PIV_Y + Math.sin(angLine) * LINE_LEN;
+  ctx.strokeStyle = ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(PIV_X, PIV_Y); ctx.lineTo(bx, by); ctx.stroke();
+
+  // the pivot hub
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(PIV_X, PIV_Y, 9, 0, TAU); ctx.fill();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('pivot', PIV_X + 16, PIV_Y - 6);
+
+  // the bob — a teardrop weight at the line's end, mass scales its size
+  const br = 22 + (mass - 20) * 0.10;       // radius grows a little with mass
+  ctx.fillStyle = pick; ctx.strokeStyle = plumb ? mark : ink; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(bx, by - br * 0.6);            // shoulder
+  ctx.lineTo(bx - br * 0.7, by);
+  ctx.lineTo(bx, by + br * 1.5);            // point (the tip that marks the spot)
+  ctx.lineTo(bx + br * 0.7, by);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  // the gravity arrow beside the bob — confirms the line points DOWN, not
+  // along the wall. always vertical, whatever α is.
+  ctx.strokeStyle = faint; ctx.fillStyle = faint; ctx.lineWidth = 2;
+  const gx = bx + 90;
+  ctx.beginPath(); ctx.moveTo(gx, by - 60); ctx.lineTo(gx, by + 40); ctx.stroke();
+  arrowHead(gx, by + 40, 0, 1, faint);
+  ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('g', gx + 10, by - 20);
+
+  // a faint dashed TRUE-VERTICAL reference through the pivot, so the line's
+  // constancy is legible even mid-swing.
+  ctx.strokeStyle = faint; ctx.lineWidth = 1; ctx.setLineDash([8, 8]);
+  ctx.beginPath(); ctx.moveTo(PIV_X, PIV_Y); ctx.lineTo(PIV_X, PIV_Y + LINE_LEN + 40); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.textAlign = 'center';
+  ctx.fillText('true vertical', PIV_X, PIV_Y + LINE_LEN + 66);
+
+  // frame + line labels
+  ctx.fillStyle = ink; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('frame edge (tilted α)', PIV_X + 120, PIV_Y + 40);
+  ctx.fillStyle = plumb ? faint : mark; ctx.textAlign = 'right';
+  ctx.fillText('plumb line', PIV_X - 120, PIV_Y + 40);
+}
+
+// --- bottom band: the protractor read of the lean -----------------------
+// a graduated arc centred on a pivot: the vertical plumb line drops at 0, the
+// frame edge sits at α, and the wedge between them — the lean — is read off
+// the scale. the arc angle IS α (line fixed at vertical), so the number here
+// and the slider agree to the digit.
+function drawRead() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark');
+
+  const cx = Math.round(W * 0.5);
+  const cy = READ_TOP + Math.round(READ_H * 0.30);
+  const R = Math.round(READ_H * 0.62);
+  const a = alphaRad();
+  const plumb = Math.abs(alphaDeg) < 0.005;
+
+  // frame + caption
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD + 20, READ_TOP, W - 2 * (PAD + 20), READ_H);
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('the wedge — plumb line at 0, frame edge at α, the lean between', PAD + 32, READ_TOP - 14);
+
+  // graduated arc spanning ±30° about straight-down
+  const SPAN = 30 * Math.PI / 180;
+  const down = Math.PI / 2;
+  ctx.strokeStyle = faint; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, R, down - SPAN, down + SPAN); ctx.stroke();
+  // ticks every 5°, major/labelled every 15°
+  ctx.font = '16px "Courier New", monospace';
+  for (let deg = -30; deg <= 30; deg += 5) {
+    const ang = down + deg * Math.PI / 180;
+    const major = (deg % 15 === 0);
+    const r0 = R - (major ? 24 : 12);
+    ctx.strokeStyle = faint; ctx.lineWidth = major ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(cx + r0 * Math.cos(ang), cy + r0 * Math.sin(ang));
+    ctx.lineTo(cx + R * Math.cos(ang), cy + R * Math.sin(ang));
+    ctx.stroke();
+    if (major) {
+      ctx.fillStyle = faint; ctx.textAlign = 'center';
+      ctx.fillText((deg > 0 ? '+' : '') + deg + '°',
+        cx + (R + 22) * Math.cos(ang), cy + (R + 22) * Math.sin(ang) + 6);
+    }
+  }
+
+  // the plumb line — always straight down (0 on the scale). the reference.
+  ctx.strokeStyle = plumb ? mark : ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + R); ctx.stroke();
+  ctx.fillStyle = ink; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('plumb', cx, cy + R + 24);
+
+  // the frame edge — at α, clamped to the ±30° scale for the drawing (the
+  // readout lean stays the true α). the wedge to the plumb line is the lean.
+  const aDraw = Math.max(-SPAN, Math.min(SPAN, a));
+  const fang = down + aDraw;
+  ctx.strokeStyle = ink; ctx.lineWidth = 3; ctx.setLineDash([10, 6]);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + R * Math.cos(fang), cy + R * Math.sin(fang)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = ink;
+  ctx.fillText('frame', cx + (R + 10) * Math.cos(fang), cy + (R + 10) * Math.sin(fang) + 6);
+
+  // the wedge fill between plumb (down) and frame edge
+  ctx.fillStyle = css('--pick');
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, R * 0.5, Math.min(down, fang), Math.max(down, fang));
+  ctx.closePath(); ctx.globalAlpha = 0.6; ctx.fill(); ctx.globalAlpha = 1;
+
+  // the lean number at the apex
+  const clamped = Math.abs(a) > SPAN + 1e-9;
+  ctx.fillStyle = plumb ? mark : mark; ctx.font = '24px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText(plumb ? 'PLUMB  (lean = 0°)' : ('lean = ' + Math.abs(alphaDeg).toFixed(2) + '°'
+      + (alphaDeg > 0 ? '  (frame leans right)' : '  (frame leans left)')
+      + (clamped ? '  — arc clamped' : '')),
+    cx + R + 40, cy);
+
+  // the identity, quietly stated
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace';
+  ctx.fillText('lean = frame tilt α   (plumb line fixed at true vertical)', PAD + 32, READ_TOP + READ_H - 18);
+}
+
+// a filled arrowhead at (x,y) pointing along unit (dx,dy)
+function arrowHead(x, y, dx, dy, colour) {
+  const s = 13, ang = Math.atan2(dy, dx);
+  ctx.fillStyle = colour;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(ang - 0.4), y - s * Math.sin(ang - 0.4));
+  ctx.lineTo(x - s * Math.cos(ang + 0.4), y - s * Math.sin(ang + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawScene();
+  drawRead();
+}
+
+// --- regime read: plumb vs leaning --------------------------------------
+function regimeOf() {
+  if (Math.abs(alphaDeg) < 0.005) return 'plumb — frame edge lies along the line, wall is true vertical';
+  return alphaDeg > 0
+    ? 'leaning — frame tilts right of vertical, the wedge opens to the right'
+    : 'leaning — frame tilts left of vertical, the wedge opens to the left';
+}
+
+function updateReadout() {
+  const plumb = Math.abs(alphaDeg) < 0.005;
+  const lean = Math.abs(alphaDeg);
+  readout.innerHTML =
+    'frame tilt α <b>' + alphaDeg.toFixed(2) + '°</b> &nbsp;·&nbsp; '
+    + 'bob mass <b>' + mass + '</b>'
+    + '<br>plumb line angle from vertical <b>0.00°</b> (fixed — gravity holds it down)'
+    + '<br>lean = |α| = <b>' + lean.toFixed(2) + '°</b>'
+    + (plumb ? ' &nbsp;·&nbsp; <b>PLUMB</b>' : '')
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  tiltV.textContent = alphaDeg.toFixed(2) + '°';
+  massV.textContent = String(mass);
+  updateReadout();
+}
+
+// sliders take effect live. frame tilt is α×100 (degrees). when NOT settling
+// the line snaps to dead vertical; in settle mode it swings and damps there.
+tiltEl.oninput = () => {
+  alphaDeg = tiltEl.value / 100;
+  if (!settleMode) { lineAng = 0; lineVel = 0; }
+  refresh();
+};
+massEl.oninput = () => { mass = +massEl.value; refresh(); };
+
+// let it settle — nudge the bob off vertical and watch the pendulum damp back
+// to plumb. this is the transient toward the reference; the reading (lean = α)
+// is unchanged by it. heavier mass → slower, longer swing.
+bSettle.onclick = () => {
+  settleMode = true;
+  bSettle.classList.add('on');
+  lineAng = 0.5;                    // kick the bob ~29° off vertical
+  lineVel = 0;
+};
+
+// plumb it — clear the tilt to 0 and snap the line dead vertical (rest state).
+bReset.onclick = () => {
+  alphaDeg = 0; tiltEl.value = 0;
+  settleMode = false; bSettle.classList.remove('on');
+  lineAng = 0; lineVel = 0;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop ------------------------------------------------------
+// at rest the loop just repaints. in settle mode it integrates a damped
+// pendulum for the DRAWING line angle only: angular accel = −(g/L)·sin(θ)
+// − c·ω, so the bob swings and damps to θ = 0 (true vertical). mass sets the
+// damping feel (heavier = lighter relative damping = more swings). the readout
+// lean stays the true α throughout — the swing is transient, never the reading.
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05;          // guard against tab-switch jumps
+
+  if (settleMode) {
+    const wn2 = 24;                  // (g/L) analogue — swing stiffness
+    const damp = 1.6 * (120 / mass); // heavier bob → less relative damping
+    // a couple of substeps keep the integrator stable at this stiffness
+    for (let s = 0; s < 4; s++) {
+      const h = dt / 4;
+      const acc = -wn2 * Math.sin(lineAng) - damp * lineVel;
+      lineVel += acc * h;
+      lineAng += lineVel * h;
+    }
+    // settled? snap to dead plumb and drop back to rest mode.
+    if (Math.abs(lineAng) < 0.002 && Math.abs(lineVel) < 0.01) {
+      lineAng = 0; lineVel = 0; settleMode = false; bSettle.classList.remove('on');
+    }
+  }
+
+  draw();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

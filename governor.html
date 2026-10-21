@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>governor</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 6rem; text-align: right; }
+  .row span.val { width: 3rem; }
+  input[type=range] { accent-color: var(--ink); width: min(460px, 78vw); }
+  .modes { display: flex; gap: .4rem; }
+  .modes button {
+    font-family: 'Courier New', monospace; font-size: .78rem;
+    color: #6d6653; background: var(--paper);
+    border: 1px solid var(--faint); border-radius: 2px;
+    padding: .28rem .7rem; cursor: pointer; letter-spacing: .03em;
+  }
+  .modes button.on { color: var(--ink); background: var(--pick); border-color: var(--pick); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+  .hint .cite { display: block; margin-top: .6rem; font-style: normal; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+  <h1>governor</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">speed &omega;</span><input type="range" id="rpm" min="0" max="320" value="140" step="1"><span class="val" id="rpmV"></span></div>
+    <div class="row"><span class="name">arm length L</span><input type="range" id="arm" min="60" max="180" value="120" step="1"><span class="val" id="armV"></span></div>
+    <div class="row"><span class="name">&nbsp;</span>
+      <span class="modes">
+        <button id="bReset">idle</button>
+      </span>
+    </div>
+  </div>
+  <canvas id="cv" width="1720" height="1000"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">two heavy <b>flyballs</b> hang from a spinning vertical <b>spindle</b> on hinged arms. spin it faster and the balls fly <b>outward</b> and rise, swinging up to the angle where gravity and the whirl balance: <b>cos&theta; = g / (&omega;&sup2;L)</b>. the vertical drop below the pivot, h = g/&omega;&sup2;, shrinks as speed rises. the rising balls lift a <b>collar</b> that closes a <b>throttle</b> &mdash; more speed cuts more fuel, so the engine holds one steady speed. negative feedback.<span class="cite">the centrifugal (Watt) governor &middot; James Watt &amp; Matthew Boulton 1788 &middot; cos&theta; = g/(&omega;&sup2;L), rising balls close the throttle &middot; field: control / feedback governors</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+
+// --- the centrifugal (Watt) governor ------------------------------------
+// two flyballs hang from a spinning vertical spindle on hinged arms of
+// length L. spinning at angular speed ω, each ball settles at the angle θ
+// (from vertical) where gravity and the centrifugal effect balance. for the
+// conical pendulum this balance is:
+//   cos θ = g / (ω²·L)
+// equivalently the ball's vertical DROP below its pivot is h = L·cos θ = g/ω²,
+// independent of L and mass. faster ω → smaller cos θ → larger θ → the balls
+// rise (h shrinks). below ω_min = √(g/L) the bracket g/(ω²L) ≥ 1, cos θ is
+// pinned at 1, and the balls hang straight down (θ = 0). above that they open.
+//
+// VERIFY (load-bearing): θ = arccos( clamp( g/(ω²·L), 0, 1 ) ) EXACTLY.
+//   · slow spin (ω < √(g/L)): g/(ω²L) ≥ 1 → cos θ = 1 → θ = 0 (hang down)
+//   · fast spin: g/(ω²L) → 0 → θ → 90°; we DRAW-clamp θ to ≤ 80° (a real
+//     ball can't pass horizontal), but the readout θ stays the true arccos.
+//   · the drop h = g/ω² must equal L·cos θ to the digit (two routes, one h).
+// ω comes off the RPM slider through ω = RPM·2π/60 — the rad/s the formula
+// wants. (the classic trap: feed RPM straight in and every angle is wrong.)
+const G = 9.81;                       // m/s²
+const THETA_MAX = 80 * Math.PI / 180; // drawn ceiling — a ball can't pass horizontal
+
+// the arm length maps the slider (px) to metres so ω_min sits in a lively
+// part of the RPM range. L_px is the DRAWN arm length; L_m is the physics L.
+const M_PER_PX = 0.0018;              // arm-length scale: 120 px ≈ 0.216 m
+
+let rpm = 140;    // spindle speed, revolutions per minute (the slider)
+let L_px = 120;   // arm length in pixels (the slider) — drives L_m below
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rpmEl = document.getElementById('rpm'), rpmV = document.getElementById('rpmV');
+const armEl = document.getElementById('arm'), armV = document.getElementById('armV');
+const readout = document.getElementById('readout').firstElementChild;
+const bReset = document.getElementById('bReset');
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const PAD = 30;
+
+// --- the physics: RPM → ω (rad/s) → θ, the invariant --------------------
+// ω = RPM · 2π/60. the bracket g/(ω²L) is cos θ; clamp it into [0,1] so the
+// arccos is always defined (below ω_min it pins at 1 → θ = 0; it can never
+// exceed 1 for real ω, but the clamp guards ω → 0). θ is exact — no draw
+// clamp here; the drawing applies its own ≤ 80° cap separately.
+function armM() { return L_px * M_PER_PX; }               // physics arm length L (m)
+function omega() { return rpm * TAU / 60; }               // ω in rad/s (RPM → rad/s)
+function omegaMin() { return Math.sqrt(G / armM()); }     // √(g/L): balls start to open
+function cosTheta() {                                      // g/(ω²L), clamped to [0,1]
+  const w = omega();
+  if (w <= 1e-9) return 1;                                // dead stop → hangs straight down
+  return Math.max(0, Math.min(1, G / (w * w * armM())));
+}
+function theta() { return Math.acos(cosTheta()); }        // θ = arccos(...) — the invariant
+function dropH() { return G / (omega() * omega() || 1e-9); } // h = g/ω² (= L·cos θ)
+
+// --- collar height + throttle from θ ------------------------------------
+// the collar rides the arms: as the balls rise (θ grows) the collar is
+// pulled UP. we read the collar as its fractional lift, 0 (balls down) → 1
+// (balls at the 80° draw ceiling). the throttle valve CLOSES as the collar
+// rises — its open fraction is 1 − lift. that inversion IS the feedback.
+function collarLift() { return Math.min(1, theta() / THETA_MAX); }  // 0..1, up with speed
+function throttleOpen() { return 1 - collarLift(); }                // 1..0, closes as it rises
+
+// --- animated draw angle: the arms ease toward their balance ------------
+// thetaDrawn tracks the true θ (draw-clamped to ≤ 80°) so a slider move shows
+// the balls swinging out/in to the new balance rather than snapping there.
+let thetaDrawn = Math.min(theta(), THETA_MAX);
+let spin = 0;   // spindle rotation phase, advanced by ω each frame (visual only)
+
+// --- layout: spindle + flyballs up top, throttle linkage below ----------
+const SPINDLE_X = Math.round(W * 0.42);   // spindle axis x
+const PIVOT_Y = 150;                       // arm hinge point on the spindle
+const BASE_Y = H - 210;                    // spindle foot / bevel gear
+const ARM_DRAW = 300;                      // drawn arm length (px) at full scene scale
+
+// --- the spinning spindle, hinged arms, and flyballs --------------------
+// a vertical spindle spun about its axis. two arms hinge at PIVOT_Y and swing
+// out by θ; a flyball sits at each arm's end. a lower pair of links runs from
+// mid-arm down to the sliding collar — as the balls rise those links pull the
+// collar up. the ± sway of the two balls is mirrored across the axis.
+function drawGovernor() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade'), pick = css('--pick');
+
+  const th = thetaDrawn;
+  const cx = SPINDLE_X, py = PIVOT_Y;
+
+  // a faint width-wobble on the spindle to read the spin without a full 3D
+  const wob = 1 + 0.10 * Math.sin(spin);   // 0.9..1.1 — a breathing shaft width
+  const shaftW = 20 * wob;
+
+  // the vertical spindle shaft, pivot cap to base
+  ctx.strokeStyle = ink; ctx.lineWidth = shaftW;
+  ctx.beginPath(); ctx.moveTo(cx, py); ctx.lineTo(cx, BASE_Y); ctx.stroke();
+  ctx.lineWidth = 1;
+
+  // a spin tick — a mark stripe on the shaft that circles with the phase
+  ctx.strokeStyle = mark; ctx.lineWidth = 4;
+  const tickX = cx + shaftW * 0.5 * Math.cos(spin);
+  ctx.beginPath(); ctx.moveTo(tickX, py + 30); ctx.lineTo(tickX, py + 90); ctx.stroke();
+
+  // the pivot cap where the two arms hinge
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(cx, py, 16, 0, TAU); ctx.fill();
+
+  // the two flyball arms — mirror images, each swung out from vertical by θ.
+  // side = +1 (right), −1 (left). ball at arm end; a lower link to the collar.
+  const collarY = collarPosY(th);   // collar rides up as θ grows (see below)
+  for (const side of [1, -1]) {
+    // arm end (the flyball centre): down-and-out from the pivot by θ
+    const bx = cx + side * ARM_DRAW * Math.sin(th);
+    const by = py + ARM_DRAW * Math.cos(th);
+
+    // the upper arm — pivot to flyball
+    ctx.strokeStyle = ink; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.moveTo(cx, py); ctx.lineTo(bx, by); ctx.stroke();
+
+    // the lower link — from a point partway up the arm to the sliding collar
+    const lx = cx + side * ARM_DRAW * 0.42 * Math.sin(th);
+    const ly = py + ARM_DRAW * 0.42 * Math.cos(th);
+    const collarX = cx + side * 34;   // collar arms meet the shaft off-axis
+    ctx.strokeStyle = faint; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(collarX, collarY); ctx.stroke();
+
+    // the flyball — a heavy weight, its apparent width squashed by the spin
+    const br = 34;
+    ctx.fillStyle = pick;
+    ctx.beginPath(); ctx.ellipse(bx, by, br * (0.75 + 0.25 * wob), br, 0, 0, TAU); ctx.fill();
+    ctx.strokeStyle = ink; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(bx, by, br * (0.75 + 0.25 * wob), br, 0, 0, TAU); ctx.stroke();
+  }
+
+  // the vertical drop h = L·cos θ, drawn as a faint dashed drop from the pivot
+  // down to the flyball height — it visibly shrinks as the balls rise.
+  const dropY = py + ARM_DRAW * Math.cos(th);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1.5; ctx.setLineDash([7, 7]);
+  ctx.beginPath(); ctx.moveTo(cx - 4, py); ctx.lineTo(cx - 4, dropY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'right';
+  ctx.fillText('h', cx - 14, (py + dropY) / 2);
+
+  // the θ angle arc + label at the pivot (right arm)
+  ctx.strokeStyle = mark; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, py, 60, Math.PI / 2 - th, Math.PI / 2); ctx.stroke();
+  ctx.fillStyle = mark; ctx.font = '22px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('θ', cx + 40, py + 100);
+
+  // the sliding collar — a band around the shaft that rides up as θ grows
+  ctx.fillStyle = shade; ctx.strokeStyle = ink; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.rect(cx - 40, collarY - 14, 80, 28); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('collar', cx + 54, collarY + 6);
+
+  // a quiet spindle-foot marker (bevel gear taking drive from the engine)
+  ctx.strokeStyle = faint; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(cx - 46, BASE_Y); ctx.lineTo(cx + 46, BASE_Y); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '18px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('driven off the engine', cx, BASE_Y + 26);
+}
+
+// the collar's screen y from the draw angle: it rides from a LOW rest (balls
+// hanging, θ = 0) UP toward the pivot as θ grows to the 80° ceiling. this is
+// the geometric pull-up of the collar by the lower links.
+const COLLAR_LOW = BASE_Y - 90;   // collar rest, balls down
+const COLLAR_HIGH = PIVOT_Y + 210; // collar top, balls at ceiling
+function collarPosY(th) {
+  const lift = Math.min(1, th / THETA_MAX);         // 0..1
+  return COLLAR_LOW + (COLLAR_HIGH - COLLAR_LOW) * lift;
+}
+
+// --- the throttle valve, driven by the collar ---------------------------
+// a linkage carries the collar's lift to a butterfly throttle in the fuel/
+// steam pipe. as the collar RISES the valve CLOSES (open fraction 1 − lift).
+// this is the negative feedback: more speed → balls up → collar up → throttle
+// shut → less power → speed falls back. drawn to the right of the spindle.
+function drawThrottle() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'),
+        shade = css('--shade');
+
+  const open = throttleOpen();        // 1 fully open, 0 shut
+  const px = Math.round(W * 0.78);    // pipe centre x
+  const pipeTop = 260, pipeBot = H - 320, pipeW = 150;
+
+  // the pipe — fuel/steam to the engine, flowing downward
+  ctx.strokeStyle = ink; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(px - pipeW / 2, pipeTop); ctx.lineTo(px - pipeW / 2, pipeBot); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px + pipeW / 2, pipeTop); ctx.lineTo(px + pipeW / 2, pipeBot); ctx.stroke();
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('fuel / steam', px, pipeTop - 16);
+
+  // the butterfly valve plate at the pipe centre — a disc pivoting shut. when
+  // open it lies edge-on (thin); as it closes it turns face-on (blocks the bore).
+  const valveY = (pipeTop + pipeBot) / 2;
+  const plateAng = open * (Math.PI / 2);           // open → edge-on (90°), shut → 0
+  const half = pipeW / 2 - 6;
+  const ex = half * Math.cos(plateAng);            // projected half-width across bore
+  const ey = half * Math.sin(plateAng);            // projected half-height (edge lean)
+  ctx.strokeStyle = mark; ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(px - ex, valveY - ey); ctx.lineTo(px + ex, valveY + ey); ctx.stroke();
+  ctx.fillStyle = ink; ctx.beginPath(); ctx.arc(px, valveY, 7, 0, TAU); ctx.fill();
+
+  // flow arrows above the valve, thinning as it closes — a read of throughput
+  ctx.strokeStyle = shade; ctx.lineWidth = 3; ctx.fillStyle = shade;
+  const nFlow = Math.round(1 + open * 4);
+  for (let i = 0; i < nFlow; i++) {
+    const fx = px - pipeW / 2 + (pipeW) * (i + 0.5) / nFlow;
+    arrow(fx, pipeTop + 30, fx, pipeTop + 90);
+  }
+
+  // the linkage from the collar to the valve pivot — a rod that pulls the
+  // valve toward shut as the collar rises. drawn as a bent link.
+  const collarY = collarPosY(thetaDrawn);
+  ctx.strokeStyle = faint; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(SPINDLE_X + 40, collarY);
+  ctx.lineTo((SPINDLE_X + px) / 2, collarY - 40 * (1 - open));
+  ctx.lineTo(px - half - 20, valveY);
+  ctx.stroke();
+
+  // labels
+  ctx.fillStyle = open < 0.05 ? mark : faint;
+  ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'center';
+  ctx.fillText('throttle ' + (open < 0.05 ? 'SHUT' : (open > 0.95 ? 'wide open' : (open * 100).toFixed(0) + '% open')),
+               px, pipeBot + 34);
+  ctx.fillStyle = faint; ctx.font = 'italic 18px Georgia';
+  ctx.fillText('balls up → collar up → throttle closes', px, pipeBot + 62);
+}
+
+// a simple line arrow from (x0,y0) to (x1,y1) with a head at the end
+function arrow(x0, y0, x1, y1) {
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  arrowHead(x1, y1, Math.cos(a), Math.sin(a));
+}
+function arrowHead(x, y, dx, dy) {
+  const s = 12, a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.4), y - s * Math.sin(a - 0.4));
+  ctx.lineTo(x - s * Math.cos(a + 0.4), y - s * Math.sin(a + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawGovernor();
+  drawThrottle();
+}
+
+// --- regime read: hanging / opening / near-horizontal -------------------
+function regimeOf() {
+  const w = omega();
+  if (w < omegaMin() + 1e-6) return 'below √(g/L) — balls hang straight down, throttle wide open';
+  if (theta() > THETA_MAX - 1e-3) return 'near horizontal — balls at their ceiling, throttle shut';
+  return 'open — balls risen to balance, collar closing the throttle';
+}
+
+function updateReadout() {
+  const w = omega();                       // rad/s (RPM → rad/s)
+  const c = cosTheta();                    // g/(ω²L), clamped to [0,1]
+  const thDeg = theta() * 180 / Math.PI;   // true θ from arccos, degrees
+  const L = armM();
+  const hFormula = dropH();                // h = g/ω²
+  const hGeom = L * c;                     // L·cos θ — same drop, other route
+  readout.innerHTML =
+    'speed <b>' + rpm + ' RPM</b> = ω <b>' + w.toFixed(2) + ' rad/s</b> &nbsp;·&nbsp; '
+    + 'arm L <b>' + L.toFixed(3) + ' m</b>'
+    + '<br>cos θ = g/(ω²L) = ' + G + '/(' + w.toFixed(2) + '²·' + L.toFixed(3) + ') = <b>'
+    + c.toFixed(3) + '</b> &nbsp;·&nbsp; θ = arccos(...) = <b>' + thDeg.toFixed(1) + '°</b>'
+    + '<br>drop h = g/ω² = <b>' + hFormula.toFixed(3) + ' m</b> = L·cos θ = <b>' + hGeom.toFixed(3) + ' m</b>'
+    + '<br>collar lift <b>' + (collarLift() * 100).toFixed(0) + '%</b> &nbsp;·&nbsp; '
+    + 'throttle <b>' + (throttleOpen() * 100).toFixed(0) + '% open</b>'
+    + '<br><span id="regime">' + regimeOf() + '</span>';
+}
+
+function refresh() {
+  rpmV.textContent = rpm + '';
+  armV.textContent = L_px + '';
+  updateReadout();
+}
+
+// sliders take effect live — the true θ jumps and the drawn arms ease toward
+// it. RPM feeds ω = RPM·2π/60; arm length feeds L. the readout always reports
+// the exact θ = arccos(g/(ω²L)), not the eased draw angle.
+rpmEl.oninput = () => { rpm = +rpmEl.value; refresh(); };
+armEl.oninput = () => { L_px = +armEl.value; refresh(); };
+
+// idle — drop the speed to a slow spin so the balls hang down, valve open.
+bReset.onclick = () => {
+  rpm = 60; rpmEl.value = 60;
+  bReset.classList.add('on');
+  setTimeout(() => bReset.classList.remove('on'), 120);
+  refresh();
+};
+
+// --- the live loop: spin the spindle + ease the arms to balance ---------
+// the spin phase advances by ω each frame (visual whirl only). thetaDrawn
+// relaxes toward the true θ (draw-clamped to ≤ 80°) so slider moves show the
+// balls travelling out/in. the readout always reports the exact invariant θ.
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;                       // guard tab-switch jumps
+  spin += omega() * dt;                           // advance the whirl phase
+  const target = Math.min(theta(), THETA_MAX);    // draw target (≤ 80°)
+  thetaDrawn += (target - thetaDrawn) * Math.min(1, dt * 6);
+  draw();
+  updateReadout();
+  requestAnimationFrame(frame);
+}
+
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

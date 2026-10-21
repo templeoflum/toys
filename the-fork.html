@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the fork</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --shade: #e4dcc9;
+    --pick: #cfc5a8;
+    --mark: #b8603a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; font-family: 'Courier New', monospace; font-size: .8rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  input[type=range] { accent-color: var(--ink); width: min(520px, 82vw); }
+  canvas { width: min(860px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  #regime { color: var(--mark); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>the fork</h1>
+  <div class="row"><span class="name">growth</span><input type="range" id="r" min="2500" max="4000" value="3200"><span id="rV"></span></div>
+  <canvas id="cv" width="1720" height="1180"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">one rule, iterated: each year&rsquo;s population is <b>growth × x × (1&minus;x)</b> of the last. turn the <b>growth</b> knob up: the settled value splits in two, then four, then eight &mdash; and past a threshold it shatters into chaos, a value that never repeats. same simple rule, all the way from one steady number to noise. the diagram below is every ending at once.</div>
+
+<script>
+'use strict';
+
+const R_MIN = 2.5, R_MAX = 4.0;
+let r = 3.2;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rEl = document.getElementById('r'), rV = document.getElementById('rV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const W = cv.width, H = cv.height;
+const DIAG_TOP = 20, DIAG_H = Math.round(H * 0.62);
+const ORB_TOP = DIAG_H + 90, ORB_H = H - ORB_TOP - 20;
+const PAD = 30, PLOT_W = W - 2 * PAD;
+
+// the bifurcation diagram is fixed — render it once to an offscreen layer.
+const off = document.createElement('canvas');
+off.width = W; off.height = DIAG_H;
+function buildDiagram() {
+  const o = off.getContext('2d');
+  o.clearRect(0, 0, W, DIAG_H);
+  o.fillStyle = css('--ink');
+  o.globalAlpha = 0.16;
+  for (let px = 0; px < PLOT_W; px++) {
+    const rr = R_MIN + (px / PLOT_W) * (R_MAX - R_MIN);
+    let x = 0.5;
+    for (let i = 0; i < 220; i++) x = rr * x * (1 - x);   // burn transient
+    for (let i = 0; i < 220; i++) {
+      x = rr * x * (1 - x);
+      const py = (1 - x) * (DIAG_H - 2) + 1;
+      o.fillRect(PAD + px, py, 1, 1);
+    }
+  }
+  o.globalAlpha = 1;
+}
+
+// the orbit at a given r: values after the transient
+function orbit(rr, n) {
+  let x = 0.5;
+  for (let i = 0; i < 400; i++) x = rr * x * (1 - x);
+  const out = [];
+  for (let i = 0; i < n; i++) { x = rr * x * (1 - x); out.push(x); }
+  return out;
+}
+
+function period(vals) {
+  const eps = 1e-3;
+  for (let p = 1; p <= 16; p++) {
+    let ok = true;
+    for (let i = 0; i + p < vals.length; i++) {
+      if (Math.abs(vals[i] - vals[i + p]) > eps) { ok = false; break; }
+    }
+    if (ok) return p;
+  }
+  return 0;   // no small period -> chaos
+}
+
+function draw() {
+  const ink = css('--ink'), faint = css('--faint'), mark = css('--mark'), paper = css('--paper');
+  ctx.clearRect(0, 0, W, H);
+
+  // diagram
+  ctx.drawImage(off, 0, DIAG_TOP);
+  // frame + axis labels
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD, DIAG_TOP, PLOT_W, DIAG_H);
+  ctx.fillStyle = faint; ctx.font = '20px "Courier New", monospace'; ctx.textAlign = 'left';
+  ctx.fillText('growth  2.5', PAD + 4, DIAG_TOP + DIAG_H + 26);
+  ctx.textAlign = 'right';
+  ctx.fillText('4.0', PAD + PLOT_W - 4, DIAG_TOP + DIAG_H + 26);
+  ctx.textAlign = 'left';
+
+  // r-marker on the diagram
+  const rx = PAD + ((r - R_MIN) / (R_MAX - R_MIN)) * PLOT_W;
+  ctx.strokeStyle = mark; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(rx, DIAG_TOP - 6); ctx.lineTo(rx, DIAG_TOP + DIAG_H + 6); ctx.stroke();
+
+  // orbit strip: the actual sequence at this r
+  const vals = orbit(r, 90);
+  ctx.strokeStyle = faint; ctx.lineWidth = 1;
+  ctx.strokeRect(PAD, ORB_TOP, PLOT_W, ORB_H);
+  ctx.fillStyle = faint; ctx.font = '18px Georgia'; ctx.textAlign = 'left';
+  ctx.fillText('the sequence at this growth →', PAD + 6, ORB_TOP - 10);
+  ctx.textAlign = 'left';
+  // plot values as connected dots across the strip
+  ctx.strokeStyle = mark; ctx.lineWidth = 1.5; ctx.beginPath();
+  for (let i = 0; i < vals.length; i++) {
+    const x = PAD + (i / (vals.length - 1)) * PLOT_W;
+    const y = ORB_TOP + (1 - vals[i]) * (ORB_H - 2) + 1;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = mark;
+  for (let i = 0; i < vals.length; i++) {
+    const x = PAD + (i / (vals.length - 1)) * PLOT_W;
+    const y = ORB_TOP + (1 - vals[i]) * (ORB_H - 2) + 1;
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+  }
+
+  const p = period(vals);
+  const name = p === 0 ? 'chaos — it never repeats'
+    : p === 1 ? 'one steady value'
+    : p === 2 ? 'a 2-cycle — flips between two'
+    : p === 4 ? 'a 4-cycle'
+    : p === 8 ? 'an 8-cycle'
+    : 'a ' + p + '-cycle';
+  readout.innerHTML = 'growth <b>' + r.toFixed(3) + '</b> &mdash; <span id="regime">' + name + '</span>';
+}
+
+function refresh() {
+  rV.textContent = r.toFixed(3);
+  draw();
+}
+
+rEl.oninput = () => { r = rEl.value / 1000; refresh(); };
+buildDiagram();
+refresh();
+</script>
+</body>
+</html>

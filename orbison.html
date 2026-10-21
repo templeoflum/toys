@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orbison</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --mark: #b8603a;
+    --fan: #8a8474;
+    --square: #3a4750;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 1rem; }
+  .sliders { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.2rem; }
+  .row { display: flex; align-items: center; gap: .6rem; font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; }
+  .row span.name { width: 4.5rem; text-align: right; }
+  .row span.val { width: 12rem; }
+  input[type=range] { accent-color: var(--ink); width: min(400px, 74vw); }
+  canvas { width: min(600px, 96vw); height: auto; display: block; }
+  #readout { margin-top: 1.4rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.5rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>orbison</h1>
+  <div class="sliders">
+    <div class="row"><span class="name">rays</span><input type="range" id="rays" min="0" max="100" value="100"><span class="val" id="raysV"></span></div>
+    <div class="row"><span class="name">true</span><input type="range" id="true" min="0" max="100" value="0"><span class="val" id="trueV"></span></div>
+  </div>
+  <canvas id="cv" width="900" height="720"></canvas>
+  <div id="readout"><span>&nbsp;</span></div>
+  <div class="hint">the slate figure is a perfect square. laid over a burst of rays, its sides seem to bow inward and its corners to splay &mdash; the eye warps the shape to fit the radial pattern behind it. fade the <b>rays</b> to nothing and the square stands plainly square; or raise <b>true</b> to run a straightedge out along each side.</div>
+
+<script>
+'use strict';
+
+const CX = 450, CY = 340;
+const S = 230;                          // the square's side — a true square
+const NSPOKE = 72;
+
+let rays = 1;   // 0 => no fan, the square is plainly square
+let tru = 0;    // proof: extend each side into a straightedge
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const rEl = document.getElementById('rays'), rV = document.getElementById('raysV');
+const tEl = document.getElementById('true'), tV = document.getElementById('trueV');
+const readout = document.getElementById('readout').firstElementChild;
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+const L = CX - S / 2, R = CX + S / 2, T = CY - S / 2, B = CY + S / 2;
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // the radial fan
+  if (rays > 0.005) {
+    ctx.save();
+    ctx.globalAlpha = rays;
+    ctx.strokeStyle = css('--fan'); ctx.lineWidth = 1.3;
+    const RR = 900;
+    for (let i = 0; i < NSPOKE; i++) {
+      const a = i * 2 * Math.PI / NSPOKE;
+      line(CX, CY, CX + RR * Math.cos(a), CY + RR * Math.sin(a));
+    }
+    ctx.restore();
+  }
+
+  // the true square, drawn on top
+  ctx.strokeStyle = css('--square'); ctx.lineWidth = 4; ctx.lineJoin = 'miter';
+  ctx.strokeRect(L, T, S, S);
+
+  // proof: a straightedge run out along each side, past both ends
+  if (tru > 0) {
+    ctx.save();
+    ctx.globalAlpha = tru;
+    ctx.strokeStyle = css('--mark'); ctx.lineWidth = 2; ctx.setLineDash([7, 6]);
+    const e = 90;                       // how far the straightedge overruns each side
+    line(L - e, T, R + e, T);           // top
+    line(L - e, B, R + e, B);           // bottom
+    line(L, T - e, L, B + e);           // left
+    line(R, T - e, R, B + e);           // right
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  readout.innerHTML = rays < 0.02
+    ? 'no rays &mdash; a plainly square square, straight sides, square corners.'
+    : tru > 0.98
+      ? 'each side runs out along a straight line &mdash; the square is true.'
+      : 'the sides look bowed, but every side is straight and every corner square.';
+}
+
+function refresh() {
+  rV.textContent = rays < 0.02 ? 'off — square only' : Math.round(rays * 100) + '%';
+  tV.textContent = tru > 0.98 ? 'straightedges on' : tru > 0 ? 'rising' : 'off';
+  draw();
+}
+
+rEl.oninput = () => { rays = +rEl.value / 100; refresh(); };
+tEl.oninput = () => { tru = +tEl.value / 100; refresh(); };
+refresh();
+</script>
+</body>
+</html>

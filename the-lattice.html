@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the lattice</title>
+<style>
+  :root {
+    --paper: #f6f2e8;
+    --ink: #2b2a26;
+    --faint: #b9b2a2;
+    --edge: #cfc7b4;
+    --pick: #b8603a;
+    --meet: #b8603a;
+    --join: #4a6b8a;
+    --node: #efeadd;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1rem 3rem;
+  }
+  h1 { font-size: 1.15rem; font-weight: normal; letter-spacing: .12em; margin-bottom: .4rem; }
+  .legend { font-family: 'Courier New', monospace; font-size: .78rem; color: #6d6653; margin-bottom: 1rem; }
+  .legend b { font-weight: normal; }
+  .legend .m { color: var(--meet); } .legend .j { color: var(--join); }
+  canvas { width: min(500px, 94vw); height: auto; display: block; cursor: pointer; }
+  #readout { margin-top: 1.2rem; text-align: center; line-height: 1.9; font-family: 'Courier New', monospace; font-size: .92rem; color: #6d6653; max-width: 40rem; min-height: 3.6rem; }
+  #readout b { font-weight: normal; color: var(--ink); }
+  .hint { margin-top: 1.3rem; font-style: italic; font-size: .8rem; color: var(--faint); max-width: 38rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>the lattice</h1>
+  <div class="legend">the divisors of 12, ordered by "divides". <b class="m">∧ meet</b> &nbsp; <b class="j">∨ join</b></div>
+  <canvas id="cv" width="500" height="520"></canvas>
+  <div id="readout"><span>click two elements.</span></div>
+  <div class="hint">every pair of elements has a single <b>meet</b> (their greatest lower bound &mdash; here the largest number dividing both) and a single <b>join</b> (least upper bound &mdash; the smallest both divide into). that both always exist, and are unique, is what makes this order a <i>lattice</i> &mdash; the structure the whole house is named for. click any two nodes; their meet and join light up. click a third to start over.</div>
+
+<script>
+'use strict';
+
+const NR = 30;
+// divisors of 12, placed as a Hasse diagram (bottom = 1, top = 12)
+const NODES = [
+  { v: 1,  x: 250, y: 460 },
+  { v: 2,  x: 160, y: 350 }, { v: 3, x: 340, y: 350 },
+  { v: 4,  x: 160, y: 210 }, { v: 6, x: 340, y: 210 },
+  { v: 12, x: 250, y: 90 },
+];
+const EDGES = [[1, 2], [1, 3], [2, 4], [2, 6], [3, 6], [4, 12], [6, 12]];
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const readout = document.getElementById('readout').firstElementChild;
+
+let picks = [];   // up to two divisor values
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function node(v) { return NODES.find(n => n.v === v); }
+function gcd(a, b) { return b ? gcd(b, a % b) : a; }
+function lcm(a, b) { return a * b / gcd(a, b); }
+
+function draw() {
+  ctx.fillStyle = css('--paper');
+  ctx.fillRect(0, 0, 500, 520);
+
+  let meet = null, join = null;
+  if (picks.length === 2) { meet = gcd(picks[0], picks[1]); join = lcm(picks[0], picks[1]); }
+
+  // edges
+  ctx.strokeStyle = css('--edge'); ctx.lineWidth = 2.5;
+  for (const [a, b] of EDGES) {
+    const na = node(a), nb = node(b);
+    ctx.beginPath(); ctx.moveTo(na.x, na.y); ctx.lineTo(nb.x, nb.y); ctx.stroke();
+  }
+
+  // nodes
+  for (const n of NODES) {
+    const picked = picks.includes(n.v);
+    const isMeet = n.v === meet, isJoin = n.v === join;
+    ctx.beginPath(); ctx.arc(n.x, n.y, NR, 0, Math.PI * 2);
+    ctx.fillStyle = css('--node'); ctx.fill();
+    ctx.lineWidth = (picked || isMeet || isJoin) ? 5 : 2;
+    ctx.strokeStyle = isMeet ? css('--meet') : isJoin ? css('--join') : picked ? css('--pick') : css('--faint');
+    ctx.stroke();
+    ctx.fillStyle = css('--ink');
+    ctx.font = '20px Georgia'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(n.v, n.x, n.y);
+    // meet/join badge
+    if (isMeet || isJoin) {
+      ctx.font = '19px Georgia';
+      ctx.fillStyle = isMeet ? css('--meet') : css('--join');
+      ctx.fillText(isMeet ? '∧' : '∨', n.x + NR + 12, n.y);
+    }
+  }
+
+  if (picks.length === 2) {
+    readout.innerHTML = '<b>' + picks[0] + '</b> ∧ <b>' + picks[1] + '</b> = <b>' + meet +
+      '</b> (greatest common divisor) &nbsp;·&nbsp; <b>' + picks[0] + '</b> ∨ <b>' + picks[1] +
+      '</b> = <b>' + join + '</b> (least common multiple)';
+  } else if (picks.length === 1) {
+    readout.innerHTML = 'picked <b>' + picks[0] + '</b> — click one more.';
+  } else {
+    readout.innerHTML = 'click two elements.';
+  }
+}
+
+cv.addEventListener('click', (e) => {
+  const rect = cv.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (cv.width / rect.width);
+  const y = (e.clientY - rect.top) * (cv.height / rect.height);
+  const hit = NODES.find(n => (n.x - x) ** 2 + (n.y - y) ** 2 <= (NR + 6) ** 2);
+  if (!hit) return;
+  if (picks.length === 2) picks = [];
+  if (!picks.includes(hit.v)) picks.push(hit.v);
+  draw();
+});
+
+draw();
+</script>
+</body>
+</html>
